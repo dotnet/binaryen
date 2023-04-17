@@ -1,0 +1,13 @@
+Index: binaryen/CMakeLists.txt
+===================================================================
+--- binaryen.orig/CMakeLists.txt
++++ binaryen/CMakeLists.txt
+@@ -130,6 +130,8 @@ ELSE()
+   ADD_COMPILE_FLAG("-Wno-unused-parameter")
+   ADD_COMPILE_FLAG("-fno-omit-frame-pointer")
+   ADD_COMPILE_FLAG("-Wswitch") # we explicitly expect this in the code
++  ADD_COMPILE_FLAG("-Wno-error=deprecated-declarations")
++  ADD_COMPILE_FLAG("-Wno-error=bitwise-instead-of-logical")
+   IF(WIN32)
+     ADD_COMPILE_FLAG("-D_GNU_SOURCE")
+     ADD_LINK_FLAG("-Wl,--stack,8388608")
