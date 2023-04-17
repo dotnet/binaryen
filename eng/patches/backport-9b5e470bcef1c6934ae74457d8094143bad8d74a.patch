@@ -1,0 +1,110 @@
+From 9b5e470bcef1c6934ae74457d8094143bad8d74a Mon Sep 17 00:00:00 2001
+From: Derek Schuff <dschuff@chromium.org>
+Date: Tue, 21 May 2019 16:08:30 -0700
+Subject: [PATCH] Don't use colons in filenames (#2134)
+
+Windows filenames can't contain colons. Use @ instead for passing arguments to passes.
+---
+ src/passes/ExtractFunction.cpp                              | 2 +-
+ src/tools/optimization-options.h                            | 6 +++---
+ ...ct:foo.txt => extract-function_pass-arg=extract@foo.txt} | 0
+ ...:foo.wast => extract-function_pass-arg=extract@foo.wast} | 0
+ 4 files changed, 4 insertions(+), 4 deletions(-)
+ rename test/passes/{extract-function_pass-arg=extract:foo.txt => extract-function_pass-arg=extract@foo.txt} (100%)
+ rename test/passes/{extract-function_pass-arg=extract:foo.wast => extract-function_pass-arg=extract@foo.wast} (100%)
+
+Index: binaryen/src/passes/ExtractFunction.cpp
+===================================================================
+--- binaryen.orig/src/passes/ExtractFunction.cpp
++++ binaryen/src/passes/ExtractFunction.cpp
+@@ -25,7 +25,7 @@ namespace wasm {
+ 
+ struct ExtractFunction : public Pass {
+   void run(PassRunner* runner, Module* module) override {
+-    Name name = runner->options.getArgument("extract", "ExtractFunction usage:  wasm-opt --pass-arg=extract:FUNCTION_NAME");
++    Name name = runner->options.getArgument("extract", "ExtractFunction usage:  wasm-opt --pass-arg=extract@FUNCTION_NAME");
+     std::cerr << "extracting " << name << "\n";
+     bool found = false;
+     for (auto& func : module->functions) {
+Index: binaryen/src/tools/optimization-options.h
+===================================================================
+--- binaryen.orig/src/tools/optimization-options.h
++++ binaryen/src/tools/optimization-options.h
+@@ -102,12 +102,12 @@ struct OptimizationOptions : public Tool
+                 [this](Options*, const std::string&) {
+                   passOptions.lowMemoryUnused = true;
+                 })
+-           .add("--pass-arg", "-pa", "An argument passed along to optimization passes being run. Must be in the form KEY:VALUE",
++           .add("--pass-arg", "-pa", "An argument passed along to optimization passes being run. Must be in the form KEY@VALUE",
+                 Options::Arguments::N,
+                 [this](Options*, const std::string& argument) {
+-                  auto colon = argument.find(':');
++                  auto colon = argument.find('@');
+                   if (colon == std::string::npos) {
+-                    Fatal() << "--pass-arg value must be in the form of KEY:VALUE";
++                    Fatal() << "--pass-arg value must be in the form of KEY@VALUE";
+                   }
+                   auto key = argument.substr(0, colon);
+                   auto value = argument.substr(colon + 1);
+Index: binaryen/test/passes/extract-function_pass-arg=extract:foo.txt
+===================================================================
+--- binaryen.orig/test/passes/extract-function_pass-arg=extract:foo.txt
++++ /dev/null
+@@ -1,9 +0,0 @@
+-(module
+- (type $0 (func))
+- (import "env" "bar" (func $bar))
+- (import "env" "other" (func $other))
+- (export "foo" (func $foo))
+- (func $foo (; 2 ;) (type $0)
+-  (call $bar)
+- )
+-)
+Index: binaryen/test/passes/extract-function_pass-arg=extract:foo.wast
+===================================================================
+--- binaryen.orig/test/passes/extract-function_pass-arg=extract:foo.wast
++++ /dev/null
+@@ -1,12 +0,0 @@
+-(module
+-  (func $foo
+-    (call $bar)
+-  )
+-  (func $bar
+-    (call $foo)
+-  )
+-  (func $other
+-    (drop (i32.const 1))
+-  )
+-)
+-
+Index: binaryen/test/passes/extract-function_pass-arg=extract@foo.txt
+===================================================================
+--- /dev/null
++++ binaryen/test/passes/extract-function_pass-arg=extract@foo.txt
+@@ -0,0 +1,9 @@
++(module
++ (type $0 (func))
++ (import "env" "bar" (func $bar))
++ (import "env" "other" (func $other))
++ (export "foo" (func $foo))
++ (func $foo (; 2 ;) (type $0)
++  (call $bar)
++ )
++)
+Index: binaryen/test/passes/extract-function_pass-arg=extract@foo.wast
+===================================================================
+--- /dev/null
++++ binaryen/test/passes/extract-function_pass-arg=extract@foo.wast
+@@ -0,0 +1,12 @@
++(module
++  (func $foo
++    (call $bar)
++  )
++  (func $bar
++    (call $foo)
++  )
++  (func $other
++    (drop (i32.const 1))
++  )
++)
++
