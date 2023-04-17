@@ -132,6 +132,7 @@ ELSE()
   ADD_COMPILE_FLAG("-Wswitch") # we explicitly expect this in the code
   ADD_COMPILE_FLAG("-Wno-error=deprecated-declarations")
   ADD_COMPILE_FLAG("-Wno-error=bitwise-instead-of-logical")
+  ADD_COMPILE_FLAG("-Wno-error=unknown-warning-option")
   IF(WIN32)
     ADD_COMPILE_FLAG("-D_GNU_SOURCE")
     ADD_LINK_FLAG("-Wl,--stack,8388608")
