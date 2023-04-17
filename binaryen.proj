@@ -33,9 +33,6 @@
       <_BuildArgs Include="-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON" />
       <_BuildArgs Include="-DCMAKE_INSTALL_PREFIX=$(BinaryenInstallDir)" />
       <_BuildArgs Include="-DCMAKE_INSTALL_DO_STRIP:BOOL=ON" />
-      <!-- Select generator platform for VS generator -->
-      <_BuildArgs Condition="'$(CMakeGenerator)' == 'Ninja' and '$(TargetArchitecture)' == 'x64'" Include="-A x64" />
-      <_BuildArgs Condition="'$(CMakeGenerator)' == 'Ninja' and '$(TargetArchitecture)' == 'arm64'" Include="-A ARM64" />
     </ItemGroup>
     <PropertyGroup>
       <_CmakeArgs>$(_SetupEnvironment) cmake $(ProjectDir) -G "$(CMakeGenerator)" @(_BuildArgs->'%(Identity)',' ')</_CmakeArgs>
