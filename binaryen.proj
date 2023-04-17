@@ -32,7 +32,7 @@
 
   <Target Name="ReallyBuild" BeforeTargets="Build">
     <PropertyGroup>
-      <_CommonCFlags Condition="'$(BuildOS)' == 'Linux' and '$(ClangTarget)' != ''">--target=$(ClangTarget) --sysroot=$(ROOTFS_DIR)</_CommonCFlags>
+      <_CommonCFlags Condition="'$(BuildOS)' == 'Linux' and '$(ClangTarget)' != ''">--target=$(ClangTarget) --gcc-toolchain=$(ROOTFS_DIR) --sysroot=$(ROOTFS_DIR)</_CommonCFlags>
       <_CommonCFlags Condition="'$(BuildOS)' == 'OSX' and '$(TargetArchitecture)' == 'arm64'">--target=aarch64-apple-darwin</_CommonCFlags>
       <_CrossCFlags>$(_CommonCFlags)</_CrossCFlags>
       <_CrossCFlags Condition="'$(BuildOS)' == 'Linux'">-fuse-ld=lld  $(_CommonCFlags)</_CrossCFlags>
