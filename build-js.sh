@@ -73,7 +73,7 @@ BINARYEN_BIN="$PWD/bin"
 
 echo "generate embedded intrinsics module"
 
-python $BINARYEN_SCRIPTS/embedwast.py $BINARYEN_SRC/passes/wasm-intrinsics.wast $BINARYEN_SRC/passes/WasmIntrinsics.cpp
+python3 $BINARYEN_SCRIPTS/embedwast.py $BINARYEN_SRC/passes/wasm-intrinsics.wast $BINARYEN_SRC/passes/WasmIntrinsics.cpp
 
 echo "building shared bitcode"
 

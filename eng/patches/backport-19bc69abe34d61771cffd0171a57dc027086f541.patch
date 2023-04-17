@@ -1,0 +1,38 @@
+From 19bc69abe34d61771cffd0171a57dc027086f541 Mon Sep 17 00:00:00 2001
+From: Markus Koschany <apoleon@users.noreply.github.com>
+Date: Fri, 13 Sep 2019 21:53:01 +0200
+Subject: [PATCH] Replace python command with python3 (#2281)
+
+---
+ build-js.sh               | 2 +-
+ src/passes/CMakeLists.txt | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/build-js.sh b/build-js.sh
+index 18fd04208..967a1aaa9 100755
+--- a/build-js.sh
++++ b/build-js.sh
+@@ -73,7 +73,7 @@ OUT="$PWD/out"
+ 
+ echo "generate embedded intrinsics module"
+ 
+-python $BINARYEN_SCRIPTS/embedwast.py $BINARYEN_SRC/passes/wasm-intrinsics.wast $BINARYEN_SRC/passes/WasmIntrinsics.cpp
++python3 $BINARYEN_SCRIPTS/embedwast.py $BINARYEN_SRC/passes/wasm-intrinsics.wast $BINARYEN_SRC/passes/WasmIntrinsics.cpp
+ 
+ echo "compiling source files"
+ 
+diff --git a/src/passes/CMakeLists.txt b/src/passes/CMakeLists.txt
+index 41a6a72a6..e63e1ece7 100644
+--- a/src/passes/CMakeLists.txt
++++ b/src/passes/CMakeLists.txt
+@@ -1,6 +1,6 @@
+ add_custom_command(
+   OUTPUT WasmIntrinsics.cpp
+-  COMMAND python ${PROJECT_SOURCE_DIR}/scripts/embedwast.py ${PROJECT_SOURCE_DIR}/src/passes/wasm-intrinsics.wast ${CMAKE_CURRENT_BINARY_DIR}/WasmIntrinsics.cpp
++  COMMAND python3 ${PROJECT_SOURCE_DIR}/scripts/embedwast.py ${PROJECT_SOURCE_DIR}/src/passes/wasm-intrinsics.wast ${CMAKE_CURRENT_BINARY_DIR}/WasmIntrinsics.cpp
+   DEPENDS ${PROJECT_SOURCE_DIR}/scripts/embedwast.py wasm-intrinsics.wast)
+ 
+ SET(passes_SOURCES
+-- 
+2.34.1
+
