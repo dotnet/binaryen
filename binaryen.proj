@@ -2,7 +2,8 @@
   <PropertyGroup>
     <ClangTarget Condition="'$(ClangTarget)' == '' and '$(TargetArchitecture)' == 'x64'">x86_64-linux-gnu</ClangTarget>
     <ClangTarget Condition="'$(ClangTarget)' == '' and '$(TargetArchitecture)' == 'arm64'">aarch64-linux-gnu</ClangTarget>
-    <ROOTFS_DIR Condition="'$(ROOTFS_DIR)' == ''">/</ROOTFS_DIR>
+    <Sysroot Condition="'$(ROOTFS_DIR)' == ''">/</Sysroot>
+    <Sysroot Condition="'$(ROOTFS_DIR)' != ''">$(ROOTFS_DIR)</Sysroot>
     <CMakeGenerator Condition="$(CMakeGenerator) == '' and '$(BuildOS)' != 'Windows_NT'">Unix Makefiles</CMakeGenerator>
     <CMakeGenerator Condition="$(CMakeGenerator) == '' and '$(BuildOS)' == 'Windows_NT'">Ninja</CMakeGenerator>
     <_VCVarsScriptName Condition="'$(BuildOS)' == 'Windows_NT'">vcvars64.bat</_VCVarsScriptName>
@@ -32,7 +33,7 @@
 
   <Target Name="ReallyBuild" BeforeTargets="Build">
     <PropertyGroup>
-      <_CommonCFlags Condition="'$(BuildOS)' == 'Linux' and '$(ClangTarget)' != ''">--target=$(ClangTarget) --gcc-toolchain=$(ROOTFS_DIR) --sysroot=$(ROOTFS_DIR)</_CommonCFlags>
+      <_CommonCFlags Condition="'$(BuildOS)' == 'Linux' and '$(ClangTarget)' != ''">--target=$(ClangTarget) --gcc-toolchain=$(Sysroot)/usr/ --sysroot=$(Sysroot)</_CommonCFlags>
       <_CommonCFlags Condition="'$(BuildOS)' == 'OSX' and '$(TargetArchitecture)' == 'arm64'">--target=aarch64-apple-darwin</_CommonCFlags>
       <_CrossCFlags>$(_CommonCFlags)</_CrossCFlags>
       <_CrossCFlags Condition="'$(BuildOS)' == 'Linux'">-fuse-ld=lld  $(_CommonCFlags)</_CrossCFlags>
