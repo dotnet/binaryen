@@ -15,6 +15,7 @@
     <TargetArchitecture Condition="'$(TargetArchitecture)' == '' and '$(TargetsMobile)' == 'true'">x64</TargetArchitecture>
     <TargetArchitecture Condition="'$(TargetArchitecture)' == ''">x64</TargetArchitecture>
     <Platform Condition="'$(Platform)' == '' and '$(InferPlatformFromTargetArchitecture)' == 'true'">$(TargetArchitecture)</Platform>
+    <Platform Condition="'$(Platform)' == '' and '$(InferPlatformFromTargetArchitecture)' != 'true'">$(BuildArchitecture)</Platform>
   </PropertyGroup>
 
   <PropertyGroup>
