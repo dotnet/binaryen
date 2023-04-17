@@ -63,8 +63,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <PythonDir>$(BaseIntermediateOutputPath)cpython\</PythonDir>
-    <NodeBuildDir>$(RootRepoDir)artifacts\obj\node\$(Configuration)\</NodeBuildDir>
-    <NodeInstallDir>$(BinDir)\node\</NodeInstallDir>
+    <BinaryenBuildDir>$(BaseIntermediateOutputPath)binaryen\</BinaryenBuildDir>
+    <BinaryenInstallDir>$(BinDir)binaryen\</BinaryenInstallDir>
   </PropertyGroup>
 </Project>

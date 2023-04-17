@@ -1,6 +1,68 @@
 <Project Sdk="Microsoft.Build.Traversal">
+  <PropertyGroup>
+    <CMakeGenerator Condition="$(CMakeGenerator) == '' and '$(BuildOS)' != 'Windows_NT'">Unix Makefiles</CMakeGenerator>
+    <CMakeGenerator Condition="$(CMakeGenerator) == '' and '$(BuildOS)' == 'Windows_NT'">Ninja</CMakeGenerator>
+    <_VCVarsScriptName Condition="'$(BuildOS)' == 'Windows_NT'">vcvars64.bat</_VCVarsScriptName>
+    <_VCVarsScriptName Condition="'$(BuildOS)' == 'Windows_NT' and '$(TargetArchitecture)' == 'arm64'">vcvarsamd64_arm64.bat</_VCVarsScriptName>
+    <_VCVarsScriptName Condition="'$(BuildOS)' == 'Windows_NT' and '$(TargetArchitecture)' == 'arm'">vcvarsamd64_arm.bat</_VCVarsScriptName>
+    <_SetupEnvironment Condition="'$(BuildOS)' == 'Windows_NT'">
+    :: VisualStudio includes vswhere.exe that can be used to locate current VisualStudio installation.
+    set VSWHERE_TOOLS_BIN=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe
+    set VS_VCINSTALL_DIR=
+
+    :: Try to locate installed VisualStudio VC environment.
+    if "%VCINSTALLDIR%" == "" if exist "%VSWHERE_TOOLS_BIN%" (
+        for /f "tokens=*" %%a in ('"%VSWHERE_TOOLS_BIN%" -latest -prerelease -property installationPath') do (
+            set VS_VCINSTALL_DIR=%%a\VC\
+        )
+    )
+
+    if NOT "%VCINSTALLDIR%" == "" set VS_VCINSTALL_DIR=%VCINSTALLDIR%
+
+    :: Run VS build environment script.
+    call "%VS_VCINSTALL_DIR%\Auxiliary\Build\$(_VCVarsScriptName)"
+
+    </_SetupEnvironment>
+    <_BuildCommand Condition="'$(CMakeGenerator)' == 'Unix Makefiles'">$(_SetupEnvironment) make -j$([System.Environment]::ProcessorCount)</_BuildCommand>
+    <_BuildCommand Condition="'$(CMakeGenerator)' == 'Ninja'">$(_SetupEnvironment) ninja </_BuildCommand>
+  </PropertyGroup>
+
+  <Target Name="ReallyBuild" BeforeTargets="Build">
+    <ItemGroup>
+      <_BuildArgs Include="-DCMAKE_BUILD_TYPE=RelWithDebInfo" />
+      <_BuildArgs Include="-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON" />
+      <_BuildArgs Include="-DCMAKE_INSTALL_PREFIX=$(BinaryenInstallDir)" />
+      <_BuildArgs Include="-DCMAKE_INSTALL_DO_STRIP:BOOL=ON" />
+      <!-- Select generator platform for VS generator -->
+      <_BuildArgs Condition="'$(CMakeGenerator)' == 'Ninja' and '$(TargetArchitecture)' == 'x64'" Include="-A x64" />
+      <_BuildArgs Condition="'$(CMakeGenerator)' == 'Ninja' and '$(TargetArchitecture)' == 'arm64'" Include="-A ARM64" />
+    </ItemGroup>
+    <PropertyGroup>
+      <_CmakeArgs>$(_SetupEnvironment) cmake $(ProjectDir) -G "$(CMakeGenerator)" @(_BuildArgs->'%(Identity)',' ')</_CmakeArgs>
+    </PropertyGroup>
+    <Message Importance="High" Text="Running: $(_CmakeArgs)" />
+    <MakeDir Directories="$(BinaryenBuildDir)" Condition="!Exists('$(BinaryenBuildDir)')" />
+    <Exec WorkingDirectory="$(BinaryenBuildDir)"
+      Command="$(_CmakeArgs)"
+      IgnoreStandardErrorWarningFormat="true" />
+    <Exec WorkingDirectory="$(BinaryenBuildDir)"
+      Command="$(_BuildCommand)"
+      IgnoreStandardErrorWarningFormat="true" />
+    <Exec WorkingDirectory="$(BinaryenBuildDir)"
+      Command="$(_BuildCommand) install"
+      IgnoreStandardErrorWarningFormat="true" />
+  </Target>
+
+  <Target Name="WriteVersionFile" AfterTargets="ReallyBuild">
+    <PropertyGroup>
+      <BinaryenEmsdkVersion>binaryen-$(VersionPrefix)-dotnet</BinaryenEmsdkVersion>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(BinaryenInstallDir)\.emsdk_version"
+      Overwrite="true"
+      Lines="$(BinaryenEmsdkVersion)" />
+  </Target>
+
   <Target Name="Build" />
-  <Target Name="Test" />
   <Target Name="ReallyPack" BeforeTargets="Pack">
     <MSBuild Projects="eng/nuget/packages.builds" Targets="Build" />
   </Target>
