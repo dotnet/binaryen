@@ -1,0 +1,112 @@
+Index: binaryen/CMakeLists.txt
+===================================================================
+--- binaryen.orig/CMakeLists.txt
++++ binaryen/CMakeLists.txt
+@@ -2,6 +2,8 @@ PROJECT(binaryen C CXX)
+ CMAKE_MINIMUM_REQUIRED(VERSION 2.8.7)
+ INCLUDE(GNUInstallDirs)
+ 
++INCLUDE(eng/functions.cmake)
++
+ IF(NOT CMAKE_BUILD_TYPE)
+   MESSAGE(STATUS "No build type selected, default to Release")
+   SET(CMAKE_BUILD_TYPE "Release")
+@@ -178,7 +180,7 @@ ELSE()
+   ADD_LIBRARY(binaryen SHARED ${binaryen_SOURCES})
+ ENDIF()
+ TARGET_LINK_LIBRARIES(binaryen passes wasm asmjs emscripten-optimizer ir cfg support)
+-INSTALL(TARGETS binaryen DESTINATION ${CMAKE_INSTALL_LIBDIR})
++install_with_stripped_symbols(binaryen TARGETS lib)
+ 
+ INSTALL(FILES src/binaryen-c.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+ 
+@@ -196,7 +198,7 @@ ADD_EXECUTABLE(wasm-shell
+ TARGET_LINK_LIBRARIES(wasm-shell wasm asmjs emscripten-optimizer passes ir cfg support wasm)
+ SET_PROPERTY(TARGET wasm-shell PROPERTY CXX_STANDARD 11)
+ SET_PROPERTY(TARGET wasm-shell PROPERTY CXX_STANDARD_REQUIRED ON)
+-INSTALL(TARGETS wasm-shell DESTINATION ${CMAKE_INSTALL_BINDIR})
++install_with_stripped_symbols(wasm-shell TARGETS bin)
+ 
+ SET(wasm-opt_SOURCES
+   src/tools/wasm-opt.cpp
+@@ -206,7 +208,7 @@ ADD_EXECUTABLE(wasm-opt
+ TARGET_LINK_LIBRARIES(wasm-opt wasm asmjs emscripten-optimizer passes ir cfg support wasm)
+ SET_PROPERTY(TARGET wasm-opt PROPERTY CXX_STANDARD 11)
+ SET_PROPERTY(TARGET wasm-opt PROPERTY CXX_STANDARD_REQUIRED ON)
+-INSTALL(TARGETS wasm-opt DESTINATION ${CMAKE_INSTALL_BINDIR})
++install_with_stripped_symbols(wasm-opt TARGETS bin)
+ 
+ SET(wasm-metadce_SOURCES
+   src/tools/wasm-metadce.cpp
+@@ -216,7 +218,7 @@ ADD_EXECUTABLE(wasm-metadce
+ TARGET_LINK_LIBRARIES(wasm-metadce wasm asmjs emscripten-optimizer passes ir cfg support wasm)
+ SET_PROPERTY(TARGET wasm-metadce PROPERTY CXX_STANDARD 11)
+ SET_PROPERTY(TARGET wasm-metadce PROPERTY CXX_STANDARD_REQUIRED ON)
+-INSTALL(TARGETS wasm-metadce DESTINATION bin)
++install_with_stripped_symbols(wasm-metadce TARGETS bin)
+ 
+ SET(asm2wasm_SOURCES
+   src/tools/asm2wasm.cpp
+@@ -226,7 +228,7 @@ ADD_EXECUTABLE(asm2wasm
+ TARGET_LINK_LIBRARIES(asm2wasm emscripten-optimizer passes wasm asmjs ir cfg support)
+ SET_PROPERTY(TARGET asm2wasm PROPERTY CXX_STANDARD 11)
+ SET_PROPERTY(TARGET asm2wasm PROPERTY CXX_STANDARD_REQUIRED ON)
+-INSTALL(TARGETS asm2wasm DESTINATION ${CMAKE_INSTALL_BINDIR})
++install_with_stripped_symbols(asm2wasm TARGETS bin)
+ 
+ SET(wasm2js_SOURCES
+   src/tools/wasm2js.cpp
+@@ -236,7 +238,7 @@ ADD_EXECUTABLE(wasm2js
+ TARGET_LINK_LIBRARIES(wasm2js passes wasm asmjs emscripten-optimizer ir cfg support)
+ SET_PROPERTY(TARGET wasm2js PROPERTY CXX_STANDARD 11)
+ SET_PROPERTY(TARGET wasm2js PROPERTY CXX_STANDARD_REQUIRED ON)
+-INSTALL(TARGETS wasm2js DESTINATION ${CMAKE_INSTALL_BINDIR})
++install_with_stripped_symbols(wasm2js TARGETS bin)
+ 
+ SET(wasm-emscripten-finalize_SOURCES
+   src/tools/wasm-emscripten-finalize.cpp
+@@ -246,7 +248,7 @@ ADD_EXECUTABLE(wasm-emscripten-finalize
+ TARGET_LINK_LIBRARIES(wasm-emscripten-finalize passes wasm asmjs ir cfg support)
+ SET_PROPERTY(TARGET wasm-emscripten-finalize PROPERTY CXX_STANDARD 11)
+ SET_PROPERTY(TARGET wasm-emscripten-finalize PROPERTY CXX_STANDARD_REQUIRED ON)
+-INSTALL(TARGETS wasm-emscripten-finalize DESTINATION ${CMAKE_INSTALL_BINDIR})
++install_with_stripped_symbols(wasm-emscripten-finalize TARGETS bin)
+ 
+ SET(wasm_as_SOURCES
+   src/tools/wasm-as.cpp
+@@ -256,7 +258,7 @@ ADD_EXECUTABLE(wasm-as
+ TARGET_LINK_LIBRARIES(wasm-as wasm asmjs passes ir cfg support wasm)
+ SET_PROPERTY(TARGET wasm-as PROPERTY CXX_STANDARD 11)
+ SET_PROPERTY(TARGET wasm-as PROPERTY CXX_STANDARD_REQUIRED ON)
+-INSTALL(TARGETS wasm-as DESTINATION ${CMAKE_INSTALL_BINDIR})
++install_with_stripped_symbols(wasm-as TARGETS bin)
+ 
+ SET(wasm_dis_SOURCES
+   src/tools/wasm-dis.cpp
+@@ -266,7 +268,7 @@ ADD_EXECUTABLE(wasm-dis
+ TARGET_LINK_LIBRARIES(wasm-dis passes wasm asmjs ir cfg support)
+ SET_PROPERTY(TARGET wasm-dis PROPERTY CXX_STANDARD 11)
+ SET_PROPERTY(TARGET wasm-dis PROPERTY CXX_STANDARD_REQUIRED ON)
+-INSTALL(TARGETS wasm-dis DESTINATION ${CMAKE_INSTALL_BINDIR})
++install_with_stripped_symbols(wasm-dis TARGETS bin)
+ 
+ SET(wasm-ctor-eval_SOURCES
+   src/tools/wasm-ctor-eval.cpp
+@@ -276,7 +278,7 @@ ADD_EXECUTABLE(wasm-ctor-eval
+ TARGET_LINK_LIBRARIES(wasm-ctor-eval emscripten-optimizer passes wasm asmjs ir cfg support)
+ SET_PROPERTY(TARGET wasm-ctor-eval PROPERTY CXX_STANDARD 11)
+ SET_PROPERTY(TARGET wasm-ctor-eval PROPERTY CXX_STANDARD_REQUIRED ON)
+-INSTALL(TARGETS wasm-ctor-eval DESTINATION bin)
++install_with_stripped_symbols(wasm-ctor-eval TARGETS bin)
+ 
+ SET(wasm-reduce_SOURCES
+   src/tools/wasm-reduce.cpp
+@@ -286,7 +288,7 @@ ADD_EXECUTABLE(wasm-reduce
+ TARGET_LINK_LIBRARIES(wasm-reduce wasm asmjs passes wasm ir cfg support)
+ SET_PROPERTY(TARGET wasm-reduce PROPERTY CXX_STANDARD 11)
+ SET_PROPERTY(TARGET wasm-reduce PROPERTY CXX_STANDARD_REQUIRED ON)
+-INSTALL(TARGETS wasm-reduce DESTINATION ${CMAKE_INSTALL_BINDIR})
++install_with_stripped_symbols(wasm-reduce TARGETS bin)
+ 
+ # Testing
+ #
