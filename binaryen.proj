@@ -1,5 +1,8 @@
 <Project Sdk="Microsoft.Build.Traversal">
   <PropertyGroup>
+    <ClangTarget Condition="'$(ClangTarget)' == '' and '$(TargetArchitecture)' == 'x64'">x86_64-linux-gnu</ClangTarget>
+    <ClangTarget Condition="'$(ClangTarget)' == '' and '$(TargetArchitecture)' == 'arm64'">aarch64-linux-gnu</ClangTarget>
+    <ROOTFS_DIR Condition="'$(ROOTFS_DIR)' == ''">/</ROOTFS_DIR>
     <CMakeGenerator Condition="$(CMakeGenerator) == '' and '$(BuildOS)' != 'Windows_NT'">Unix Makefiles</CMakeGenerator>
     <CMakeGenerator Condition="$(CMakeGenerator) == '' and '$(BuildOS)' == 'Windows_NT'">Ninja</CMakeGenerator>
     <_VCVarsScriptName Condition="'$(BuildOS)' == 'Windows_NT'">vcvars64.bat</_VCVarsScriptName>
@@ -28,6 +31,16 @@
   </PropertyGroup>
 
   <Target Name="ReallyBuild" BeforeTargets="Build">
+    <PropertyGroup>
+      <_CommonCFlags Condition="'$(BuildOS)' == 'Linux' and '$(ClangTarget)' != ''">--target=$(ClangTarget) --sysroot=$(ROOTFS_DIR)</_CommonCFlags>
+      <_CommonCFlags Condition="'$(BuildOS)' == 'OSX' and '$(TargetArchitecture)' == 'arm64'">--target=aarch64-apple-darwin</_CommonCFlags>
+      <_CrossCFlags>$(_CommonCFlags)</_CrossCFlags>
+      <_CrossCFlags Condition="'$(BuildOS)' == 'Linux'">-fuse-ld=lld  $(_CommonCFlags)</_CrossCFlags>
+      <_ExeLinkerFlags>$(_CommonCFlags)</_ExeLinkerFlags>
+      <_ExeLinkerFlags Condition="'$(BuildOS)' == 'Linux'">-Wl,--build-id -fuse-ld=lld -lstdc++ -lm $(_ExeLinkerFlags)</_ExeLinkerFlags>
+      <_SharedLinkerFlags>$(_CommonCFlags)</_SharedLinkerFlags>
+      <_SharedLinkerFlags Condition="'$(BuildOS)' == 'Linux'">-Wl,--build-id -fuse-ld=lld -lstdc++ -lm $(_SharedLinkerFlags)</_SharedLinkerFlags>
+    </PropertyGroup>
     <ItemGroup>
       <_BuildArgs Include="-DCMAKE_BUILD_TYPE=RelWithDebInfo" />
       <_BuildArgs Include="-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON" />
@@ -35,6 +48,12 @@
       <_BuildArgs Include="-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0" />
       <_BuildArgs Condition="'$(TargetArchitecture)' == 'x64'" Include="-DCMAKE_OSX_ARCHITECTURES=x86_64" />
       <_BuildArgs Condition="'$(TargetArchitecture)' == 'arm64'" Include="-DCMAKE_OSX_ARCHITECTURES=arm64" />
+      <_BuildArgs Include='-DCMAKE_C_FLAGS="$(_CrossCFlags)"' />
+      <_BuildArgs Include='-DCMAKE_CXX_FLAGS="$(_CrossCFlags)"' />
+      <_BuildArgs Include='-DCMAKE_EXE_LINKER_FLAGS="$(_ExeLinkerFlags)"' />
+      <_BuildArgs Include='-DCMAKE_SHARED_LINKER_FLAGS="$(_SharedLinkerFlags)"' />
+      <_BuildArgs Condition="'$(BuildOS)' == 'Linux'" Include="-DCMAKE_C_COMPILER=clang" />
+      <_BuildArgs Condition="'$(BuildOS)' == 'Linux'" Include="-DCMAKE_CXX_COMPILER=clang" />
     </ItemGroup>
     <PropertyGroup>
       <_CmakeArgs>$(_SetupEnvironment) cmake $(ProjectDir) -G "$(CMakeGenerator)" @(_BuildArgs->'%(Identity)',' ')</_CmakeArgs>
