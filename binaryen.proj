@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.Build.Traversal">
+  <Target Name="Build" />
+  <Target Name="Test" />
+  <Target Name="ReallyPack" BeforeTargets="Pack">
+    <MSBuild Projects="eng/nuget/packages.builds" Targets="Build" />
+  </Target>
+</Project>

@@ -64,3 +64,9 @@ Win32/
 # files related to VS Code
 .history
 .vscode
+
+# MSFT ignores
+/.dotnet
+/.packages
+/artifacts
+
