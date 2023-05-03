@@ -74,7 +74,8 @@
       Command="$(_BuildCommand) install"
       IgnoreStandardErrorWarningFormat="true" />
     <ItemGroup>
-      <BinaryenToStrip Include="$(BinaryenInstallDir)\bin\*" />
+      <BinaryenToStrip Include="$(BinaryenInstallDir)\bin\*" Exclude="$(BinaryenInstallDir)\bin\*.dbg" Condition="'$(BuildOS)' == 'Linux'" />
+      <BinaryenToStrip Include="$(BinaryenInstallDir)\bin\*" Exclude="$(BinaryenInstallDir)\bin\*.dwarf" Condition="'$(BuildOS)' == 'OSX'" />
     </ItemGroup>
     <Message Importance="High" Text="** Running strip -no_code_signature_warning -S %(BinaryenToStrip.FullPath)" Condition="'$(BuildOS)' == 'OSX'" />
     <Exec IgnoreStandardErrorWarningFormat="true"
