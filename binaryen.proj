@@ -2,6 +2,8 @@
   <PropertyGroup>
     <ClangVersion Condition="'$(ClangVersion)' == ''">clang</ClangVersion>
     <ClangPlusVersion Condition="'$(ClangPlusVersion)' == ''">clang++</ClangPlusVersion>
+    <ObjCopy Condition="'$(ClangVersion)' == 'clang-9'">/usr/lib/llvm-9/bin/llvm-objcopy</ObjCopy>
+    <ObjCopy Condition="'$(ClangVersion)' != 'clang-9'">llvm-objcopy</ObjCopy>
     <Sysroot Condition="'$(ROOTFS_DIR)' == ''">/</Sysroot>
     <Sysroot Condition="'$(ROOTFS_DIR)' != ''">$(ROOTFS_DIR)</Sysroot>
     <CMakeGenerator Condition="$(CMakeGenerator) == '' and '$(BuildOS)' != 'Windows_NT'">Unix Makefiles</CMakeGenerator>
@@ -71,6 +73,26 @@
     <Exec WorkingDirectory="$(BinaryenBuildDir)"
       Command="$(_BuildCommand) install"
       IgnoreStandardErrorWarningFormat="true" />
+    <ItemGroup>
+      <BinaryenToStrip Include="$(BinaryenInstallDir)\bin\*" />
+    </ItemGroup>
+    <Message Importance="High" Text="** Running strip -no_code_signature_warning -S %(BinaryenToStrip.FullPath)" Condition="'$(BuildOS)' == 'OSX'" />
+    <Exec IgnoreStandardErrorWarningFormat="true"
+      Command="strip -no_code_signature_warning -S %(BinaryenToStrip.FullPath)"
+      Condition="'$(BuildOS)' == 'OSX'" />
+    <Message Importance="High" Text="** Running codesign -f -s - %(BinaryenToStrip.FullPath)" Condition="'$(BuildOS)' == 'OSX'" />
+    <Exec IgnoreStandardErrorWarningFormat="true"
+      Command="codesign -f -s - %(BinaryenToStrip.FullPath)"
+      Condition="'$(BuildOS)' == 'OSX'" />
+    <Message Importance="High" Text="** Running $(ObjCopy) --strip-all %(BinaryenToStrip.FullPath)" Condition="'$(BuildOS)' == 'Linux'" />
+    <Exec IgnoreStandardErrorWarningFormat="true"
+      Command="$(ObjCopy) --strip-all %(BinaryenToStrip.FullPath)"
+      Condition="'$(BuildOS)' == 'Linux'" />
+    <Message Importance="High" Text="** Running $(ObjCopy) --add-gnu-debuglink=%(BinaryenToStrip.FullPath).dbg %(BinaryenToStrip.FullPath)" Condition="'$(BuildOS)' == 'Linux'" />
+    <Exec IgnoreStandardErrorWarningFormat="true"
+      Command="$(ObjCopy) --add-gnu-debuglink=%(BinaryenToStrip.FullPath).dbg %(BinaryenToStrip.FullPath)"
+      Condition="'$(BuildOS)' == 'Linux'" />
+
   </Target>
 
   <Target Name="WriteVersionFile" AfterTargets="ReallyBuild">
