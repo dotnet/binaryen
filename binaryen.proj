@@ -88,12 +88,13 @@
         <ItemGroup>
           <BinaryenToStrip Include="$(BinaryenInstallDir)\bin\*" Exclude="$(BinaryenInstallDir)\bin\*.dwarf" />
         </ItemGroup>
-        <Message Importance="High" Text="** Running strip -no_code_signature_warning -S %(BinaryenToStrip.FullPath)" />
+        <Message Importance="High" Text="** Running strip -no_code_signature_warning -S %(BinaryenToStrip.FullPath)" Condition="'$(BuildOS)' == 'OSX'" />
         <Exec IgnoreStandardErrorWarningFormat="true"
           Command="strip -no_code_signature_warning -S %(BinaryenToStrip.FullPath)" />
-        <Message Importance="High" Text="** Running codesign -f -s - %(BinaryenToStrip.FullPath)" />
+        <Message Importance="High" Text="** Running codesign -f -s - %(BinaryenToStrip.FullPath)" Condition="'$(BuildOS)' == 'OSX'" />
         <Exec IgnoreStandardErrorWarningFormat="true"
-          Command="codesign -f -s - %(BinaryenToStrip.FullPath)" />
+          Command="codesign -f -s - %(BinaryenToStrip.FullPath)"
+          Condition="'$(BuildOS)' == 'OSX'" />
       </When>
     </Choose>
 
