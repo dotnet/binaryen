@@ -2,8 +2,7 @@
   <PropertyGroup>
     <ClangVersion Condition="'$(ClangVersion)' == ''">clang</ClangVersion>
     <ClangPlusVersion Condition="'$(ClangPlusVersion)' == ''">clang++</ClangPlusVersion>
-    <ObjCopy Condition="'$(ClangVersion)' == 'clang-9'">/usr/lib/llvm-9/bin/llvm-objcopy</ObjCopy>
-    <ObjCopy Condition="'$(ClangVersion)' != 'clang-9'">llvm-objcopy</ObjCopy>
+    <ObjCopy>$(ObjCopyPrefix)llvm-objcopy</ObjCopy>
     <Sysroot Condition="'$(ROOTFS_DIR)' == ''">/</Sysroot>
     <Sysroot Condition="'$(ROOTFS_DIR)' != ''">$(ROOTFS_DIR)</Sysroot>
     <CMakeGenerator Condition="$(CMakeGenerator) == '' and '$(BuildOS)' != 'Windows_NT'">Unix Makefiles</CMakeGenerator>
