@@ -72,26 +72,31 @@
     <Exec WorkingDirectory="$(BinaryenBuildDir)"
       Command="$(_BuildCommand) install"
       IgnoreStandardErrorWarningFormat="true" />
-    <ItemGroup>
-      <BinaryenToStrip Include="$(BinaryenInstallDir)\bin\*" Exclude="$(BinaryenInstallDir)\bin\*.dbg" Condition="'$(BuildOS)' == 'Linux'" />
-      <BinaryenToStrip Include="$(BinaryenInstallDir)\bin\*" Exclude="$(BinaryenInstallDir)\bin\*.dwarf" Condition="'$(BuildOS)' == 'OSX'" />
-    </ItemGroup>
-    <Message Importance="High" Text="** Running strip -no_code_signature_warning -S %(BinaryenToStrip.FullPath)" Condition="'$(BuildOS)' == 'OSX'" />
-    <Exec IgnoreStandardErrorWarningFormat="true"
-      Command="strip -no_code_signature_warning -S %(BinaryenToStrip.FullPath)"
-      Condition="'$(BuildOS)' == 'OSX'" />
-    <Message Importance="High" Text="** Running codesign -f -s - %(BinaryenToStrip.FullPath)" Condition="'$(BuildOS)' == 'OSX'" />
-    <Exec IgnoreStandardErrorWarningFormat="true"
-      Command="codesign -f -s - %(BinaryenToStrip.FullPath)"
-      Condition="'$(BuildOS)' == 'OSX'" />
-    <Message Importance="High" Text="** Running $(ObjCopy) --strip-all %(BinaryenToStrip.FullPath)" Condition="'$(BuildOS)' == 'Linux'" />
-    <Exec IgnoreStandardErrorWarningFormat="true"
-      Command="$(ObjCopy) --strip-all %(BinaryenToStrip.FullPath)"
-      Condition="'$(BuildOS)' == 'Linux'" />
-    <Message Importance="High" Text="** Running $(ObjCopy) --add-gnu-debuglink=%(BinaryenToStrip.FullPath).dbg %(BinaryenToStrip.FullPath)" Condition="'$(BuildOS)' == 'Linux'" />
-    <Exec IgnoreStandardErrorWarningFormat="true"
-      Command="$(ObjCopy) --add-gnu-debuglink=%(BinaryenToStrip.FullPath).dbg %(BinaryenToStrip.FullPath)"
-      Condition="'$(BuildOS)' == 'Linux'" />
+    <Choose>
+      <When Condition="'$(BuildOS)' == 'Linux'">
+        <ItemGroup>
+          <BinaryenToStrip Include="$(BinaryenInstallDir)\bin\*" Exclude="$(BinaryenInstallDir)\bin\*.dbg" />
+        </ItemGroup>
+        <Message Importance="High" Text="** Running $(ObjCopy) --strip-all %(BinaryenToStrip.FullPath)" />
+        <Exec IgnoreStandardErrorWarningFormat="true"
+          Command="$(ObjCopy) --strip-all %(BinaryenToStrip.FullPath)" />
+        <Message Importance="High" Text="** Running $(ObjCopy) --add-gnu-debuglink=%(BinaryenToStrip.FullPath).dbg %(BinaryenToStrip.FullPath)" />
+        <Exec IgnoreStandardErrorWarningFormat="true"
+          Command="$(ObjCopy) --add-gnu-debuglink=%(BinaryenToStrip.FullPath).dbg %(BinaryenToStrip.FullPath)" />
+      </When>
+      <When Condition="'$(BuildOS)' == 'OSX'">
+        <ItemGroup>
+          <BinaryenToStrip Include="$(BinaryenInstallDir)\bin\*" Exclude="$(BinaryenInstallDir)\bin\*.dwarf" />
+        </ItemGroup>
+        <Message Importance="High" Text="** Running strip -no_code_signature_warning -S %(BinaryenToStrip.FullPath)" Condition="'$(BuildOS)' == 'OSX'" />
+        <Exec IgnoreStandardErrorWarningFormat="true"
+          Command="strip -no_code_signature_warning -S %(BinaryenToStrip.FullPath)" />
+        <Message Importance="High" Text="** Running codesign -f -s - %(BinaryenToStrip.FullPath)" Condition="'$(BuildOS)' == 'OSX'" />
+        <Exec IgnoreStandardErrorWarningFormat="true"
+          Command="codesign -f -s - %(BinaryenToStrip.FullPath)"
+          Condition="'$(BuildOS)' == 'OSX'" />
+      </When>
+    </Choose>
 
   </Target>
 
