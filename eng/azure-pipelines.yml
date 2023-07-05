@@ -40,6 +40,7 @@ stages:
               imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-amd64
               rootfs: /crossrootfs/x64
               ClangTargetArg: /p:ClangTarget=x86_64-linux-gnu
+              ClangBinDir: /p:ClangBinDir=/usr/local/bin
               archflag: --arch x64
             arm64:
               assetManifestOS: linux
