@@ -76,6 +76,56 @@ stages:
           displayName: Publish packages
           condition: and(succeeded(), ne(variables['System.TeamProject'], 'public'), ne(variables['Build.Reason'], 'PullRequest'))
 
+      ############ LINUX MUSL BUILD ############
+      - job: Build_Linux_musl
+        displayName: Linux_musl
+        timeoutInMinutes: 360
+        variables:
+        - _BuildConfig: Release
+        strategy:
+          matrix:
+            x64:
+              assetManifestOS: linux-musl
+              assetManifestPlatform: x64
+              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-amd64-alpine
+              rootfs: /crossrootfs/x64
+              ClangTargetArg: /p:ClangTarget=x86_64-alpine-linux-musl
+              ClangBinDir: /p:ClangBinDir=/usr/local/bin
+              archflag: --arch x64
+            arm64:
+              assetManifestOS: linux-musl
+              assetManifestPlatform: arm64
+              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-arm64-alpine
+              rootfs: /crossrootfs/arm64
+              ClangTargetArg: /p:ClangTarget=aarch64-alpine-linux-musl
+              ClangBinDir: /p:ClangBinDir=/usr/local/bin
+              archflag: --arch arm64
+        pool:
+          ${{ if eq(variables['System.TeamProject'], 'public') }}:
+            name: $(DncEngPublicBuildPool)
+            demands: ImageOverride -equals build.ubuntu.2204.amd64.open
+          ${{ if eq(variables['System.TeamProject'], 'internal') }}:
+            name: $(DncEngInternalBuildPool)
+            demands: ImageOverride -equals build.ubuntu.2204.amd64
+        container:
+          image: $(imagename)
+        steps:
+        - script: |
+            git clean -ffdx
+            git reset --hard HEAD
+          displayName: 'Clean up working directory'
+
+        - bash: |
+            ./build.sh --ci --restore --build --pack $(archflag) --configuration $(_BuildConfig) $(_InternalBuildArgs) /p:OutputRid=linux-musl-$(assetManifestPlatform) $(ClangTargetArg) $(ClangBinDirArg) /p:RestoreUsingNuGetTargets=false
+          displayName: 'Build and package'
+          env:
+            ROOTFS_DIR: $(rootfs)
+
+        - bash:
+            ./eng/common/build.sh --ci --restore --publish --configuration $(_BuildConfig) $(_InternalBuildArgs) /p:AssetManifestOS=$(assetManifestOS) /p:PlatformName=$(assetManifestPlatform) --projects $(Build.SourcesDirectory)/binaryen.proj
+          displayName: Publish packages
+          condition: and(succeeded(), ne(variables['System.TeamProject'], 'public'), ne(variables['Build.Reason'], 'PullRequest'))
+
       ############ MACOS BUILD ############
       - job: Build_macOS
         displayName: macOS
