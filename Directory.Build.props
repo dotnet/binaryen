@@ -61,6 +61,9 @@
 
     <BinDir>$(__BinDir)\</BinDir>
     <BinDir Condition="'$(__BinDir)'==''">$(RootBinDir)bin\$(PlatformConfigPathPart)\</BinDir>
+
+    <MonoLLVMDir>$(__MonoLLVMDir)\</MonoLLVMDir>
+    <MonoLLVMDir Condition="'$(__MonoLLVMDir)'==''">$(RootBinDir)obj\llvm\</MonoLLVMDir>
   </PropertyGroup>
 
   <PropertyGroup>

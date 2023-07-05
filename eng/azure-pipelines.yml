@@ -37,20 +37,17 @@ stages:
             x64:
               assetManifestOS: linux
               assetManifestPlatform: x64
-              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:ubuntu-18.04-cross-20230215165054-0ea3466
+              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-amd64
               rootfs: /crossrootfs/x64
-              ClangTargetArg: 
-              ClangVersionArg: /p:ClangVersion=clang-9 /p:ClangPlusVersion=clang++-9
-              ObjCopyPrefixArg: /p:ObjCopyPrefix=/usr/lib/llvm-9/bin/
+              ClangTargetArg: /p:ClangTarget=x86_64-linux-gnu
               archflag: --arch x64
             arm64:
               assetManifestOS: linux
               assetManifestPlatform: arm64
-              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:ubuntu-18.04-cross-arm64-20230215165054-0ea3466
+              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-arm64
               rootfs: /crossrootfs/arm64
               ClangTargetArg: /p:ClangTarget=aarch64-linux-gnu
-              ClangVersionArg: /p:ClangVersion=clang-9 /p:ClangPlusVersion=clang++-9
-              ObjCopyPrefixArg: /p:ObjCopyPrefix=/usr/lib/llvm-9/bin/
+              ClangBinDir: /p:ClangBinDir=/usr/local/bin
               archflag: --arch arm64
         pool:
           ${{ if eq(variables['System.TeamProject'], 'public') }}:
@@ -68,7 +65,7 @@ stages:
           displayName: 'Clean up working directory'
 
         - bash: |
-            ./build.sh --ci --restore --build --pack $(archflag) --configuration $(_BuildConfig) $(_InternalBuildArgs) $(ClangTargetArg) $(ClangVersionArg) $(ObjCopyPrefixArg) /p:RestoreUsingNuGetTargets=false
+            ./build.sh --ci --restore --build --pack $(archflag) --configuration $(_BuildConfig) $(_InternalBuildArgs) $(ClangTargetArg) $(ClangBinDirArg) /p:RestoreUsingNuGetTargets=false
           displayName: 'Build and package'
           env:
             ROOTFS_DIR: $(rootfs)

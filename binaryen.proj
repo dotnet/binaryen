@@ -1,8 +1,27 @@
 <Project Sdk="Microsoft.Build.Traversal">
   <PropertyGroup>
-    <ClangVersion Condition="'$(ClangVersion)' == ''">clang</ClangVersion>
-    <ClangPlusVersion Condition="'$(ClangPlusVersion)' == ''">clang++</ClangPlusVersion>
-    <ObjCopy>$(ObjCopyPrefix)llvm-objcopy</ObjCopy>
+    <MonoLLVMTargetOS Condition="'$(BuildOS)' == 'Linux'">linux</MonoLLVMTargetOS>
+    <MonoLLVMTargetOS Condition="Exists('$(ROOTFS_DIR)/lib/ld-musl-aarch64.so.1') or Exists('$(ROOTFS_DIR)/lib/ld-musl-x86_64.so.1')">linux-musl</MonoLLVMTargetOS>
+    <MonoLLVMSDKVersion Condition="'$(MonoLLVMTargetOS)' == 'linux'">$(runtimelinuxx64MicrosoftNETCoreRuntimeMonoLLVMSdkVersion)</MonoLLVMSDKVersion>
+    <MonoLLVMSDKVersion Condition="'$(MonoLLVMTargetOS)' == 'linux-musl'">$(runtimelinuxmuslx64MicrosoftNETCoreRuntimeMonoLLVMSdkVersion)</MonoLLVMSDKVersion>
+    <MonoLLVMToolsVersion Condition="'$(MonoLLVMTargetOS)' == 'linux'">$(runtimelinuxx64MicrosoftNETCoreRuntimeMonoLLVMToolsVersion)</MonoLLVMToolsVersion>
+    <MonoLLVMToolsVersion Condition="'$(MonoLLVMTargetOS)' == 'linux-musl'">$(runtimelinuxmuslx64MicrosoftNETCoreRuntimeMonoLLVMToolsVersion)</MonoLLVMToolsVersion>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(BuildOS)' == 'Linux'">
+    <PackageReference Include="runtime.$(MonoLLVMTargetOS)-$(TargetArchitecture).Microsoft.NETCore.Runtime.Mono.LLVM.Tools"
+                      Version="$(MonoLLVMToolsVersion)"
+                      PackageArch="$(TargetArchitecture)"
+                      Condition="'$(TargetArchitecture)' != ''" />
+    <PackageReference Include="runtime.$(MonoLLVMTargetOS)-$(TargetArchitecture).Microsoft.NETCore.Runtime.Mono.LLVM.Sdk"
+                      Version="$(MonoLLVMSDKVersion)"
+                      PackageArch="$(TargetArchitecture)"
+                      Condition="'$(TargetArchitecture)' != ''" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <ClangBinDir Condition="'$(ClangBinDir)' == ''">/usr/bin</ClangBinDir>
+    <ObjCopy>$(ClangBinDir)llvm-objcopy</ObjCopy>
     <Sysroot Condition="'$(ROOTFS_DIR)' == ''">/</Sysroot>
     <Sysroot Condition="'$(ROOTFS_DIR)' != ''">$(ROOTFS_DIR)</Sysroot>
     <CMakeGenerator Condition="$(CMakeGenerator) == '' and '$(BuildOS)' != 'Windows_NT'">Unix Makefiles</CMakeGenerator>
@@ -32,15 +51,28 @@
     <_BuildCommand Condition="'$(CMakeGenerator)' == 'Ninja'">$(_SetupEnvironment) ninja </_BuildCommand>
   </PropertyGroup>
 
+  <Target Name="CopyLLVMToTree" BeforeTargets="ReallyBuild" Condition="'$(BuildOS)' == 'Linux'">
+    <ItemGroup>
+      <LLVMFiles Include="$(NuGetPackageRoot)\$([System.String]::Copy(%(PackageReference.Identity)).ToLowerInvariant())\%(PackageReference.Version)\tools\$(MonoLLVMTargetOS)-%(PackageReference.PackageArch)\**"
+                 FileArch="%(PackageReference.PackageArch)" />
+    </ItemGroup>
+    <Copy SourceFiles="@(LLVMFiles)" DestinationFolder="$(MonoLLVMDir)\%(LLVMFiles.FileArch)\%(RecursiveDir)">
+      <Output TaskParameter="DestinationFiles" ItemName="FileWrites"/>
+    </Copy>
+  </Target>
+
   <Target Name="ReallyBuild" BeforeTargets="Build">
     <PropertyGroup>
       <_CommonCFlags Condition="'$(BuildOS)' == 'Linux' and '$(ClangTarget)' != ''">--target=$(ClangTarget) --gcc-toolchain=$(Sysroot)/usr/ --sysroot=$(Sysroot)</_CommonCFlags>
       <_CommonCFlags Condition="'$(BuildOS)' == 'OSX' and '$(TargetArchitecture)' == 'arm64'">--target=aarch64-apple-darwin</_CommonCFlags>
+      <_CommonCXXFlags>$(_CommonCFlags)</_CommonCXXFlags>
+      <_CommonCXXFlags Condition="'$(BuildOS)' == 'Linux'">$(_CommonCXXFlags) -I$(MonoLLVMDir)\$(TargetArchitecture)\include\c++\v1 -L$(MonoLLVMDir)\$(TargetArchitecture)\lib -stdlib=libc++</_CommonCXXFlags>
       <_CrossCFlags>$(_CommonCFlags)</_CrossCFlags>
+      <_CrossCXXFlags>$(_CommonCXXFlags)</_CrossCXXFlags>
       <_ExeLinkerFlags>$(_CommonCFlags)</_ExeLinkerFlags>
-      <_ExeLinkerFlags Condition="'$(BuildOS)' == 'Linux'">-Wl,--build-id -fuse-ld=lld -lstdc++ -lm $(_ExeLinkerFlags)</_ExeLinkerFlags>
+      <_ExeLinkerFlags Condition="'$(BuildOS)' == 'Linux'">-Wl,--build-id -fuse-ld=lld -lm $(_ExeLinkerFlags)</_ExeLinkerFlags>
       <_SharedLinkerFlags>$(_CommonCFlags)</_SharedLinkerFlags>
-      <_SharedLinkerFlags Condition="'$(BuildOS)' == 'Linux'">-Wl,--build-id -lstdc++ -lm $(_SharedLinkerFlags)</_SharedLinkerFlags>
+      <_SharedLinkerFlags Condition="'$(BuildOS)' == 'Linux'">-Wl,--build-id -fuse-ld=lld -lm $(_SharedLinkerFlags)</_SharedLinkerFlags>
     </PropertyGroup>
     <ItemGroup>
       <_BuildArgs Include="-DCMAKE_BUILD_TYPE=RelWithDebInfo" />
@@ -50,13 +82,13 @@
       <_BuildArgs Condition="'$(TargetArchitecture)' == 'x64'" Include="-DCMAKE_OSX_ARCHITECTURES=x86_64" />
       <_BuildArgs Condition="'$(TargetArchitecture)' == 'arm64'" Include="-DCMAKE_OSX_ARCHITECTURES=arm64" />
       <_BuildArgs Include='-DCMAKE_C_FLAGS="$(_CrossCFlags)"' />
-      <_BuildArgs Include='-DCMAKE_CXX_FLAGS="$(_CrossCFlags)"' />
+      <_BuildArgs Include='-DCMAKE_CXX_FLAGS="$(_CrossCXXFlags)"' />
       <_BuildArgs Include='-DCMAKE_EXE_LINKER_FLAGS="$(_ExeLinkerFlags)"' />
       <_BuildArgs Include='-DCMAKE_SHARED_LINKER_FLAGS="$(_SharedLinkerFlags)"' />
       <_BuildArgs Include="-DBUILD_TESTS:BOOL=OFF" />
       <_BuildArgs Include="-DINSTALL_LIBS:BOOL=OFF" />
-      <_BuildArgs Condition="'$(BuildOS)' == 'Linux'" Include="-DCMAKE_C_COMPILER=$(ClangVersion)" />
-      <_BuildArgs Condition="'$(BuildOS)' == 'Linux'" Include="-DCMAKE_CXX_COMPILER=$(ClangPlusVersion)" />
+      <_BuildArgs Condition="'$(BuildOS)' == 'Linux'" Include="-DCMAKE_C_COMPILER=clang" />
+      <_BuildArgs Condition="'$(BuildOS)' == 'Linux'" Include="-DCMAKE_CXX_COMPILER=clang++" />
     </ItemGroup>
     <PropertyGroup>
       <_CmakeArgs>$(_SetupEnvironment) cmake $(ProjectDir) -G "$(CMakeGenerator)" @(_BuildArgs->'%(Identity)',' ')</_CmakeArgs>
@@ -92,7 +124,7 @@
     <Exec IgnoreStandardErrorWarningFormat="true"
       Command="$(ObjCopy) --add-gnu-debuglink=%(BinaryenToStrip.FullPath).dbg %(BinaryenToStrip.FullPath)"
       Condition="'$(BuildOS)' == 'Linux'" />
-
+    <Copy SourceFiles="$(MonoLLVMDir)\$(TargetArchitecture)\lib\libc++.so.1;$(MonoLLVMDir)\$(TargetArchitecture)\lib\libc++abi.so.1" Condition="'$(BuildOS)' == 'Linux'" DestinationFolder="$(BinaryenInstallDir)\lib" />
   </Target>
 
   <Target Name="WriteVersionFile" AfterTargets="ReallyBuild">
