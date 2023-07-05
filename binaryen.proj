@@ -20,8 +20,8 @@
   </ItemGroup>
 
   <PropertyGroup>
-    <ClangBinDir Condition="'$(ClangBinDir)' == ''">/usr/bin</ClangBinDir>
-    <ObjCopy>$(ClangBinDir)llvm-objcopy</ObjCopy>
+    <ClangBinDir Condition="'$(ClangBinDir)' == ''">/usr/bin/</ClangBinDir>
+    <ObjCopy>$(ClangBinDir)/llvm-objcopy</ObjCopy>
     <Sysroot Condition="'$(ROOTFS_DIR)' == ''">/</Sysroot>
     <Sysroot Condition="'$(ROOTFS_DIR)' != ''">$(ROOTFS_DIR)</Sysroot>
     <CMakeGenerator Condition="$(CMakeGenerator) == '' and '$(BuildOS)' != 'Windows_NT'">Unix Makefiles</CMakeGenerator>
