@@ -7,14 +7,14 @@
 ;; CHECK-NOT: warning:
 
 (module
- ;; CHECK:      (type $i32_i32_=>_none (func (param i32 i32)))
+ ;; CHECK:      (type $0 (func (param i32 i32)))
 
- ;; CHECK:      (type $i32_=>_none (func (param i32)))
+ ;; CHECK:      (type $1 (func (param i32)))
 
  ;; CHECK:      (import "a" "b" (func $log (param i32 i32)))
  (import "a" "b" (func $log (param i32 i32)))
 
- (func "foo" (param $p i32)
+ (func $foo (export "foo") (param $p i32)
   ;; The locals $x and $y can be coalesced into a single local, but as we do not
   ;; run that pass, they will not be. Other minor optimizations will occur here,
   ;; such as using a tee.
@@ -44,9 +44,9 @@
   )
  )
 )
-;; CHECK:      (export "foo" (func $0))
+;; CHECK:      (export "foo" (func $foo))
 
-;; CHECK:      (func $0 (; has Stack IR ;) (param $p i32)
+;; CHECK:      (func $foo (; has Stack IR ;) (param $p i32)
 ;; CHECK-NEXT:  (local $x i32)
 ;; CHECK-NEXT:  (local $y i32)
 ;; CHECK-NEXT:  (call $log

@@ -332,28 +332,50 @@ struct OptimizationOptions : public ToolOptions {
     if (debug) {
       passRunner.setDebug(true);
     }
+
+    // Flush anything in the current pass runner, and then reset it to a fresh
+    // state so it is ready for new things.
+    auto flush = [&]() {
+      passRunner.run();
+      passRunner.clear();
+    };
+
     for (auto& pass : passes) {
-      // We apply the pass's intended opt and shrink levels, if any.
-      auto oldOptimizeLevel = passRunner.options.optimizeLevel;
-      auto oldShrinkLevel = passRunner.options.shrinkLevel;
-      if (pass.optimizeLevel) {
-        passRunner.options.optimizeLevel = *pass.optimizeLevel;
-      }
-      if (pass.shrinkLevel) {
-        passRunner.options.shrinkLevel = *pass.shrinkLevel;
-      }
-
       if (pass.name == DEFAULT_OPT_PASSES) {
-        passRunner.addDefaultOptimizationPasses();
-      } else {
-        passRunner.add(pass.name);
-      }
+        // This is something like -O3 or -Oz. We must run this now, in order to
+        // set the proper opt and shrink levels. To do that, first reset the
+        // runner so that anything already queued is run (since we can only run
+        // after those things).
+        flush();
 
-      // Revert back to the default levels, if we changed them.
-      passRunner.options.optimizeLevel = oldOptimizeLevel;
-      passRunner.options.shrinkLevel = oldShrinkLevel;
+        // -O3/-Oz etc. always set their own optimize/shrinkLevels.
+        assert(pass.optimizeLevel);
+        assert(pass.shrinkLevel);
+
+        // Temporarily override the default levels.
+        assert(passRunner.options.optimizeLevel == passOptions.optimizeLevel);
+        assert(passRunner.options.shrinkLevel == passOptions.shrinkLevel);
+        passRunner.options.optimizeLevel = *pass.optimizeLevel;
+        passRunner.options.shrinkLevel = *pass.shrinkLevel;
+
+        // Run our optimizations now with the custom levels.
+        passRunner.addDefaultOptimizationPasses();
+        flush();
+
+        // Restore the default optimize/shrinkLevels.
+        passRunner.options.optimizeLevel = passOptions.optimizeLevel;
+        passRunner.options.shrinkLevel = passOptions.shrinkLevel;
+      } else {
+        // This is a normal pass. Add it to the queue for execution.
+        passRunner.add(pass.name);
+
+        // Normal passes do not set their own optimize/shrinkLevels.
+        assert(!pass.optimizeLevel);
+        assert(!pass.shrinkLevel);
+      }
     }
-    passRunner.run();
+
+    flush();
   }
 };
 

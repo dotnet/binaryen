@@ -59,7 +59,7 @@ inline bool isSymmetric(Binary* binary) {
 
 inline bool isControlFlowStructure(Expression* curr) {
   return curr->is<Block>() || curr->is<If>() || curr->is<Loop>() ||
-         curr->is<Try>();
+         curr->is<Try>() || curr->is<TryTable>();
 }
 
 // Check if an expression is a control flow construct with a name, which implies
@@ -82,7 +82,13 @@ inline bool isNamedControlFlow(Expression* curr) {
 // runtime will be equal as well. TODO: combine this with
 // isValidInConstantExpression or find better names(#4845)
 inline bool isSingleConstantExpression(const Expression* curr) {
-  return curr->is<Const>() || curr->is<RefNull>() || curr->is<RefFunc>();
+  if (auto* refAs = curr->dynCast<RefAs>()) {
+    if (refAs->op == ExternExternalize || refAs->op == ExternInternalize) {
+      return isSingleConstantExpression(refAs->value);
+    }
+  }
+  return curr->is<Const>() || curr->is<RefNull>() || curr->is<RefFunc>() ||
+         curr->is<StringConst>();
 }
 
 inline bool isConstantExpression(const Expression* curr) {
@@ -111,9 +117,17 @@ inline Literal getLiteral(const Expression* curr) {
     return Literal(n->type);
   } else if (auto* r = curr->dynCast<RefFunc>()) {
     return Literal(r->func, r->type.getHeapType());
-  } else if (auto* i = curr->dynCast<I31New>()) {
+  } else if (auto* i = curr->dynCast<RefI31>()) {
     if (auto* c = i->value->dynCast<Const>()) {
       return Literal::makeI31(c->value.geti32());
+    }
+  } else if (auto* s = curr->dynCast<StringConst>()) {
+    return Literal(s->string.toString());
+  } else if (auto* r = curr->dynCast<RefAs>()) {
+    if (r->op == ExternExternalize) {
+      return getLiteral(r->value).externalize();
+    } else if (r->op == ExternInternalize) {
+      return getLiteral(r->value).internalize();
     }
   }
   WASM_UNREACHABLE("non-constant expression");
@@ -348,6 +362,74 @@ inline Expression* getFallthrough(
   }
 }
 
+// Look at all the intermediate fallthrough expressions and return the most
+// precise type we know this value will have.
+inline Type getFallthroughType(Expression* curr,
+                               const PassOptions& passOptions,
+                               Module& module) {
+  Type type = curr->type;
+  if (!type.isRef()) {
+    // Only reference types can be improved (excepting improvements to
+    // unreachable, which we leave to refinalization).
+    // TODO: Handle tuples if that ever becomes important.
+    return type;
+  }
+  while (1) {
+    auto* next = getImmediateFallthrough(curr, passOptions, module);
+    if (next == curr) {
+      return type;
+    }
+    type = Type::getGreatestLowerBound(type, next->type);
+    if (type == Type::unreachable) {
+      return type;
+    }
+    curr = next;
+  }
+}
+
+// Find the best fallthrough value ordered by refinement of heaptype, refinement
+// of nullability, and closeness to the current expression. The type of the
+// expression this function returns may be nullable even if `getFallthroughType`
+// is non-nullable, but the heap type will definitely match.
+inline Expression** getMostRefinedFallthrough(Expression** currp,
+                                              const PassOptions& passOptions,
+                                              Module& module) {
+  Expression* curr = *currp;
+  if (!curr->type.isRef()) {
+    return currp;
+  }
+  auto bestType = curr->type.getHeapType();
+  auto bestNullability = curr->type.getNullability();
+  auto** bestp = currp;
+  while (1) {
+    curr = *currp;
+    auto** nextp =
+      Properties::getImmediateFallthroughPtr(currp, passOptions, module);
+    auto* next = *nextp;
+    if (next == curr || next->type == Type::unreachable) {
+      return bestp;
+    }
+    assert(next->type.isRef());
+    auto nextType = next->type.getHeapType();
+    auto nextNullability = next->type.getNullability();
+    if (nextType == bestType) {
+      // Heap types match: refine nullability if possible.
+      if (bestNullability == Nullable && nextNullability == NonNullable) {
+        bestp = nextp;
+        bestNullability = NonNullable;
+      }
+    } else {
+      // Refine heap type if possible, resetting nullability.
+      if (HeapType::isSubType(nextType, bestType)) {
+        bestp = nextp;
+        bestNullability = nextNullability;
+        bestType = nextType;
+      }
+    }
+    currp = nextp;
+  }
+}
+
 inline Index getNumChildren(Expression* curr) {
   Index ret = 0;
 
@@ -365,13 +447,10 @@ inline Index getNumChildren(Expression* curr) {
   }
 
 #define DELEGATE_FIELD_INT(id, field)
-#define DELEGATE_FIELD_INT_ARRAY(id, field)
 #define DELEGATE_FIELD_LITERAL(id, field)
 #define DELEGATE_FIELD_NAME(id, field)
-#define DELEGATE_FIELD_NAME_VECTOR(id, field)
 #define DELEGATE_FIELD_SCOPE_NAME_DEF(id, field)
 #define DELEGATE_FIELD_SCOPE_NAME_USE(id, field)
-#define DELEGATE_FIELD_SCOPE_NAME_USE_VECTOR(id, field)
 #define DELEGATE_FIELD_TYPE(id, field)
 #define DELEGATE_FIELD_HEAPTYPE(id, field)
 #define DELEGATE_FIELD_ADDRESS(id, field)
@@ -396,8 +475,8 @@ inline bool isResultFallthrough(Expression* curr) {
   // unreachable, for example, but then there is no meaningful answer to give
   // anyhow.
   return curr->is<LocalSet>() || curr->is<Block>() || curr->is<If>() ||
-         curr->is<Loop>() || curr->is<Try>() || curr->is<Select>() ||
-         curr->is<Break>();
+         curr->is<Loop>() || curr->is<Try>() || curr->is<TryTable>() ||
+         curr->is<Select>() || curr->is<Break>();
 }
 
 inline bool canEmitSelectWithArms(Expression* ifTrue, Expression* ifFalse) {
@@ -450,25 +529,9 @@ inline bool canEmitSelectWithArms(Expression* ifTrue, Expression* ifFalse) {
 //
 bool isGenerative(Expression* curr, FeatureSet features);
 
-inline bool isValidInConstantExpression(Expression* expr, FeatureSet features) {
-  if (isSingleConstantExpression(expr) || expr->is<GlobalGet>() ||
-      expr->is<StructNew>() || expr->is<ArrayNew>() || expr->is<ArrayInit>() ||
-      expr->is<I31New>() || expr->is<StringConst>()) {
-    return true;
-  }
-
-  if (features.hasExtendedConst()) {
-    if (expr->is<Binary>()) {
-      auto bin = static_cast<Binary*>(expr);
-      if (bin->op == AddInt64 || bin->op == SubInt64 || bin->op == MulInt64 ||
-          bin->op == AddInt32 || bin->op == SubInt32 || bin->op == MulInt32) {
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
+// Whether this expression is valid in a context where WebAssembly requires a
+// constant expression, such as a global initializer.
+bool isValidConstantExpression(Module& wasm, Expression* expr);
 
 } // namespace wasm::Properties
 

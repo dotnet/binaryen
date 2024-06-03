@@ -30,11 +30,23 @@ namespace wasm {
 // (see the SSA pass for actually creating new local indexes based
 // on this).
 //
+// Note that this is not guaranteed to be precise in unreachable code. That is,
+// we do not make the effort to represent the exact sets for each get, and may
+// overestimate them (specifically, we may mark the entry value as possible,
+// even if unreachability prevents that; doing so helps simplify and optimize
+// the code, which we think is worthwhile for the possible annoyance in
+// debugging etc.; and it has no downside for optimization, since unreachable
+// code will be removed anyhow).
+//
 struct LocalGraph {
   // main API
 
-  // the constructor computes getSetses, the sets affecting each get
-  LocalGraph(Function* func);
+  // The constructor computes getSetses, the sets affecting each get.
+  //
+  // If a module is passed in, it is used to find which features are needed in
+  // the computation (for example, if exception handling is disabled, then we
+  // can generate a simpler CFG, as calls cannot throw).
+  LocalGraph(Function* func, Module* module = nullptr);
 
   // The local.sets relevant for an index or a get. The most common case is to
   // have a single set; after that, to be a phi of 2 items, so we use a small

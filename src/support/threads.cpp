@@ -49,7 +49,7 @@ namespace wasm {
 
 Thread::Thread(ThreadPool* parent) : parent(parent) {
   assert(!parent->isRunning());
-  thread = make_unique<std::thread>(mainLoop, this);
+  thread = std::make_unique<std::thread>(mainLoop, this);
 }
 
 Thread::~Thread() {
@@ -124,7 +124,7 @@ void ThreadPool::initialize(size_t num) {
   resetThreadsAreReady();
   for (size_t i = 0; i < num; i++) {
     try {
-      threads.emplace_back(make_unique<Thread>(this));
+      threads.emplace_back(std::make_unique<Thread>(this));
     } catch (std::system_error&) {
       // failed to create a thread - don't use multithreading, as if num cores
       // == 1
@@ -139,7 +139,9 @@ void ThreadPool::initialize(size_t num) {
 }
 
 size_t ThreadPool::getNumCores() {
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  // In an Emscripten build without pthreads support, avoid the overhead of
+  // including support code for the below runtime checks.
   return 1;
 #else
   size_t num = std::max(1U, std::thread::hardware_concurrency());
@@ -156,7 +158,7 @@ ThreadPool* ThreadPool::get() {
   std::lock_guard<std::mutex> poolLock(creationMutex);
   if (!pool) {
     DEBUG_POOL("::get() creating\n");
-    std::unique_ptr<ThreadPool> temp = make_unique<ThreadPool>();
+    std::unique_ptr<ThreadPool> temp = std::make_unique<ThreadPool>();
     temp->initialize(getNumCores());
     // assign it to the global location now that it is all ready
     pool.swap(temp);

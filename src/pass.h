@@ -67,13 +67,15 @@ struct InliningOptions {
   // Typically a size so small that after optimizations, the inlined code will
   // be smaller than the call instruction itself. 2 is a safe number because
   // there is no risk of things like
+  //
   //  (func $reverse (param $x i32) (param $y i32)
   //   (call $something (local.get $y) (local.get $x))
   //  )
-  // in which case the reversing of the params means we'll possibly need
-  // a block and a temp local. But that takes at least 3 nodes, and 2 < 3.
-  // More generally, with 2 items we may have a local.get, but no way to
-  // require it to be saved instead of directly consumed.
+  //
+  // in which case the reversing of the params means we'll possibly need a temp
+  // local. But that takes at least 3 nodes, and 2 < 3, while with 2 items we
+  // may have a local.get, but no way to require it to be saved instead of
+  // directly consumed.
   Index alwaysInlineMaxSize = 2;
   // Function size which we inline when there is only one caller. By default we
   // inline all such functions (as after inlining we can remove the original
@@ -233,8 +235,9 @@ struct PassOptions {
   // other passes later can benefit from it. It is up to the sequence of passes
   // to update or discard this when necessary - in particular, when new effects
   // are added to a function this must be changed or we may optimize
-  // incorrectly (however, it is extremely rare for a pass to *add* effects;
-  // passes normally only remove effects).
+  // incorrectly. However, it is extremely rare for a pass to *add* effects;
+  // passes normally only remove effects. Passes that do add effects must set
+  // addsEffects() so the pass runner is aware of them.
   std::shared_ptr<FuncEffectsMap> funcEffectsMap;
 
   // -Os is our default
@@ -316,6 +319,9 @@ struct PassRunner {
   // Add a pass given an instance.
   void add(std::unique_ptr<Pass> pass) { doAdd(std::move(pass)); }
 
+  // Clears away all passes that have been added.
+  void clear();
+
   // Adds the pass if there are no DWARF-related issues. There is an issue if
   // there is DWARF and if the pass does not support DWARF (as defined by the
   // pass returning true from invalidatesDWARF); otherwise, if there is no
@@ -384,12 +390,6 @@ private:
   // Whether the passes we have added so far to be run (but not necessarily run
   // yet) have removed DWARF.
   bool addedPassesRemovedDWARF = false;
-
-  // Whether this pass runner has run. A pass runner should only be run once.
-  bool ran = false;
-
-  // Passes in |options.passesToSkip| that we have seen and skipped.
-  std::unordered_set<std::string> skippedPasses;
 
   void runPass(Pass* pass);
   void runPassOnFunction(Pass* pass, Function* func);
@@ -469,6 +469,13 @@ public:
   // For more details see the LocalStructuralDominance class.
   virtual bool requiresNonNullableLocalFixups() { return true; }
 
+  // Many passes can remove effects, for example, by finding some path is not
+  // reached and removing a throw or a call there. The few passes that *add*
+  // effects must mark themselves as such, so that we know to discard global
+  // effects after running them. For example, a logging pass that adds new calls
+  // to imports must override this to return true.
+  virtual bool addsEffects() { return false; }
+
   std::string name;
 
   PassRunner* getPassRunner() { return runner; }
@@ -481,7 +488,8 @@ public:
 
 protected:
   Pass() = default;
-  Pass(Pass&) = default;
+  Pass(const Pass&) = default;
+  Pass(Pass&&) = default;
   Pass& operator=(const Pass&) = delete;
 };
 

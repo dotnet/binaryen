@@ -1,15 +1,15 @@
 (module
- (type $none_=>_none (func))
- (type $none_=>_i32 (func (result i32)))
- (type $none_=>_f64 (func (result f64)))
+ (type $0 (func))
+ (type $1 (func (result i32)))
+ (type $2 (func (result f64)))
  (type $0 (func (param i32)))
- (type $none_=>_v128 (func (result v128)))
- (type $none_=>_i32_i64 (func (result i32 i64)))
- (type $none_=>_externref (func (result externref)))
+ (type $4 (func (result v128)))
+ (type $5 (func (result i32 i64)))
+ (type $6 (func (result externref)))
  (global $global i32 (i32.const 1))
  (global $global-mut (mut i32) (i32.const 2))
- (memory $0 512 512)
- (data (i32.const 0) "hello!")
+ (memory $m 512 512)
+ (data $0 (i32.const 0) "hello!")
  (elem declare func $dummy)
  (func $x (type $0) (param $x i32)
   (call $x
@@ -93,28 +93,34 @@
    (i32.const 0)
   )
  )
- (func $ret (type $none_=>_i32) (result i32)
+ (func $ret (type $1) (result i32)
   (if
    (call $ret)
-   (return
-    (i32.const 0)
+   (then
+    (return
+     (i32.const 0)
+    )
    )
   )
   (if
    (call $ret)
-   (return
-    (i32.const 1)
+   (then
+    (return
+     (i32.const 1)
+    )
    )
   )
   (i32.const 1)
  )
- (func $noret (type $none_=>_none)
+ (func $noret (type $0)
   (if
    (call $ret)
-   (return)
+   (then
+    (return)
+   )
   )
  )
- (func $refinalize-br-condition-unreachable (type $none_=>_none)
+ (func $refinalize-br-condition-unreachable (type $0)
   (block $label$1
    (drop
     (br_if $label$1
@@ -123,7 +129,7 @@
    )
   )
  )
- (func $br_if-condition-is-block-i32-but-unreachable-so-refinalize-tricky (type $none_=>_none)
+ (func $br_if-condition-is-block-i32-but-unreachable-so-refinalize-tricky (type $0)
   (drop
    (block $label$1 (result i32)
     (drop
@@ -138,34 +144,38 @@
    )
   )
  )
- (func $reuse-br-value (type $none_=>_f64) (result f64)
+ (func $reuse-br-value (type $2) (result f64)
   (block $label$0 (result f64)
    (i32.store8
     (i32.const 1919623207)
     (if (result i32)
      (i32.const 1)
-     (block $label$2
-      (drop
-       (i64.and
-        (i64.trunc_f32_u
-         (f32.const 70847791997969805621592064)
+     (then
+      (block $label$2
+       (drop
+        (i64.and
+         (i64.trunc_f32_u
+          (f32.const 70847791997969805621592064)
+         )
+         (i64.const 729618461987467893)
         )
-        (i64.const 729618461987467893)
+       )
+       (br $label$0
+        (f64.const 6.134856208230095e-154)
        )
       )
-      (br $label$0
-       (f64.const 6.134856208230095e-154)
-      )
      )
-     (i32.load offset=3 align=2
-      (i32.const 169901344)
+     (else
+      (i32.load offset=3 align=2
+       (i32.const 169901344)
+      )
      )
     )
    )
    (f64.const 4776014875438170098655851e156)
   )
  )
- (func $refinalize-two-breaks-one-unreachable (type $none_=>_none)
+ (func $refinalize-two-breaks-one-unreachable (type $0)
   (drop
    (block $label$0 (result i64)
     (block
@@ -188,7 +198,7 @@
    )
   )
  )
- (func $one-break-value-and-it-is-unreachable (type $none_=>_f64) (result f64)
+ (func $one-break-value-and-it-is-unreachable (type $2) (result f64)
   (local $var$0 i32)
   (block $label$6
    (block
@@ -199,16 +209,16 @@
    )
   )
  )
- (func $global-notprecomputable (type $none_=>_i32) (result i32)
+ (func $global-notprecomputable (type $1) (result i32)
   (i32.add
    (i32.const 1)
    (global.get $global-mut)
   )
  )
- (func $global-precomputable (type $none_=>_i32) (result i32)
+ (func $global-precomputable (type $1) (result i32)
   (i32.const 2)
  )
- (func $global-partiallyprecomputable (type $none_=>_i32) (result i32)
+ (func $global-partiallyprecomputable (type $1) (result i32)
   (i32.sub
    (i32.add
     (i32.const 1)
@@ -217,49 +227,49 @@
    (i32.const 2)
   )
  )
- (func $simd-precompute (type $none_=>_v128) (result v128)
+ (func $simd-precompute (type $4) (result v128)
   (v128.const i32x4 0x00000000 0x00000000 0x00000000 0x00000000)
  )
- (func $no-memory-init-precompute (type $none_=>_none)
-  (memory.init 0
+ (func $no-memory-init-precompute (type $0)
+  (memory.init $0
    (i32.const 512)
    (i32.const 0)
    (i32.const 12)
   )
  )
- (func $no-data-drop-precompute (type $none_=>_none)
-  (data.drop 0)
+ (func $no-data-drop-precompute (type $0)
+  (data.drop $0)
  )
- (func $no-memory-copy-precompute (type $none_=>_none)
+ (func $no-memory-copy-precompute (type $0)
   (memory.copy
    (i32.const 512)
    (i32.const 0)
    (i32.const 12)
   )
  )
- (func $no-memory-fill-precompute (type $none_=>_none)
+ (func $no-memory-fill-precompute (type $0)
   (memory.fill
    (i32.const 512)
    (i32.const 0)
    (i32.const 12)
   )
  )
- (func $tuple-precompute (type $none_=>_i32_i64) (result i32 i64)
-  (tuple.make
+ (func $tuple-precompute (type $5) (result i32 i64)
+  (tuple.make 2
    (i32.const 42)
    (i64.const 42)
   )
  )
- (func $loop-precompute (type $none_=>_i32) (result i32)
+ (func $loop-precompute (type $1) (result i32)
   (i32.const 1)
  )
- (func $reftype-test (type $none_=>_externref) (result externref)
+ (func $reftype-test (type $6) (result externref)
   (ref.null noextern)
  )
- (func $dummy (type $none_=>_none)
+ (func $dummy (type $0)
   (nop)
  )
- (func $br_reuse_node (type $none_=>_none)
+ (func $br_reuse_node (type $0)
   (drop
    (block $l0 (result f32)
     (drop
@@ -291,7 +301,7 @@
    )
   )
   (drop
-   (block $l4 (result (ref null $none_=>_none))
+   (block $l4 (result (ref null $0))
     (drop
      (block $l5
       (global.set $global-mut

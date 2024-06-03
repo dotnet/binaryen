@@ -37,13 +37,30 @@ RUN_LINE_RE = re.compile(r'^\s*;;\s*RUN:\s*(.*)$')
 CHECK_PREFIX_RE = re.compile(r'.*--check-prefix[= ](\S+).*')
 MODULE_RE = re.compile(r'^\(module.*$', re.MULTILINE)
 
-ALL_ITEMS = '|'.join(['type', 'import', 'global', 'memory', 'data', 'table',
-                      'elem', 'tag', 'export', 'start', 'func'])
-ITEM_NAME = r'\$?[^\s()]*|"[^\s()]*"'
+DECL_ITEMS = '|'.join(['type', 'global', 'memory', 'data', 'table',
+                       'elem', 'tag', 'start', 'func'])
+IMPORT_ITEM = r'import\s*"[^"]*"\s*"[^"]*"\s*\((?:' + DECL_ITEMS + ')'
+EXPORT_ITEM = r'export\s*"[^"]*"\s*\((?:' + DECL_ITEMS + ')'
+ALL_ITEMS = DECL_ITEMS + '|' + IMPORT_ITEM + '|' + EXPORT_ITEM
+
+# Regular names as well as the "declare" in (elem declare ... to get declarative
+# segments included in the output.
+ITEM_NAME = r'\$[^\s()]*|\$"[^"]*"|declare'
+
+# FIXME: This does not handle nested string contents. For example,
+#  (data (i32.const 10) "hello(")
+# will look unterminated, due to the '(' inside the string. As a result, the
+# code below will consider more elements after the |data| to be part of it,
+# until it sees enough closing ')' symbols.
 ITEM_RE = re.compile(r'(?:^\s*\(rec\s*)?(^\s*)\((' + ALL_ITEMS + r')\s+(' + ITEM_NAME + ').*$',
                      re.MULTILINE)
 
 FUZZ_EXEC_FUNC = re.compile(r'^\[fuzz-exec\] calling (?P<name>\S*)$')
+
+
+def indentKindName(match):
+    # Return the indent, kind, and name from an ITEM_RE match
+    return (match[1], match[2].split()[0], match[3])
 
 
 def warn(msg):
@@ -89,6 +106,7 @@ def run_command(args, test, tmp, command):
     env = dict(os.environ)
     env['PATH'] = args.binaryen_bin + os.pathsep + env['PATH']
     command = command.replace('%s', test)
+    command = command.replace('%S', os.path.dirname(test))
     command = command.replace('%t', tmp)
     command = command.replace('foreach', os.path.join(script_dir, 'foreach.py'))
     return subprocess.check_output(command, shell=True, env=env).decode('utf-8')
@@ -131,7 +149,7 @@ def parse_output_modules(text):
     for module in split_modules(text):
         items = []
         for match in ITEM_RE.finditer(module):
-            kind, name = match[2], match[3]
+            _, kind, name = indentKindName(match)
             end = find_end(module, match.end(1))
             lines = module[match.start():end].split('\n')
             items.append(((kind, name), lines))
@@ -146,10 +164,16 @@ def parse_output_fuzz_exec(text):
     for line in text.split('\n'):
         func = FUZZ_EXEC_FUNC.match(line)
         if func:
-            # Add quotes around the name because that is how it will be parsed
+            # Add a '$' prefix to the name because that is how it will be parsed
             # in the input.
-            name = f'"{func.group("name")}"'
+            name = '$' + func.group("name")
             items.append((('func', name), [line]))
+        elif line.startswith('[host limit'):
+            # Skip mentions of host limits that we hit. This can happen even
+            # before we reach the execution of a function (if it happens during
+            # instantiation of the module), in which case |items| may be empty,
+            # and we'd error on the code below.
+            pass
         elif line:
             assert items, 'unexpected non-invocation line'
             items[-1][1].append(line)
@@ -231,7 +255,7 @@ def update_test(args, test, lines, tmp):
     for line in lines:
         match = ITEM_RE.match(line)
         if match:
-            kind, name = match[2], match[3]
+            _, kind, name = indentKindName(match)
             named_items.append((kind, name))
 
     script = script_name
@@ -270,7 +294,7 @@ def update_test(args, test, lines, tmp):
                 output_lines.append(line)
                 continue
 
-            indent, kind, name = match.groups()
+            indent, kind, name = indentKindName(match)
 
             for prefix, items in output.items():
                 # If the output for this prefix contains an item with this

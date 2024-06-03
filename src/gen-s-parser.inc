@@ -16,6 +16,9 @@ switch (buf[0]) {
           case 'c':
             if (op == "array.copy"sv) { return makeArrayCopy(s); }
             goto parse_error;
+          case 'f':
+            if (op == "array.fill"sv) { return makeArrayFill(s); }
+            goto parse_error;
           case 'g': {
             switch (buf[9]) {
               case '\0':
@@ -35,9 +38,17 @@ switch (buf[0]) {
               default: goto parse_error;
             }
           }
-          case 'i':
-            if (op == "array.init_static"sv) { return makeArrayInitStatic(s); }
-            goto parse_error;
+          case 'i': {
+            switch (buf[11]) {
+              case 'd':
+                if (op == "array.init_data"sv) { return makeArrayInitData(s); }
+                goto parse_error;
+              case 'e':
+                if (op == "array.init_elem"sv) { return makeArrayInitElem(s); }
+                goto parse_error;
+              default: goto parse_error;
+            }
+          }
           case 'l':
             if (op == "array.len"sv) { return makeArrayLen(s); }
             goto parse_error;
@@ -51,7 +62,7 @@ switch (buf[0]) {
                   case 'd': {
                     switch (buf[11]) {
                       case 'a':
-                        if (op == "array.new_data"sv) { return makeArrayNewSeg(s, NewData); }
+                        if (op == "array.new_data"sv) { return makeArrayNewData(s); }
                         goto parse_error;
                       case 'e':
                         if (op == "array.new_default"sv) { return makeArrayNew(s, true); }
@@ -60,7 +71,10 @@ switch (buf[0]) {
                     }
                   }
                   case 'e':
-                    if (op == "array.new_elem"sv) { return makeArrayNewSeg(s, NewElem); }
+                    if (op == "array.new_elem"sv) { return makeArrayNewElem(s); }
+                    goto parse_error;
+                  case 'f':
+                    if (op == "array.new_fixed"sv) { return makeArrayNewFixed(s); }
                     goto parse_error;
                   default: goto parse_error;
                 }
@@ -88,64 +102,31 @@ switch (buf[0]) {
       case 'r': {
         switch (buf[2]) {
           case '\0':
-            if (op == "br"sv) { return makeBreak(s); }
+            if (op == "br"sv) { return makeBreak(s, false); }
             goto parse_error;
           case '_': {
             switch (buf[3]) {
               case 'i':
-                if (op == "br_if"sv) { return makeBreak(s); }
+                if (op == "br_if"sv) { return makeBreak(s, true); }
                 goto parse_error;
               case 'o': {
                 switch (buf[6]) {
                   case 'c': {
                     switch (buf[10]) {
                       case '\0':
-                        if (op == "br_on_cast"sv) { return makeBrOnCast(s, std::nullopt); }
+                        if (op == "br_on_cast"sv) { return makeBrOnCast(s); }
                         goto parse_error;
-                      case '_': {
-                        switch (buf[11]) {
-                          case 'f':
-                            if (op == "br_on_cast_fail"sv) { return makeBrOnCast(s, std::nullopt, true); }
-                            goto parse_error;
-                          case 's': {
-                            switch (buf[17]) {
-                              case '\0':
-                                if (op == "br_on_cast_static"sv) { return makeBrOnCast(s, std::nullopt); }
-                                goto parse_error;
-                              case '_':
-                                if (op == "br_on_cast_static_fail"sv) { return makeBrOnCast(s, std::nullopt, true); }
-                                goto parse_error;
-                              default: goto parse_error;
-                            }
-                          }
-                          default: goto parse_error;
-                        }
-                      }
+                      case '_':
+                        if (op == "br_on_cast_fail"sv) { return makeBrOnCast(s, true); }
+                        goto parse_error;
                       default: goto parse_error;
                     }
                   }
-                  case 'f':
-                    if (op == "br_on_func"sv) { return makeBrOnCast(s, Type(HeapType::func, NonNullable)); }
-                    goto parse_error;
-                  case 'i':
-                    if (op == "br_on_i31"sv) { return makeBrOnCast(s, Type(HeapType::i31, NonNullable)); }
-                    goto parse_error;
                   case 'n': {
                     switch (buf[7]) {
-                      case 'o': {
-                        switch (buf[10]) {
-                          case 'f':
-                            if (op == "br_on_non_func"sv) { return makeBrOnCast(s, Type(HeapType::func, NonNullable), true); }
-                            goto parse_error;
-                          case 'i':
-                            if (op == "br_on_non_i31"sv) { return makeBrOnCast(s, Type(HeapType::i31, NonNullable), true); }
-                            goto parse_error;
-                          case 'n':
-                            if (op == "br_on_non_null"sv) { return makeBrOnNull(s, true); }
-                            goto parse_error;
-                          default: goto parse_error;
-                        }
-                      }
+                      case 'o':
+                        if (op == "br_on_non_null"sv) { return makeBrOnNull(s, true); }
+                        goto parse_error;
                       case 'u':
                         if (op == "br_on_null"sv) { return makeBrOnNull(s); }
                         goto parse_error;
@@ -168,21 +149,29 @@ switch (buf[0]) {
     }
   }
   case 'c': {
-    switch (buf[4]) {
-      case '\0':
-        if (op == "call"sv) { return makeCall(s, /*isReturn=*/false); }
-        goto parse_error;
-      case '_': {
-        switch (buf[5]) {
-          case 'i':
-            if (op == "call_indirect"sv) { return makeCallIndirect(s, /*isReturn=*/false); }
+    switch (buf[1]) {
+      case 'a': {
+        switch (buf[4]) {
+          case '\0':
+            if (op == "call"sv) { return makeCall(s, /*isReturn=*/false); }
             goto parse_error;
-          case 'r':
-            if (op == "call_ref"sv) { return makeCallRef(s, /*isReturn=*/false); }
-            goto parse_error;
+          case '_': {
+            switch (buf[5]) {
+              case 'i':
+                if (op == "call_indirect"sv) { return makeCallIndirect(s, /*isReturn=*/false); }
+                goto parse_error;
+              case 'r':
+                if (op == "call_ref"sv) { return makeCallRef(s, /*isReturn=*/false); }
+                goto parse_error;
+              default: goto parse_error;
+            }
+          }
           default: goto parse_error;
         }
       }
+      case 'o':
+        if (op == "cont.new"sv) { return makeContNew(s); }
+        goto parse_error;
       default: goto parse_error;
     }
   }
@@ -1222,7 +1211,7 @@ switch (buf[0]) {
                 }
               }
               case 'n':
-                if (op == "i31.new"sv) { return makeI31New(s); }
+                if (op == "i31.new"sv) { return makeRefI31(s); }
                 goto parse_error;
               default: goto parse_error;
             }
@@ -2991,47 +2980,12 @@ switch (buf[0]) {
     switch (buf[2]) {
       case 'f': {
         switch (buf[4]) {
-          case 'a': {
-            switch (buf[7]) {
-              case 'f':
-                if (op == "ref.as_func"sv) { return makeRefCast(s, Type(HeapType::func, NonNullable)); }
-                goto parse_error;
-              case 'i':
-                if (op == "ref.as_i31"sv) { return makeRefCast(s, Type(HeapType::i31, NonNullable)); }
-                goto parse_error;
-              case 'n':
-                if (op == "ref.as_non_null"sv) { return makeRefAs(s, RefAsNonNull); }
-                goto parse_error;
-              default: goto parse_error;
-            }
-          }
-          case 'c': {
-            switch (buf[8]) {
-              case '\0':
-                if (op == "ref.cast"sv) { return makeRefCast(s); }
-                goto parse_error;
-              case '_': {
-                switch (buf[9]) {
-                  case 'n': {
-                    switch (buf[12]) {
-                      case '\0':
-                        if (op == "ref.cast_nop"sv) { return makeRefCastNop(s); }
-                        goto parse_error;
-                      case '_':
-                        if (op == "ref.cast_nop_static"sv) { return makeRefCastNop(s); }
-                        goto parse_error;
-                      default: goto parse_error;
-                    }
-                  }
-                  case 's':
-                    if (op == "ref.cast_static"sv) { return makeRefCast(s); }
-                    goto parse_error;
-                  default: goto parse_error;
-                }
-              }
-              default: goto parse_error;
-            }
-          }
+          case 'a':
+            if (op == "ref.as_non_null"sv) { return makeRefAs(s, RefAsNonNull); }
+            goto parse_error;
+          case 'c':
+            if (op == "ref.cast"sv) { return makeRefCast(s); }
+            goto parse_error;
           case 'e':
             if (op == "ref.eq"sv) { return makeRefEq(s); }
             goto parse_error;
@@ -3039,14 +2993,11 @@ switch (buf[0]) {
             if (op == "ref.func"sv) { return makeRefFunc(s); }
             goto parse_error;
           case 'i': {
-            switch (buf[7]) {
-              case 'f':
-                if (op == "ref.is_func"sv) { return makeRefTest(s, Type(HeapType::func, NonNullable)); }
+            switch (buf[5]) {
+              case '3':
+                if (op == "ref.i31"sv) { return makeRefI31(s); }
                 goto parse_error;
-              case 'i':
-                if (op == "ref.is_i31"sv) { return makeRefTest(s, Type(HeapType::i31, NonNullable)); }
-                goto parse_error;
-              case 'n':
+              case 's':
                 if (op == "ref.is_null"sv) { return makeRefIsNull(s); }
                 goto parse_error;
               default: goto parse_error;
@@ -3055,20 +3006,15 @@ switch (buf[0]) {
           case 'n':
             if (op == "ref.null"sv) { return makeRefNull(s); }
             goto parse_error;
-          case 't': {
-            switch (buf[8]) {
-              case '\0':
-                if (op == "ref.test"sv) { return makeRefTest(s); }
-                goto parse_error;
-              case '_':
-                if (op == "ref.test_static"sv) { return makeRefTest(s); }
-                goto parse_error;
-              default: goto parse_error;
-            }
-          }
+          case 't':
+            if (op == "ref.test"sv) { return makeRefTest(s); }
+            goto parse_error;
           default: goto parse_error;
         }
       }
+      case 's':
+        if (op == "resume"sv) { return makeResume(s); }
+        goto parse_error;
       case 't': {
         switch (buf[3]) {
           case 'h':
@@ -3159,26 +3105,53 @@ switch (buf[0]) {
                   case 'e': {
                     switch (buf[8]) {
                       case 'n': {
-                        switch (buf[17]) {
-                          case '1': {
-                            switch (buf[19]) {
+                        switch (buf[14]) {
+                          case 'l': {
+                            switch (buf[24]) {
                               case '\0':
-                                if (op == "string.encode_wtf16"sv) { return makeStringEncode(s, StringEncodeWTF16); }
+                                if (op == "string.encode_lossy_utf8"sv) { return makeStringEncode(s, StringEncodeLossyUTF8); }
                                 goto parse_error;
                               case '_':
-                                if (op == "string.encode_wtf16_array"sv) { return makeStringEncode(s, StringEncodeWTF16Array); }
+                                if (op == "string.encode_lossy_utf8_array"sv) { return makeStringEncode(s, StringEncodeLossyUTF8Array); }
                                 goto parse_error;
                               default: goto parse_error;
                             }
                           }
-                          case '8': {
+                          case 'u': {
                             switch (buf[18]) {
                               case '\0':
-                                if (op == "string.encode_wtf8"sv) { return makeStringEncode(s, StringEncodeWTF8); }
+                                if (op == "string.encode_utf8"sv) { return makeStringEncode(s, StringEncodeUTF8); }
                                 goto parse_error;
                               case '_':
-                                if (op == "string.encode_wtf8_array"sv) { return makeStringEncode(s, StringEncodeWTF8Array); }
+                                if (op == "string.encode_utf8_array"sv) { return makeStringEncode(s, StringEncodeUTF8Array); }
                                 goto parse_error;
+                              default: goto parse_error;
+                            }
+                          }
+                          case 'w': {
+                            switch (buf[17]) {
+                              case '1': {
+                                switch (buf[19]) {
+                                  case '\0':
+                                    if (op == "string.encode_wtf16"sv) { return makeStringEncode(s, StringEncodeWTF16); }
+                                    goto parse_error;
+                                  case '_':
+                                    if (op == "string.encode_wtf16_array"sv) { return makeStringEncode(s, StringEncodeWTF16Array); }
+                                    goto parse_error;
+                                  default: goto parse_error;
+                                }
+                              }
+                              case '8': {
+                                switch (buf[18]) {
+                                  case '\0':
+                                    if (op == "string.encode_wtf8"sv) { return makeStringEncode(s, StringEncodeWTF8); }
+                                    goto parse_error;
+                                  case '_':
+                                    if (op == "string.encode_wtf8_array"sv) { return makeStringEncode(s, StringEncodeWTF8Array); }
+                                    goto parse_error;
+                                  default: goto parse_error;
+                                }
+                              }
                               default: goto parse_error;
                             }
                           }
@@ -3201,26 +3174,61 @@ switch (buf[0]) {
                     if (op == "string.is_usv_sequence"sv) { return makeStringMeasure(s, StringMeasureIsUSV); }
                     goto parse_error;
                   case 'm': {
-                    switch (buf[18]) {
-                      case '1':
-                        if (op == "string.measure_wtf16"sv) { return makeStringMeasure(s, StringMeasureWTF16); }
+                    switch (buf[15]) {
+                      case 'u':
+                        if (op == "string.measure_utf8"sv) { return makeStringMeasure(s, StringMeasureUTF8); }
                         goto parse_error;
-                      case '8':
-                        if (op == "string.measure_wtf8"sv) { return makeStringMeasure(s, StringMeasureWTF8); }
-                        goto parse_error;
+                      case 'w': {
+                        switch (buf[18]) {
+                          case '1':
+                            if (op == "string.measure_wtf16"sv) { return makeStringMeasure(s, StringMeasureWTF16); }
+                            goto parse_error;
+                          case '8':
+                            if (op == "string.measure_wtf8"sv) { return makeStringMeasure(s, StringMeasureWTF8); }
+                            goto parse_error;
+                          default: goto parse_error;
+                        }
+                      }
                       default: goto parse_error;
                     }
                   }
                   case 'n': {
                     switch (buf[11]) {
+                      case 'l': {
+                        switch (buf[21]) {
+                          case '\0':
+                            if (op == "string.new_lossy_utf8"sv) { return makeStringNew(s, StringNewLossyUTF8, false); }
+                            goto parse_error;
+                          case '_':
+                            if (op == "string.new_lossy_utf8_array"sv) { return makeStringNew(s, StringNewLossyUTF8Array, false); }
+                            goto parse_error;
+                          default: goto parse_error;
+                        }
+                      }
                       case 'u': {
-                        switch (buf[16]) {
-                          case 'a':
-                            if (op == "string.new_utf8_array_try"sv) { return makeStringNew(s, StringNewUTF8Array, true); }
+                        switch (buf[15]) {
+                          case '\0':
+                            if (op == "string.new_utf8"sv) { return makeStringNew(s, StringNewUTF8, false); }
                             goto parse_error;
-                          case 't':
-                            if (op == "string.new_utf8_try"sv) { return makeStringNew(s, StringNewUTF8, true); }
-                            goto parse_error;
+                          case '_': {
+                            switch (buf[16]) {
+                              case 'a': {
+                                switch (buf[21]) {
+                                  case '\0':
+                                    if (op == "string.new_utf8_array"sv) { return makeStringNew(s, StringNewUTF8Array, false); }
+                                    goto parse_error;
+                                  case '_':
+                                    if (op == "string.new_utf8_array_try"sv) { return makeStringNew(s, StringNewUTF8Array, true); }
+                                    goto parse_error;
+                                  default: goto parse_error;
+                                }
+                              }
+                              case 't':
+                                if (op == "string.new_utf8_try"sv) { return makeStringNew(s, StringNewUTF8, true); }
+                                goto parse_error;
+                              default: goto parse_error;
+                            }
+                          }
                           default: goto parse_error;
                         }
                       }
@@ -3360,6 +3368,12 @@ switch (buf[0]) {
     switch (buf[1]) {
       case 'a': {
         switch (buf[6]) {
+          case 'c':
+            if (op == "table.copy"sv) { return makeTableCopy(s); }
+            goto parse_error;
+          case 'f':
+            if (op == "table.fill"sv) { return makeTableFill(s); }
+            goto parse_error;
           case 'g': {
             switch (buf[7]) {
               case 'e':
@@ -3390,17 +3404,36 @@ switch (buf[0]) {
           case 'e':
             if (op == "then"sv) { return makeThenOrElse(s); }
             goto parse_error;
-          case 'r':
-            if (op == "throw"sv) { return makeThrow(s); }
+          case 'r': {
+            switch (buf[5]) {
+              case '\0':
+                if (op == "throw"sv) { return makeThrow(s); }
+                goto parse_error;
+              case '_':
+                if (op == "throw_ref"sv) { return makeThrowRef(s); }
+                goto parse_error;
+              default: goto parse_error;
+            }
+          }
+          default: goto parse_error;
+        }
+      }
+      case 'r': {
+        switch (buf[3]) {
+          case '\0':
+            if (op == "try"sv) { return makeTry(s); }
+            goto parse_error;
+          case '_':
+            if (op == "try_table"sv) { return makeTryTable(s); }
             goto parse_error;
           default: goto parse_error;
         }
       }
-      case 'r':
-        if (op == "try"sv) { return makeTry(s); }
-        goto parse_error;
       case 'u': {
         switch (buf[6]) {
+          case 'd':
+            if (op == "tuple.drop"sv) { return makeTupleDrop(s); }
+            goto parse_error;
           case 'e':
             if (op == "tuple.extract"sv) { return makeTupleExtract(s); }
             goto parse_error;
@@ -3599,34 +3632,36 @@ switch (buf[0]) {
         switch (buf[6]) {
           case 'c':
             if (op == "array.copy"sv) {
-              auto ret = makeArrayCopy(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeArrayCopy(ctx, pos, annotations));
+              return Ok{};
+            }
+            goto parse_error;
+          case 'f':
+            if (op == "array.fill"sv) {
+              CHECK_ERR(makeArrayFill(ctx, pos, annotations));
+              return Ok{};
             }
             goto parse_error;
           case 'g': {
             switch (buf[9]) {
               case '\0':
                 if (op == "array.get"sv) {
-                  auto ret = makeArrayGet(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeArrayGet(ctx, pos, annotations));
+                  return Ok{};
                 }
                 goto parse_error;
               case '_': {
                 switch (buf[10]) {
                   case 's':
                     if (op == "array.get_s"sv) {
-                      auto ret = makeArrayGet(ctx, pos, true);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeArrayGet(ctx, pos, annotations, true));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "array.get_u"sv) {
-                      auto ret = makeArrayGet(ctx, pos, false);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeArrayGet(ctx, pos, annotations, false));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -3635,27 +3670,35 @@ switch (buf[0]) {
               default: goto parse_error;
             }
           }
-          case 'i':
-            if (op == "array.init_static"sv) {
-              auto ret = makeArrayInitStatic(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+          case 'i': {
+            switch (buf[11]) {
+              case 'd':
+                if (op == "array.init_data"sv) {
+                  CHECK_ERR(makeArrayInitData(ctx, pos, annotations));
+                  return Ok{};
+                }
+                goto parse_error;
+              case 'e':
+                if (op == "array.init_elem"sv) {
+                  CHECK_ERR(makeArrayInitElem(ctx, pos, annotations));
+                  return Ok{};
+                }
+                goto parse_error;
+              default: goto parse_error;
             }
-            goto parse_error;
+          }
           case 'l':
             if (op == "array.len"sv) {
-              auto ret = makeArrayLen(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeArrayLen(ctx, pos, annotations));
+              return Ok{};
             }
             goto parse_error;
           case 'n': {
             switch (buf[9]) {
               case '\0':
                 if (op == "array.new"sv) {
-                  auto ret = makeArrayNew(ctx, pos, false);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeArrayNew(ctx, pos, annotations, false));
+                  return Ok{};
                 }
                 goto parse_error;
               case '_': {
@@ -3664,16 +3707,14 @@ switch (buf[0]) {
                     switch (buf[11]) {
                       case 'a':
                         if (op == "array.new_data"sv) {
-                          auto ret = makeArrayNewSeg(ctx, pos, NewData);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeArrayNewData(ctx, pos, annotations));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'e':
                         if (op == "array.new_default"sv) {
-                          auto ret = makeArrayNew(ctx, pos, true);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeArrayNew(ctx, pos, annotations, true));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -3681,9 +3722,14 @@ switch (buf[0]) {
                   }
                   case 'e':
                     if (op == "array.new_elem"sv) {
-                      auto ret = makeArrayNewSeg(ctx, pos, NewElem);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeArrayNewElem(ctx, pos, annotations));
+                      return Ok{};
+                    }
+                    goto parse_error;
+                  case 'f':
+                    if (op == "array.new_fixed"sv) {
+                      CHECK_ERR(makeArrayNewFixed(ctx, pos, annotations));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -3694,9 +3740,8 @@ switch (buf[0]) {
           }
           case 's':
             if (op == "array.set"sv) {
-              auto ret = makeArraySet(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeArraySet(ctx, pos, annotations));
+              return Ok{};
             }
             goto parse_error;
           default: goto parse_error;
@@ -3704,146 +3749,102 @@ switch (buf[0]) {
       }
       case 't':
         if (op == "atomic.fence"sv) {
-          auto ret = makeAtomicFence(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeAtomicFence(ctx, pos, annotations));
+          return Ok{};
         }
         goto parse_error;
       default: goto parse_error;
     }
   }
   case 'b': {
-    switch (buf[1]) {
-      case 'l':
-        if (op == "block"sv) {
-          auto ret = makeBlock(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+    switch (buf[2]) {
+      case '\0':
+        if (op == "br"sv) {
+          CHECK_ERR(makeBreak(ctx, pos, annotations, false));
+          return Ok{};
         }
         goto parse_error;
-      case 'r': {
-        switch (buf[2]) {
-          case '\0':
-            if (op == "br"sv) {
-              auto ret = makeBreak(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+      case '_': {
+        switch (buf[3]) {
+          case 'i':
+            if (op == "br_if"sv) {
+              CHECK_ERR(makeBreak(ctx, pos, annotations, true));
+              return Ok{};
             }
             goto parse_error;
-          case '_': {
-            switch (buf[3]) {
-              case 'i':
-                if (op == "br_if"sv) {
-                  auto ret = makeBreak(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
-                }
-                goto parse_error;
-              case 'o': {
-                switch (buf[6]) {
-                  case 'c': {
-                    switch (buf[10]) {
-                      case '\0':
-                        if (op == "br_on_cast"sv) {
-                          auto ret = makeBrOnCast(ctx, pos, std::nullopt);
-                          CHECK_ERR(ret);
-                          return *ret;
-                        }
-                        goto parse_error;
-                      case '_': {
-                        switch (buf[11]) {
-                          case 'f':
-                            if (op == "br_on_cast_fail"sv) {
-                              auto ret = makeBrOnCast(ctx, pos, std::nullopt, true);
-                              CHECK_ERR(ret);
-                              return *ret;
-                            }
-                            goto parse_error;
-                          case 's': {
-                            switch (buf[17]) {
-                              case '\0':
-                                if (op == "br_on_cast_static"sv) {
-                                  auto ret = makeBrOnCast(ctx, pos, std::nullopt);
-                                  CHECK_ERR(ret);
-                                  return *ret;
-                                }
-                                goto parse_error;
-                              case '_':
-                                if (op == "br_on_cast_static_fail"sv) {
-                                  auto ret = makeBrOnCast(ctx, pos, std::nullopt, true);
-                                  CHECK_ERR(ret);
-                                  return *ret;
-                                }
-                                goto parse_error;
-                              default: goto parse_error;
-                            }
-                          }
-                          default: goto parse_error;
-                        }
-                      }
-                      default: goto parse_error;
-                    }
-                  }
-                  case 'f':
-                    if (op == "br_on_func"sv) {
-                      auto ret = makeBrOnCast(ctx, pos, Type(HeapType::func, NonNullable));
-                      CHECK_ERR(ret);
-                      return *ret;
+          case 'o': {
+            switch (buf[6]) {
+              case 'c': {
+                switch (buf[10]) {
+                  case '\0':
+                    if (op == "br_on_cast"sv) {
+                      CHECK_ERR(makeBrOnCast(ctx, pos, annotations));
+                      return Ok{};
                     }
                     goto parse_error;
-                  case 'i':
-                    if (op == "br_on_i31"sv) {
-                      auto ret = makeBrOnCast(ctx, pos, Type(HeapType::i31, NonNullable));
-                      CHECK_ERR(ret);
-                      return *ret;
+                  case '_':
+                    if (op == "br_on_cast_fail"sv) {
+                      CHECK_ERR(makeBrOnCast(ctx, pos, annotations, true));
+                      return Ok{};
                     }
                     goto parse_error;
-                  case 'n': {
-                    switch (buf[7]) {
-                      case 'o': {
-                        switch (buf[10]) {
-                          case 'f':
-                            if (op == "br_on_non_func"sv) {
-                              auto ret = makeBrOnCast(ctx, pos, Type(HeapType::func, NonNullable), true);
-                              CHECK_ERR(ret);
-                              return *ret;
-                            }
-                            goto parse_error;
-                          case 'i':
-                            if (op == "br_on_non_i31"sv) {
-                              auto ret = makeBrOnCast(ctx, pos, Type(HeapType::i31, NonNullable), true);
-                              CHECK_ERR(ret);
-                              return *ret;
-                            }
-                            goto parse_error;
-                          case 'n':
-                            if (op == "br_on_non_null"sv) {
-                              auto ret = makeBrOnNull(ctx, pos, true);
-                              CHECK_ERR(ret);
-                              return *ret;
-                            }
-                            goto parse_error;
-                          default: goto parse_error;
-                        }
-                      }
-                      case 'u':
-                        if (op == "br_on_null"sv) {
-                          auto ret = makeBrOnNull(ctx, pos);
-                          CHECK_ERR(ret);
-                          return *ret;
-                        }
-                        goto parse_error;
-                      default: goto parse_error;
-                    }
-                  }
                   default: goto parse_error;
                 }
               }
-              case 't':
-                if (op == "br_table"sv) {
-                  auto ret = makeBreakTable(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
+              case 'n': {
+                switch (buf[7]) {
+                  case 'o':
+                    if (op == "br_on_non_null"sv) {
+                      CHECK_ERR(makeBrOnNull(ctx, pos, annotations, true));
+                      return Ok{};
+                    }
+                    goto parse_error;
+                  case 'u':
+                    if (op == "br_on_null"sv) {
+                      CHECK_ERR(makeBrOnNull(ctx, pos, annotations));
+                      return Ok{};
+                    }
+                    goto parse_error;
+                  default: goto parse_error;
+                }
+              }
+              default: goto parse_error;
+            }
+          }
+          case 't':
+            if (op == "br_table"sv) {
+              CHECK_ERR(makeBreakTable(ctx, pos, annotations));
+              return Ok{};
+            }
+            goto parse_error;
+          default: goto parse_error;
+        }
+      }
+      default: goto parse_error;
+    }
+  }
+  case 'c': {
+    switch (buf[1]) {
+      case 'a': {
+        switch (buf[4]) {
+          case '\0':
+            if (op == "call"sv) {
+              CHECK_ERR(makeCall(ctx, pos, annotations, /*isReturn=*/false));
+              return Ok{};
+            }
+            goto parse_error;
+          case '_': {
+            switch (buf[5]) {
+              case 'i':
+                if (op == "call_indirect"sv) {
+                  CHECK_ERR(makeCallIndirect(ctx, pos, annotations, /*isReturn=*/false));
+                  return Ok{};
+                }
+                goto parse_error;
+              case 'r':
+                if (op == "call_ref"sv) {
+                  CHECK_ERR(makeCallRef(ctx, pos, annotations, /*isReturn=*/false));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -3852,37 +3853,12 @@ switch (buf[0]) {
           default: goto parse_error;
         }
       }
-      default: goto parse_error;
-    }
-  }
-  case 'c': {
-    switch (buf[4]) {
-      case '\0':
-        if (op == "call"sv) {
-          auto ret = makeCall(ctx, pos, /*isReturn=*/false);
-          CHECK_ERR(ret);
-          return *ret;
+      case 'o':
+        if (op == "cont.new"sv) {
+          CHECK_ERR(makeContNew(ctx, pos, annotations));
+          return Ok{};
         }
         goto parse_error;
-      case '_': {
-        switch (buf[5]) {
-          case 'i':
-            if (op == "call_indirect"sv) {
-              auto ret = makeCallIndirect(ctx, pos, /*isReturn=*/false);
-              CHECK_ERR(ret);
-              return *ret;
-            }
-            goto parse_error;
-          case 'r':
-            if (op == "call_ref"sv) {
-              auto ret = makeCallRef(ctx, pos, /*isReturn=*/false);
-              CHECK_ERR(ret);
-              return *ret;
-            }
-            goto parse_error;
-          default: goto parse_error;
-        }
-      }
       default: goto parse_error;
     }
   }
@@ -3890,49 +3866,33 @@ switch (buf[0]) {
     switch (buf[1]) {
       case 'a':
         if (op == "data.drop"sv) {
-          auto ret = makeDataDrop(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeDataDrop(ctx, pos, annotations));
+          return Ok{};
         }
         goto parse_error;
       case 'r':
         if (op == "drop"sv) {
-          auto ret = makeDrop(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeDrop(ctx, pos, annotations));
+          return Ok{};
         }
         goto parse_error;
       default: goto parse_error;
     }
   }
   case 'e': {
-    switch (buf[1]) {
-      case 'l':
-        if (op == "else"sv) {
-          auto ret = makeThenOrElse(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+    switch (buf[7]) {
+      case 'e':
+        if (op == "extern.externalize"sv) {
+          CHECK_ERR(makeRefAs(ctx, pos, annotations, ExternExternalize));
+          return Ok{};
         }
         goto parse_error;
-      case 'x': {
-        switch (buf[7]) {
-          case 'e':
-            if (op == "extern.externalize"sv) {
-              auto ret = makeRefAs(ctx, pos, ExternExternalize);
-              CHECK_ERR(ret);
-              return *ret;
-            }
-            goto parse_error;
-          case 'i':
-            if (op == "extern.internalize"sv) {
-              auto ret = makeRefAs(ctx, pos, ExternInternalize);
-              CHECK_ERR(ret);
-              return *ret;
-            }
-            goto parse_error;
-          default: goto parse_error;
+      case 'i':
+        if (op == "extern.internalize"sv) {
+          CHECK_ERR(makeRefAs(ctx, pos, annotations, ExternInternalize));
+          return Ok{};
         }
-      }
+        goto parse_error;
       default: goto parse_error;
     }
   }
@@ -3946,16 +3906,14 @@ switch (buf[0]) {
                 switch (buf[5]) {
                   case 'b':
                     if (op == "f32.abs"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::AbsFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::AbsFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'd':
                     if (op == "f32.add"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::AddFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -3965,9 +3923,8 @@ switch (buf[0]) {
                 switch (buf[5]) {
                   case 'e':
                     if (op == "f32.ceil"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::CeilFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::CeilFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'o': {
@@ -3976,9 +3933,8 @@ switch (buf[0]) {
                         switch (buf[7]) {
                           case 's':
                             if (op == "f32.const"sv) {
-                              auto ret = makeConst(ctx, pos, Type::f32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeConst(ctx, pos, annotations, Type::f32));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'v': {
@@ -3987,16 +3943,14 @@ switch (buf[0]) {
                                 switch (buf[16]) {
                                   case 's':
                                     if (op == "f32.convert_i32_s"sv) {
-                                      auto ret = makeUnary(ctx, pos, UnaryOp::ConvertSInt32ToFloat32);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ConvertSInt32ToFloat32));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'u':
                                     if (op == "f32.convert_i32_u"sv) {
-                                      auto ret = makeUnary(ctx, pos, UnaryOp::ConvertUInt32ToFloat32);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ConvertUInt32ToFloat32));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -4006,16 +3960,14 @@ switch (buf[0]) {
                                 switch (buf[16]) {
                                   case 's':
                                     if (op == "f32.convert_i64_s"sv) {
-                                      auto ret = makeUnary(ctx, pos, UnaryOp::ConvertSInt64ToFloat32);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ConvertSInt64ToFloat32));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'u':
                                     if (op == "f32.convert_i64_u"sv) {
-                                      auto ret = makeUnary(ctx, pos, UnaryOp::ConvertUInt64ToFloat32);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ConvertUInt64ToFloat32));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -4029,9 +3981,8 @@ switch (buf[0]) {
                       }
                       case 'p':
                         if (op == "f32.copysign"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::CopySignFloat32);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::CopySignFloat32));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -4044,16 +3995,14 @@ switch (buf[0]) {
                 switch (buf[5]) {
                   case 'e':
                     if (op == "f32.demote_f64"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::DemoteFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::DemoteFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'i':
                     if (op == "f32.div"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::DivFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::DivFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4061,32 +4010,28 @@ switch (buf[0]) {
               }
               case 'e':
                 if (op == "f32.eq"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::EqFloat32);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::EqFloat32));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'f':
                 if (op == "f32.floor"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::FloorFloat32);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::FloorFloat32));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'g': {
                 switch (buf[5]) {
                   case 'e':
                     if (op == "f32.ge"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GeFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't':
                     if (op == "f32.gt"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GtFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4096,23 +4041,20 @@ switch (buf[0]) {
                 switch (buf[5]) {
                   case 'e':
                     if (op == "f32.le"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LeFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'o':
                     if (op == "f32.load"sv) {
-                      auto ret = makeLoad(ctx, pos, Type::f32, /*signed=*/false, 4, /*isAtomic=*/false);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeLoad(ctx, pos, annotations, Type::f32, /*signed=*/false, 4, /*isAtomic=*/false));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't':
                     if (op == "f32.lt"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LtFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4122,23 +4064,20 @@ switch (buf[0]) {
                 switch (buf[5]) {
                   case 'a':
                     if (op == "f32.max"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MaxFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MaxFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'i':
                     if (op == "f32.min"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MinFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MinFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "f32.mul"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MulFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MulFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4148,23 +4087,20 @@ switch (buf[0]) {
                 switch (buf[6]) {
                   case '\0':
                     if (op == "f32.ne"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::NeFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NeFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'a':
                     if (op == "f32.nearest"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::NearestFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::NearestFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'g':
                     if (op == "f32.neg"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::NegFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::NegFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4172,32 +4108,28 @@ switch (buf[0]) {
               }
               case 'r':
                 if (op == "f32.reinterpret_i32"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::ReinterpretInt32);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ReinterpretInt32));
+                  return Ok{};
                 }
                 goto parse_error;
               case 's': {
                 switch (buf[5]) {
                   case 'q':
                     if (op == "f32.sqrt"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::SqrtFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::SqrtFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't':
                     if (op == "f32.store"sv) {
-                      auto ret = makeStore(ctx, pos, Type::f32, 4, /*isAtomic=*/false);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeStore(ctx, pos, annotations, Type::f32, 4, /*isAtomic=*/false));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "f32.sub"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::SubFloat32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubFloat32));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4205,9 +4137,8 @@ switch (buf[0]) {
               }
               case 't':
                 if (op == "f32.trunc"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::TruncFloat32);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncFloat32));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -4219,16 +4150,14 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'b':
                     if (op == "f32x4.abs"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::AbsVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::AbsVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'd':
                     if (op == "f32x4.add"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::AddVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4238,25 +4167,22 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'e':
                     if (op == "f32x4.ceil"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::CeilVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::CeilVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'o': {
                     switch (buf[20]) {
                       case 's':
                         if (op == "f32x4.convert_i32x4_s"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::ConvertSVecI32x4ToVecF32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ConvertSVecI32x4ToVecF32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "f32x4.convert_i32x4_u"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::ConvertUVecI32x4ToVecF32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ConvertUVecI32x4ToVecF32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -4269,16 +4195,14 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'e':
                     if (op == "f32x4.demote_f64x2_zero"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::DemoteZeroVecF64x2ToVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::DemoteZeroVecF64x2ToVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'i':
                     if (op == "f32x4.div"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::DivVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::DivVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4288,16 +4212,14 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'q':
                     if (op == "f32x4.eq"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::EqVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::EqVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'x':
                     if (op == "f32x4.extract_lane"sv) {
-                      auto ret = makeSIMDExtract(ctx, pos, SIMDExtractOp::ExtractLaneVecF32x4, 4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDExtract(ctx, pos, annotations, SIMDExtractOp::ExtractLaneVecF32x4, 4));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4305,25 +4227,22 @@ switch (buf[0]) {
               }
               case 'f':
                 if (op == "f32x4.floor"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::FloorVecF32x4);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::FloorVecF32x4));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'g': {
                 switch (buf[7]) {
                   case 'e':
                     if (op == "f32x4.ge"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GeVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't':
                     if (op == "f32x4.gt"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GtVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4333,16 +4252,14 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'e':
                     if (op == "f32x4.le"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LeVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't':
                     if (op == "f32x4.lt"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LtVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4352,23 +4269,20 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'a':
                     if (op == "f32x4.max"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MaxVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MaxVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'i':
                     if (op == "f32x4.min"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MinVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MinVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "f32x4.mul"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MulVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MulVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4378,23 +4292,20 @@ switch (buf[0]) {
                 switch (buf[8]) {
                   case '\0':
                     if (op == "f32x4.ne"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::NeVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NeVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'a':
                     if (op == "f32x4.nearest"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::NearestVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::NearestVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'g':
                     if (op == "f32x4.neg"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::NegVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::NegVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4404,16 +4315,14 @@ switch (buf[0]) {
                 switch (buf[8]) {
                   case 'a':
                     if (op == "f32x4.pmax"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::PMaxVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::PMaxVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'i':
                     if (op == "f32x4.pmin"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::PMinVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::PMinVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4427,16 +4336,14 @@ switch (buf[0]) {
                         switch (buf[16]) {
                           case 'a':
                             if (op == "f32x4.relaxed_fma"sv) {
-                              auto ret = makeSIMDTernary(ctx, pos, SIMDTernaryOp::RelaxedFmaVecF32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeSIMDTernary(ctx, pos, annotations, SIMDTernaryOp::RelaxedFmaVecF32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 's':
                             if (op == "f32x4.relaxed_fms"sv) {
-                              auto ret = makeSIMDTernary(ctx, pos, SIMDTernaryOp::RelaxedFmsVecF32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeSIMDTernary(ctx, pos, annotations, SIMDTernaryOp::RelaxedFmsVecF32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -4446,16 +4353,14 @@ switch (buf[0]) {
                         switch (buf[15]) {
                           case 'a':
                             if (op == "f32x4.relaxed_max"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::RelaxedMaxVecF32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RelaxedMaxVecF32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'i':
                             if (op == "f32x4.relaxed_min"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::RelaxedMinVecF32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RelaxedMinVecF32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -4466,9 +4371,8 @@ switch (buf[0]) {
                   }
                   case 'p':
                     if (op == "f32x4.replace_lane"sv) {
-                      auto ret = makeSIMDReplace(ctx, pos, SIMDReplaceOp::ReplaceLaneVecF32x4, 4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDReplace(ctx, pos, annotations, SIMDReplaceOp::ReplaceLaneVecF32x4, 4));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4478,23 +4382,20 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'p':
                     if (op == "f32x4.splat"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::SplatVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::SplatVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'q':
                     if (op == "f32x4.sqrt"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::SqrtVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::SqrtVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "f32x4.sub"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::SubVecF32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubVecF32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4502,9 +4403,8 @@ switch (buf[0]) {
               }
               case 't':
                 if (op == "f32x4.trunc"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::TruncVecF32x4);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncVecF32x4));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -4521,16 +4421,14 @@ switch (buf[0]) {
                 switch (buf[5]) {
                   case 'b':
                     if (op == "f64.abs"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::AbsFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::AbsFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'd':
                     if (op == "f64.add"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::AddFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4540,9 +4438,8 @@ switch (buf[0]) {
                 switch (buf[5]) {
                   case 'e':
                     if (op == "f64.ceil"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::CeilFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::CeilFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'o': {
@@ -4551,9 +4448,8 @@ switch (buf[0]) {
                         switch (buf[7]) {
                           case 's':
                             if (op == "f64.const"sv) {
-                              auto ret = makeConst(ctx, pos, Type::f64);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeConst(ctx, pos, annotations, Type::f64));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'v': {
@@ -4562,16 +4458,14 @@ switch (buf[0]) {
                                 switch (buf[16]) {
                                   case 's':
                                     if (op == "f64.convert_i32_s"sv) {
-                                      auto ret = makeUnary(ctx, pos, UnaryOp::ConvertSInt32ToFloat64);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ConvertSInt32ToFloat64));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'u':
                                     if (op == "f64.convert_i32_u"sv) {
-                                      auto ret = makeUnary(ctx, pos, UnaryOp::ConvertUInt32ToFloat64);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ConvertUInt32ToFloat64));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -4581,16 +4475,14 @@ switch (buf[0]) {
                                 switch (buf[16]) {
                                   case 's':
                                     if (op == "f64.convert_i64_s"sv) {
-                                      auto ret = makeUnary(ctx, pos, UnaryOp::ConvertSInt64ToFloat64);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ConvertSInt64ToFloat64));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'u':
                                     if (op == "f64.convert_i64_u"sv) {
-                                      auto ret = makeUnary(ctx, pos, UnaryOp::ConvertUInt64ToFloat64);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ConvertUInt64ToFloat64));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -4604,9 +4496,8 @@ switch (buf[0]) {
                       }
                       case 'p':
                         if (op == "f64.copysign"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::CopySignFloat64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::CopySignFloat64));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -4617,39 +4508,34 @@ switch (buf[0]) {
               }
               case 'd':
                 if (op == "f64.div"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::DivFloat64);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::DivFloat64));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'e':
                 if (op == "f64.eq"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::EqFloat64);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::EqFloat64));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'f':
                 if (op == "f64.floor"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::FloorFloat64);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::FloorFloat64));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'g': {
                 switch (buf[5]) {
                   case 'e':
                     if (op == "f64.ge"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GeFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't':
                     if (op == "f64.gt"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GtFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4659,23 +4545,20 @@ switch (buf[0]) {
                 switch (buf[5]) {
                   case 'e':
                     if (op == "f64.le"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LeFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'o':
                     if (op == "f64.load"sv) {
-                      auto ret = makeLoad(ctx, pos, Type::f64, /*signed=*/false, 8, /*isAtomic=*/false);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeLoad(ctx, pos, annotations, Type::f64, /*signed=*/false, 8, /*isAtomic=*/false));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't':
                     if (op == "f64.lt"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LtFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4685,23 +4568,20 @@ switch (buf[0]) {
                 switch (buf[5]) {
                   case 'a':
                     if (op == "f64.max"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MaxFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MaxFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'i':
                     if (op == "f64.min"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MinFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MinFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "f64.mul"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MulFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MulFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4711,23 +4591,20 @@ switch (buf[0]) {
                 switch (buf[6]) {
                   case '\0':
                     if (op == "f64.ne"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::NeFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NeFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'a':
                     if (op == "f64.nearest"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::NearestFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::NearestFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'g':
                     if (op == "f64.neg"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::NegFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::NegFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4735,39 +4612,34 @@ switch (buf[0]) {
               }
               case 'p':
                 if (op == "f64.promote_f32"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::PromoteFloat32);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::PromoteFloat32));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'r':
                 if (op == "f64.reinterpret_i64"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::ReinterpretInt64);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ReinterpretInt64));
+                  return Ok{};
                 }
                 goto parse_error;
               case 's': {
                 switch (buf[5]) {
                   case 'q':
                     if (op == "f64.sqrt"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::SqrtFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::SqrtFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't':
                     if (op == "f64.store"sv) {
-                      auto ret = makeStore(ctx, pos, Type::f64, 8, /*isAtomic=*/false);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeStore(ctx, pos, annotations, Type::f64, 8, /*isAtomic=*/false));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "f64.sub"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::SubFloat64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubFloat64));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4775,9 +4647,8 @@ switch (buf[0]) {
               }
               case 't':
                 if (op == "f64.trunc"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::TruncFloat64);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncFloat64));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -4789,16 +4660,14 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'b':
                     if (op == "f64x2.abs"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::AbsVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::AbsVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'd':
                     if (op == "f64x2.add"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::AddVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4808,25 +4677,22 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'e':
                     if (op == "f64x2.ceil"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::CeilVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::CeilVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'o': {
                     switch (buf[24]) {
                       case 's':
                         if (op == "f64x2.convert_low_i32x4_s"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::ConvertLowSVecI32x4ToVecF64x2);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ConvertLowSVecI32x4ToVecF64x2));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "f64x2.convert_low_i32x4_u"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::ConvertLowUVecI32x4ToVecF64x2);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ConvertLowUVecI32x4ToVecF64x2));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -4837,25 +4703,22 @@ switch (buf[0]) {
               }
               case 'd':
                 if (op == "f64x2.div"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::DivVecF64x2);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::DivVecF64x2));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'e': {
                 switch (buf[7]) {
                   case 'q':
                     if (op == "f64x2.eq"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::EqVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::EqVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'x':
                     if (op == "f64x2.extract_lane"sv) {
-                      auto ret = makeSIMDExtract(ctx, pos, SIMDExtractOp::ExtractLaneVecF64x2, 2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDExtract(ctx, pos, annotations, SIMDExtractOp::ExtractLaneVecF64x2, 2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4863,25 +4726,22 @@ switch (buf[0]) {
               }
               case 'f':
                 if (op == "f64x2.floor"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::FloorVecF64x2);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::FloorVecF64x2));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'g': {
                 switch (buf[7]) {
                   case 'e':
                     if (op == "f64x2.ge"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GeVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't':
                     if (op == "f64x2.gt"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GtVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4891,16 +4751,14 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'e':
                     if (op == "f64x2.le"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LeVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't':
                     if (op == "f64x2.lt"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LtVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4910,23 +4768,20 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'a':
                     if (op == "f64x2.max"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MaxVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MaxVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'i':
                     if (op == "f64x2.min"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MinVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MinVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "f64x2.mul"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MulVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MulVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4936,23 +4791,20 @@ switch (buf[0]) {
                 switch (buf[8]) {
                   case '\0':
                     if (op == "f64x2.ne"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::NeVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NeVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'a':
                     if (op == "f64x2.nearest"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::NearestVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::NearestVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'g':
                     if (op == "f64x2.neg"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::NegVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::NegVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4964,16 +4816,14 @@ switch (buf[0]) {
                     switch (buf[8]) {
                       case 'a':
                         if (op == "f64x2.pmax"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::PMaxVecF64x2);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::PMaxVecF64x2));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'i':
                         if (op == "f64x2.pmin"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::PMinVecF64x2);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::PMinVecF64x2));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -4981,9 +4831,8 @@ switch (buf[0]) {
                   }
                   case 'r':
                     if (op == "f64x2.promote_low_f32x4"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::PromoteLowVecF32x4ToVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::PromoteLowVecF32x4ToVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -4997,16 +4846,14 @@ switch (buf[0]) {
                         switch (buf[16]) {
                           case 'a':
                             if (op == "f64x2.relaxed_fma"sv) {
-                              auto ret = makeSIMDTernary(ctx, pos, SIMDTernaryOp::RelaxedFmaVecF64x2);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeSIMDTernary(ctx, pos, annotations, SIMDTernaryOp::RelaxedFmaVecF64x2));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 's':
                             if (op == "f64x2.relaxed_fms"sv) {
-                              auto ret = makeSIMDTernary(ctx, pos, SIMDTernaryOp::RelaxedFmsVecF64x2);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeSIMDTernary(ctx, pos, annotations, SIMDTernaryOp::RelaxedFmsVecF64x2));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -5016,16 +4863,14 @@ switch (buf[0]) {
                         switch (buf[15]) {
                           case 'a':
                             if (op == "f64x2.relaxed_max"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::RelaxedMaxVecF64x2);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RelaxedMaxVecF64x2));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'i':
                             if (op == "f64x2.relaxed_min"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::RelaxedMinVecF64x2);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RelaxedMinVecF64x2));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -5036,9 +4881,8 @@ switch (buf[0]) {
                   }
                   case 'p':
                     if (op == "f64x2.replace_lane"sv) {
-                      auto ret = makeSIMDReplace(ctx, pos, SIMDReplaceOp::ReplaceLaneVecF64x2, 2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDReplace(ctx, pos, annotations, SIMDReplaceOp::ReplaceLaneVecF64x2, 2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -5048,23 +4892,20 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'p':
                     if (op == "f64x2.splat"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::SplatVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::SplatVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'q':
                     if (op == "f64x2.sqrt"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::SqrtVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::SqrtVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "f64x2.sub"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::SubVecF64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubVecF64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -5072,9 +4913,8 @@ switch (buf[0]) {
               }
               case 't':
                 if (op == "f64x2.trunc"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::TruncVecF64x2);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncVecF64x2));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -5090,16 +4930,14 @@ switch (buf[0]) {
     switch (buf[7]) {
       case 'g':
         if (op == "global.get"sv) {
-          auto ret = makeGlobalGet(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeGlobalGet(ctx, pos, annotations));
+          return Ok{};
         }
         goto parse_error;
       case 's':
         if (op == "global.set"sv) {
-          auto ret = makeGlobalSet(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeGlobalSet(ctx, pos, annotations));
+          return Ok{};
         }
         goto parse_error;
       default: goto parse_error;
@@ -5113,34 +4951,30 @@ switch (buf[0]) {
             switch (buf[7]) {
               case 'b':
                 if (op == "i16x8.abs"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::AbsVecI16x8);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::AbsVecI16x8));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'd': {
                 switch (buf[9]) {
                   case '\0':
                     if (op == "i16x8.add"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::AddVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case '_': {
                     switch (buf[14]) {
                       case 's':
                         if (op == "i16x8.add_sat_s"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::AddSatSVecI16x8);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddSatSVecI16x8));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i16x8.add_sat_u"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::AddSatUVecI16x8);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddSatUVecI16x8));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -5151,16 +4985,14 @@ switch (buf[0]) {
               }
               case 'l':
                 if (op == "i16x8.all_true"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::AllTrueVecI16x8);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::AllTrueVecI16x8));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'v':
                 if (op == "i16x8.avgr_u"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::AvgrUVecI16x8);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AvgrUVecI16x8));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -5168,25 +5000,22 @@ switch (buf[0]) {
           }
           case 'b':
             if (op == "i16x8.bitmask"sv) {
-              auto ret = makeUnary(ctx, pos, UnaryOp::BitmaskVecI16x8);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::BitmaskVecI16x8));
+              return Ok{};
             }
             goto parse_error;
           case 'd':
             if (op == "i16x8.dot_i8x16_i7x16_s"sv) {
-              auto ret = makeBinary(ctx, pos, BinaryOp::DotI8x16I7x16SToVecI16x8);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::DotI8x16I7x16SToVecI16x8));
+              return Ok{};
             }
             goto parse_error;
           case 'e': {
             switch (buf[7]) {
               case 'q':
                 if (op == "i16x8.eq"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::EqVecI16x8);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::EqVecI16x8));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'x': {
@@ -5195,16 +5024,14 @@ switch (buf[0]) {
                     switch (buf[28]) {
                       case 's':
                         if (op == "i16x8.extadd_pairwise_i8x16_s"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::ExtAddPairwiseSVecI8x16ToI16x8);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtAddPairwiseSVecI8x16ToI16x8));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i16x8.extadd_pairwise_i8x16_u"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::ExtAddPairwiseUVecI8x16ToI16x8);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtAddPairwiseUVecI8x16ToI16x8));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -5216,16 +5043,14 @@ switch (buf[0]) {
                         switch (buf[24]) {
                           case 's':
                             if (op == "i16x8.extend_high_i8x16_s"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::ExtendHighSVecI8x16ToVecI16x8);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendHighSVecI8x16ToVecI16x8));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i16x8.extend_high_i8x16_u"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::ExtendHighUVecI8x16ToVecI16x8);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendHighUVecI8x16ToVecI16x8));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -5235,16 +5060,14 @@ switch (buf[0]) {
                         switch (buf[23]) {
                           case 's':
                             if (op == "i16x8.extend_low_i8x16_s"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::ExtendLowSVecI8x16ToVecI16x8);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendLowSVecI8x16ToVecI16x8));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i16x8.extend_low_i8x16_u"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::ExtendLowUVecI8x16ToVecI16x8);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendLowUVecI8x16ToVecI16x8));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -5259,16 +5082,14 @@ switch (buf[0]) {
                         switch (buf[24]) {
                           case 's':
                             if (op == "i16x8.extmul_high_i8x16_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::ExtMulHighSVecI16x8);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ExtMulHighSVecI16x8));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i16x8.extmul_high_i8x16_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::ExtMulHighUVecI16x8);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ExtMulHighUVecI16x8));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -5278,16 +5099,14 @@ switch (buf[0]) {
                         switch (buf[23]) {
                           case 's':
                             if (op == "i16x8.extmul_low_i8x16_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::ExtMulLowSVecI16x8);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ExtMulLowSVecI16x8));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i16x8.extmul_low_i8x16_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::ExtMulLowUVecI16x8);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ExtMulLowUVecI16x8));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -5300,16 +5119,14 @@ switch (buf[0]) {
                     switch (buf[19]) {
                       case 's':
                         if (op == "i16x8.extract_lane_s"sv) {
-                          auto ret = makeSIMDExtract(ctx, pos, SIMDExtractOp::ExtractLaneSVecI16x8, 8);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeSIMDExtract(ctx, pos, annotations, SIMDExtractOp::ExtractLaneSVecI16x8, 8));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i16x8.extract_lane_u"sv) {
-                          auto ret = makeSIMDExtract(ctx, pos, SIMDExtractOp::ExtractLaneUVecI16x8, 8);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeSIMDExtract(ctx, pos, annotations, SIMDExtractOp::ExtractLaneUVecI16x8, 8));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -5327,16 +5144,14 @@ switch (buf[0]) {
                 switch (buf[9]) {
                   case 's':
                     if (op == "i16x8.ge_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GeSVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeSVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i16x8.ge_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GeUVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeUVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -5346,16 +5161,14 @@ switch (buf[0]) {
                 switch (buf[9]) {
                   case 's':
                     if (op == "i16x8.gt_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GtSVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtSVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i16x8.gt_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GtUVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtUVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -5368,25 +5181,22 @@ switch (buf[0]) {
             switch (buf[7]) {
               case 'a':
                 if (op == "i16x8.laneselect"sv) {
-                  auto ret = makeSIMDTernary(ctx, pos, SIMDTernaryOp::LaneselectI16x8);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeSIMDTernary(ctx, pos, annotations, SIMDTernaryOp::LaneselectI16x8));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'e': {
                 switch (buf[9]) {
                   case 's':
                     if (op == "i16x8.le_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LeSVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeSVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i16x8.le_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LeUVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeUVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -5396,16 +5206,14 @@ switch (buf[0]) {
                 switch (buf[9]) {
                   case 's':
                     if (op == "i16x8.lt_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LtSVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtSVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i16x8.lt_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LtUVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtUVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -5420,16 +5228,14 @@ switch (buf[0]) {
                 switch (buf[10]) {
                   case 's':
                     if (op == "i16x8.max_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MaxSVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MaxSVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i16x8.max_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MaxUVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MaxUVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -5439,16 +5245,14 @@ switch (buf[0]) {
                 switch (buf[10]) {
                   case 's':
                     if (op == "i16x8.min_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MinSVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MinSVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i16x8.min_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MinUVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MinUVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -5456,9 +5260,8 @@ switch (buf[0]) {
               }
               case 'u':
                 if (op == "i16x8.mul"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::MulVecI16x8);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MulVecI16x8));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -5470,16 +5273,14 @@ switch (buf[0]) {
                 switch (buf[19]) {
                   case 's':
                     if (op == "i16x8.narrow_i32x4_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::NarrowSVecI32x4ToVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NarrowSVecI32x4ToVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i16x8.narrow_i32x4_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::NarrowUVecI32x4ToVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NarrowUVecI32x4ToVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -5489,16 +5290,14 @@ switch (buf[0]) {
                 switch (buf[8]) {
                   case '\0':
                     if (op == "i16x8.ne"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::NeVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NeVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'g':
                     if (op == "i16x8.neg"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::NegVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::NegVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -5509,25 +5308,22 @@ switch (buf[0]) {
           }
           case 'q':
             if (op == "i16x8.q15mulr_sat_s"sv) {
-              auto ret = makeBinary(ctx, pos, BinaryOp::Q15MulrSatSVecI16x8);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::Q15MulrSatSVecI16x8));
+              return Ok{};
             }
             goto parse_error;
           case 'r': {
             switch (buf[8]) {
               case 'l':
                 if (op == "i16x8.relaxed_q15mulr_s"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::RelaxedQ15MulrSVecI16x8);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RelaxedQ15MulrSVecI16x8));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'p':
                 if (op == "i16x8.replace_lane"sv) {
-                  auto ret = makeSIMDReplace(ctx, pos, SIMDReplaceOp::ReplaceLaneVecI16x8, 8);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeSIMDReplace(ctx, pos, annotations, SIMDReplaceOp::ReplaceLaneVecI16x8, 8));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -5539,25 +5335,22 @@ switch (buf[0]) {
                 switch (buf[8]) {
                   case 'l':
                     if (op == "i16x8.shl"sv) {
-                      auto ret = makeSIMDShift(ctx, pos, SIMDShiftOp::ShlVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDShift(ctx, pos, annotations, SIMDShiftOp::ShlVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'r': {
                     switch (buf[10]) {
                       case 's':
                         if (op == "i16x8.shr_s"sv) {
-                          auto ret = makeSIMDShift(ctx, pos, SIMDShiftOp::ShrSVecI16x8);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeSIMDShift(ctx, pos, annotations, SIMDShiftOp::ShrSVecI16x8));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i16x8.shr_u"sv) {
-                          auto ret = makeSIMDShift(ctx, pos, SIMDShiftOp::ShrUVecI16x8);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeSIMDShift(ctx, pos, annotations, SIMDShiftOp::ShrUVecI16x8));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -5568,34 +5361,30 @@ switch (buf[0]) {
               }
               case 'p':
                 if (op == "i16x8.splat"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::SplatVecI16x8);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::SplatVecI16x8));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'u': {
                 switch (buf[9]) {
                   case '\0':
                     if (op == "i16x8.sub"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::SubVecI16x8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubVecI16x8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case '_': {
                     switch (buf[14]) {
                       case 's':
                         if (op == "i16x8.sub_sat_s"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::SubSatSVecI16x8);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubSatSVecI16x8));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i16x8.sub_sat_u"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::SubSatUVecI16x8);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubSatUVecI16x8));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -5618,16 +5407,14 @@ switch (buf[0]) {
                 switch (buf[8]) {
                   case 's':
                     if (op == "i31.get_s"sv) {
-                      auto ret = makeI31Get(ctx, pos, true);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeI31Get(ctx, pos, annotations, true));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i31.get_u"sv) {
-                      auto ret = makeI31Get(ctx, pos, false);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeI31Get(ctx, pos, annotations, false));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -5635,9 +5422,8 @@ switch (buf[0]) {
               }
               case 'n':
                 if (op == "i31.new"sv) {
-                  auto ret = makeI31New(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeRefI31(ctx, pos, annotations));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -5651,16 +5437,14 @@ switch (buf[0]) {
                     switch (buf[5]) {
                       case 'd':
                         if (op == "i32.add"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::AddInt32);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddInt32));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'n':
                         if (op == "i32.and"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::AndInt32);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AndInt32));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 't': {
@@ -5669,23 +5453,20 @@ switch (buf[0]) {
                             switch (buf[15]) {
                               case '\0':
                                 if (op == "i32.atomic.load"sv) {
-                                  auto ret = makeLoad(ctx, pos, Type::i32, /*signed=*/false, 4, /*isAtomic=*/true);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i32, /*signed=*/false, 4, /*isAtomic=*/true));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case '1':
                                 if (op == "i32.atomic.load16_u"sv) {
-                                  auto ret = makeLoad(ctx, pos, Type::i32, /*signed=*/false, 2, /*isAtomic=*/true);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i32, /*signed=*/false, 2, /*isAtomic=*/true));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case '8':
                                 if (op == "i32.atomic.load8_u"sv) {
-                                  auto ret = makeLoad(ctx, pos, Type::i32, /*signed=*/false, 1, /*isAtomic=*/true);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i32, /*signed=*/false, 1, /*isAtomic=*/true));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -5699,16 +5480,14 @@ switch (buf[0]) {
                                     switch (buf[16]) {
                                       case 'd':
                                         if (op == "i32.atomic.rmw.add"sv) {
-                                          auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAdd, Type::i32, 4);
-                                          CHECK_ERR(ret);
-                                          return *ret;
+                                          CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAdd, Type::i32, 4));
+                                          return Ok{};
                                         }
                                         goto parse_error;
                                       case 'n':
                                         if (op == "i32.atomic.rmw.and"sv) {
-                                          auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAnd, Type::i32, 4);
-                                          CHECK_ERR(ret);
-                                          return *ret;
+                                          CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAnd, Type::i32, 4));
+                                          return Ok{};
                                         }
                                         goto parse_error;
                                       default: goto parse_error;
@@ -5716,39 +5495,34 @@ switch (buf[0]) {
                                   }
                                   case 'c':
                                     if (op == "i32.atomic.rmw.cmpxchg"sv) {
-                                      auto ret = makeAtomicCmpxchg(ctx, pos, Type::i32, 4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicCmpxchg(ctx, pos, annotations, Type::i32, 4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'o':
                                     if (op == "i32.atomic.rmw.or"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWOr, Type::i32, 4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWOr, Type::i32, 4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 's':
                                     if (op == "i32.atomic.rmw.sub"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWSub, Type::i32, 4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWSub, Type::i32, 4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'x': {
                                     switch (buf[16]) {
                                       case 'c':
                                         if (op == "i32.atomic.rmw.xchg"sv) {
-                                          auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXchg, Type::i32, 4);
-                                          CHECK_ERR(ret);
-                                          return *ret;
+                                          CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXchg, Type::i32, 4));
+                                          return Ok{};
                                         }
                                         goto parse_error;
                                       case 'o':
                                         if (op == "i32.atomic.rmw.xor"sv) {
-                                          auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXor, Type::i32, 4);
-                                          CHECK_ERR(ret);
-                                          return *ret;
+                                          CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXor, Type::i32, 4));
+                                          return Ok{};
                                         }
                                         goto parse_error;
                                       default: goto parse_error;
@@ -5763,16 +5537,14 @@ switch (buf[0]) {
                                     switch (buf[18]) {
                                       case 'd':
                                         if (op == "i32.atomic.rmw16.add_u"sv) {
-                                          auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAdd, Type::i32, 2);
-                                          CHECK_ERR(ret);
-                                          return *ret;
+                                          CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAdd, Type::i32, 2));
+                                          return Ok{};
                                         }
                                         goto parse_error;
                                       case 'n':
                                         if (op == "i32.atomic.rmw16.and_u"sv) {
-                                          auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAnd, Type::i32, 2);
-                                          CHECK_ERR(ret);
-                                          return *ret;
+                                          CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAnd, Type::i32, 2));
+                                          return Ok{};
                                         }
                                         goto parse_error;
                                       default: goto parse_error;
@@ -5780,39 +5552,34 @@ switch (buf[0]) {
                                   }
                                   case 'c':
                                     if (op == "i32.atomic.rmw16.cmpxchg_u"sv) {
-                                      auto ret = makeAtomicCmpxchg(ctx, pos, Type::i32, 2);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicCmpxchg(ctx, pos, annotations, Type::i32, 2));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'o':
                                     if (op == "i32.atomic.rmw16.or_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWOr, Type::i32, 2);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWOr, Type::i32, 2));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 's':
                                     if (op == "i32.atomic.rmw16.sub_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWSub, Type::i32, 2);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWSub, Type::i32, 2));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'x': {
                                     switch (buf[18]) {
                                       case 'c':
                                         if (op == "i32.atomic.rmw16.xchg_u"sv) {
-                                          auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXchg, Type::i32, 2);
-                                          CHECK_ERR(ret);
-                                          return *ret;
+                                          CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXchg, Type::i32, 2));
+                                          return Ok{};
                                         }
                                         goto parse_error;
                                       case 'o':
                                         if (op == "i32.atomic.rmw16.xor_u"sv) {
-                                          auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXor, Type::i32, 2);
-                                          CHECK_ERR(ret);
-                                          return *ret;
+                                          CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXor, Type::i32, 2));
+                                          return Ok{};
                                         }
                                         goto parse_error;
                                       default: goto parse_error;
@@ -5827,16 +5594,14 @@ switch (buf[0]) {
                                     switch (buf[17]) {
                                       case 'd':
                                         if (op == "i32.atomic.rmw8.add_u"sv) {
-                                          auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAdd, Type::i32, 1);
-                                          CHECK_ERR(ret);
-                                          return *ret;
+                                          CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAdd, Type::i32, 1));
+                                          return Ok{};
                                         }
                                         goto parse_error;
                                       case 'n':
                                         if (op == "i32.atomic.rmw8.and_u"sv) {
-                                          auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAnd, Type::i32, 1);
-                                          CHECK_ERR(ret);
-                                          return *ret;
+                                          CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAnd, Type::i32, 1));
+                                          return Ok{};
                                         }
                                         goto parse_error;
                                       default: goto parse_error;
@@ -5844,39 +5609,34 @@ switch (buf[0]) {
                                   }
                                   case 'c':
                                     if (op == "i32.atomic.rmw8.cmpxchg_u"sv) {
-                                      auto ret = makeAtomicCmpxchg(ctx, pos, Type::i32, 1);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicCmpxchg(ctx, pos, annotations, Type::i32, 1));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'o':
                                     if (op == "i32.atomic.rmw8.or_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWOr, Type::i32, 1);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWOr, Type::i32, 1));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 's':
                                     if (op == "i32.atomic.rmw8.sub_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWSub, Type::i32, 1);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWSub, Type::i32, 1));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'x': {
                                     switch (buf[17]) {
                                       case 'c':
                                         if (op == "i32.atomic.rmw8.xchg_u"sv) {
-                                          auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXchg, Type::i32, 1);
-                                          CHECK_ERR(ret);
-                                          return *ret;
+                                          CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXchg, Type::i32, 1));
+                                          return Ok{};
                                         }
                                         goto parse_error;
                                       case 'o':
                                         if (op == "i32.atomic.rmw8.xor_u"sv) {
-                                          auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXor, Type::i32, 1);
-                                          CHECK_ERR(ret);
-                                          return *ret;
+                                          CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXor, Type::i32, 1));
+                                          return Ok{};
                                         }
                                         goto parse_error;
                                       default: goto parse_error;
@@ -5892,23 +5652,20 @@ switch (buf[0]) {
                             switch (buf[16]) {
                               case '\0':
                                 if (op == "i32.atomic.store"sv) {
-                                  auto ret = makeStore(ctx, pos, Type::i32, 4, /*isAtomic=*/true);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeStore(ctx, pos, annotations, Type::i32, 4, /*isAtomic=*/true));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case '1':
                                 if (op == "i32.atomic.store16"sv) {
-                                  auto ret = makeStore(ctx, pos, Type::i32, 2, /*isAtomic=*/true);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeStore(ctx, pos, annotations, Type::i32, 2, /*isAtomic=*/true));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case '8':
                                 if (op == "i32.atomic.store8"sv) {
-                                  auto ret = makeStore(ctx, pos, Type::i32, 1, /*isAtomic=*/true);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeStore(ctx, pos, annotations, Type::i32, 1, /*isAtomic=*/true));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -5924,23 +5681,20 @@ switch (buf[0]) {
                     switch (buf[5]) {
                       case 'l':
                         if (op == "i32.clz"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::ClzInt32);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ClzInt32));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'o':
                         if (op == "i32.const"sv) {
-                          auto ret = makeConst(ctx, pos, Type::i32);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeConst(ctx, pos, annotations, Type::i32));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 't':
                         if (op == "i32.ctz"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::CtzInt32);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::CtzInt32));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -5950,16 +5704,14 @@ switch (buf[0]) {
                     switch (buf[8]) {
                       case 's':
                         if (op == "i32.div_s"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::DivSInt32);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::DivSInt32));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i32.div_u"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::DivUInt32);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::DivUInt32));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -5971,16 +5723,14 @@ switch (buf[0]) {
                         switch (buf[6]) {
                           case '\0':
                             if (op == "i32.eq"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::EqInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::EqInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'z':
                             if (op == "i32.eqz"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::EqZInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::EqZInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -5990,16 +5740,14 @@ switch (buf[0]) {
                         switch (buf[10]) {
                           case '1':
                             if (op == "i32.extend16_s"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::ExtendS16Int32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendS16Int32));
+                              return Ok{};
                             }
                             goto parse_error;
                           case '8':
                             if (op == "i32.extend8_s"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::ExtendS8Int32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendS8Int32));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6014,16 +5762,14 @@ switch (buf[0]) {
                         switch (buf[7]) {
                           case 's':
                             if (op == "i32.ge_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::GeSInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeSInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i32.ge_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::GeUInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeUInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6033,16 +5779,14 @@ switch (buf[0]) {
                         switch (buf[7]) {
                           case 's':
                             if (op == "i32.gt_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::GtSInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtSInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i32.gt_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::GtUInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtUInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6057,16 +5801,14 @@ switch (buf[0]) {
                         switch (buf[7]) {
                           case 's':
                             if (op == "i32.le_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::LeSInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeSInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i32.le_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::LeUInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeUInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6076,25 +5818,22 @@ switch (buf[0]) {
                         switch (buf[8]) {
                           case '\0':
                             if (op == "i32.load"sv) {
-                              auto ret = makeLoad(ctx, pos, Type::i32, /*signed=*/false, 4, /*isAtomic=*/false);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i32, /*signed=*/false, 4, /*isAtomic=*/false));
+                              return Ok{};
                             }
                             goto parse_error;
                           case '1': {
                             switch (buf[11]) {
                               case 's':
                                 if (op == "i32.load16_s"sv) {
-                                  auto ret = makeLoad(ctx, pos, Type::i32, /*signed=*/true, 2, /*isAtomic=*/false);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i32, /*signed=*/true, 2, /*isAtomic=*/false));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i32.load16_u"sv) {
-                                  auto ret = makeLoad(ctx, pos, Type::i32, /*signed=*/false, 2, /*isAtomic=*/false);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i32, /*signed=*/false, 2, /*isAtomic=*/false));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -6104,16 +5843,14 @@ switch (buf[0]) {
                             switch (buf[10]) {
                               case 's':
                                 if (op == "i32.load8_s"sv) {
-                                  auto ret = makeLoad(ctx, pos, Type::i32, /*signed=*/true, 1, /*isAtomic=*/false);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i32, /*signed=*/true, 1, /*isAtomic=*/false));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i32.load8_u"sv) {
-                                  auto ret = makeLoad(ctx, pos, Type::i32, /*signed=*/false, 1, /*isAtomic=*/false);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i32, /*signed=*/false, 1, /*isAtomic=*/false));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -6126,16 +5863,14 @@ switch (buf[0]) {
                         switch (buf[7]) {
                           case 's':
                             if (op == "i32.lt_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::LtSInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtSInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i32.lt_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::LtUInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtUInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6146,30 +5881,26 @@ switch (buf[0]) {
                   }
                   case 'm':
                     if (op == "i32.mul"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MulInt32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MulInt32));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'n':
                     if (op == "i32.ne"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::NeInt32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NeInt32));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'o':
                     if (op == "i32.or"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::OrInt32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::OrInt32));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'p':
                     if (op == "i32.popcnt"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::PopcntInt32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::PopcntInt32));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'r': {
@@ -6178,25 +5909,22 @@ switch (buf[0]) {
                         switch (buf[6]) {
                           case 'i':
                             if (op == "i32.reinterpret_f32"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::ReinterpretFloat32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ReinterpretFloat32));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'm': {
                             switch (buf[8]) {
                               case 's':
                                 if (op == "i32.rem_s"sv) {
-                                  auto ret = makeBinary(ctx, pos, BinaryOp::RemSInt32);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RemSInt32));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i32.rem_u"sv) {
-                                  auto ret = makeBinary(ctx, pos, BinaryOp::RemUInt32);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RemUInt32));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -6209,16 +5937,14 @@ switch (buf[0]) {
                         switch (buf[7]) {
                           case 'l':
                             if (op == "i32.rotl"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::RotLInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RotLInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'r':
                             if (op == "i32.rotr"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::RotRInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RotRInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6233,25 +5959,22 @@ switch (buf[0]) {
                         switch (buf[6]) {
                           case 'l':
                             if (op == "i32.shl"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::ShlInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ShlInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'r': {
                             switch (buf[8]) {
                               case 's':
                                 if (op == "i32.shr_s"sv) {
-                                  auto ret = makeBinary(ctx, pos, BinaryOp::ShrSInt32);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ShrSInt32));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i32.shr_u"sv) {
-                                  auto ret = makeBinary(ctx, pos, BinaryOp::ShrUInt32);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ShrUInt32));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -6264,23 +5987,20 @@ switch (buf[0]) {
                         switch (buf[9]) {
                           case '\0':
                             if (op == "i32.store"sv) {
-                              auto ret = makeStore(ctx, pos, Type::i32, 4, /*isAtomic=*/false);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStore(ctx, pos, annotations, Type::i32, 4, /*isAtomic=*/false));
+                              return Ok{};
                             }
                             goto parse_error;
                           case '1':
                             if (op == "i32.store16"sv) {
-                              auto ret = makeStore(ctx, pos, Type::i32, 2, /*isAtomic=*/false);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStore(ctx, pos, annotations, Type::i32, 2, /*isAtomic=*/false));
+                              return Ok{};
                             }
                             goto parse_error;
                           case '8':
                             if (op == "i32.store8"sv) {
-                              auto ret = makeStore(ctx, pos, Type::i32, 1, /*isAtomic=*/false);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStore(ctx, pos, annotations, Type::i32, 1, /*isAtomic=*/false));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6288,9 +6008,8 @@ switch (buf[0]) {
                       }
                       case 'u':
                         if (op == "i32.sub"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::SubInt32);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubInt32));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -6304,16 +6023,14 @@ switch (buf[0]) {
                             switch (buf[14]) {
                               case 's':
                                 if (op == "i32.trunc_f32_s"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::TruncSFloat32ToInt32);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSFloat32ToInt32));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i32.trunc_f32_u"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::TruncUFloat32ToInt32);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncUFloat32ToInt32));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -6323,16 +6040,14 @@ switch (buf[0]) {
                             switch (buf[14]) {
                               case 's':
                                 if (op == "i32.trunc_f64_s"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::TruncSFloat64ToInt32);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSFloat64ToInt32));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i32.trunc_f64_u"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::TruncUFloat64ToInt32);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncUFloat64ToInt32));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -6347,16 +6062,14 @@ switch (buf[0]) {
                             switch (buf[18]) {
                               case 's':
                                 if (op == "i32.trunc_sat_f32_s"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::TruncSatSFloat32ToInt32);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSatSFloat32ToInt32));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i32.trunc_sat_f32_u"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::TruncSatUFloat32ToInt32);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSatUFloat32ToInt32));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -6366,16 +6079,14 @@ switch (buf[0]) {
                             switch (buf[18]) {
                               case 's':
                                 if (op == "i32.trunc_sat_f64_s"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::TruncSatSFloat64ToInt32);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSatSFloat64ToInt32));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i32.trunc_sat_f64_u"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::TruncSatUFloat64ToInt32);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSatUFloat64ToInt32));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -6389,16 +6100,14 @@ switch (buf[0]) {
                   }
                   case 'w':
                     if (op == "i32.wrap_i64"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::WrapInt64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::WrapInt64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'x':
                     if (op == "i32.xor"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::XorInt32);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::XorInt32));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -6410,23 +6119,20 @@ switch (buf[0]) {
                     switch (buf[7]) {
                       case 'b':
                         if (op == "i32x4.abs"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::AbsVecI32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::AbsVecI32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'd':
                         if (op == "i32x4.add"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::AddVecI32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddVecI32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'l':
                         if (op == "i32x4.all_true"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::AllTrueVecI32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::AllTrueVecI32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -6434,25 +6140,22 @@ switch (buf[0]) {
                   }
                   case 'b':
                     if (op == "i32x4.bitmask"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::BitmaskVecI32x4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::BitmaskVecI32x4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'd': {
                     switch (buf[11]) {
                       case '1':
                         if (op == "i32x4.dot_i16x8_s"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::DotSVecI16x8ToVecI32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::DotSVecI16x8ToVecI32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       case '8':
                         if (op == "i32x4.dot_i8x16_i7x16_add_s"sv) {
-                          auto ret = makeSIMDTernary(ctx, pos, SIMDTernaryOp::DotI8x16I7x16AddSToVecI32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeSIMDTernary(ctx, pos, annotations, SIMDTernaryOp::DotI8x16I7x16AddSToVecI32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -6462,9 +6165,8 @@ switch (buf[0]) {
                     switch (buf[7]) {
                       case 'q':
                         if (op == "i32x4.eq"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::EqVecI32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::EqVecI32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'x': {
@@ -6473,16 +6175,14 @@ switch (buf[0]) {
                             switch (buf[28]) {
                               case 's':
                                 if (op == "i32x4.extadd_pairwise_i16x8_s"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::ExtAddPairwiseSVecI16x8ToI32x4);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtAddPairwiseSVecI16x8ToI32x4));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i32x4.extadd_pairwise_i16x8_u"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::ExtAddPairwiseUVecI16x8ToI32x4);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtAddPairwiseUVecI16x8ToI32x4));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -6494,16 +6194,14 @@ switch (buf[0]) {
                                 switch (buf[24]) {
                                   case 's':
                                     if (op == "i32x4.extend_high_i16x8_s"sv) {
-                                      auto ret = makeUnary(ctx, pos, UnaryOp::ExtendHighSVecI16x8ToVecI32x4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendHighSVecI16x8ToVecI32x4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'u':
                                     if (op == "i32x4.extend_high_i16x8_u"sv) {
-                                      auto ret = makeUnary(ctx, pos, UnaryOp::ExtendHighUVecI16x8ToVecI32x4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendHighUVecI16x8ToVecI32x4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -6513,16 +6211,14 @@ switch (buf[0]) {
                                 switch (buf[23]) {
                                   case 's':
                                     if (op == "i32x4.extend_low_i16x8_s"sv) {
-                                      auto ret = makeUnary(ctx, pos, UnaryOp::ExtendLowSVecI16x8ToVecI32x4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendLowSVecI16x8ToVecI32x4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'u':
                                     if (op == "i32x4.extend_low_i16x8_u"sv) {
-                                      auto ret = makeUnary(ctx, pos, UnaryOp::ExtendLowUVecI16x8ToVecI32x4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendLowUVecI16x8ToVecI32x4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -6537,16 +6233,14 @@ switch (buf[0]) {
                                 switch (buf[24]) {
                                   case 's':
                                     if (op == "i32x4.extmul_high_i16x8_s"sv) {
-                                      auto ret = makeBinary(ctx, pos, BinaryOp::ExtMulHighSVecI32x4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ExtMulHighSVecI32x4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'u':
                                     if (op == "i32x4.extmul_high_i16x8_u"sv) {
-                                      auto ret = makeBinary(ctx, pos, BinaryOp::ExtMulHighUVecI32x4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ExtMulHighUVecI32x4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -6556,16 +6250,14 @@ switch (buf[0]) {
                                 switch (buf[23]) {
                                   case 's':
                                     if (op == "i32x4.extmul_low_i16x8_s"sv) {
-                                      auto ret = makeBinary(ctx, pos, BinaryOp::ExtMulLowSVecI32x4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ExtMulLowSVecI32x4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'u':
                                     if (op == "i32x4.extmul_low_i16x8_u"sv) {
-                                      auto ret = makeBinary(ctx, pos, BinaryOp::ExtMulLowUVecI32x4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ExtMulLowUVecI32x4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -6576,9 +6268,8 @@ switch (buf[0]) {
                           }
                           case 'r':
                             if (op == "i32x4.extract_lane"sv) {
-                              auto ret = makeSIMDExtract(ctx, pos, SIMDExtractOp::ExtractLaneVecI32x4, 4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeSIMDExtract(ctx, pos, annotations, SIMDExtractOp::ExtractLaneVecI32x4, 4));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6593,16 +6284,14 @@ switch (buf[0]) {
                         switch (buf[9]) {
                           case 's':
                             if (op == "i32x4.ge_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::GeSVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeSVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i32x4.ge_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::GeUVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeUVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6612,16 +6301,14 @@ switch (buf[0]) {
                         switch (buf[9]) {
                           case 's':
                             if (op == "i32x4.gt_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::GtSVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtSVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i32x4.gt_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::GtUVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtUVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6634,25 +6321,22 @@ switch (buf[0]) {
                     switch (buf[7]) {
                       case 'a':
                         if (op == "i32x4.laneselect"sv) {
-                          auto ret = makeSIMDTernary(ctx, pos, SIMDTernaryOp::LaneselectI32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeSIMDTernary(ctx, pos, annotations, SIMDTernaryOp::LaneselectI32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'e': {
                         switch (buf[9]) {
                           case 's':
                             if (op == "i32x4.le_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::LeSVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeSVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i32x4.le_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::LeUVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeUVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6662,16 +6346,14 @@ switch (buf[0]) {
                         switch (buf[9]) {
                           case 's':
                             if (op == "i32x4.lt_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::LtSVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtSVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i32x4.lt_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::LtUVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtUVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6686,16 +6368,14 @@ switch (buf[0]) {
                         switch (buf[10]) {
                           case 's':
                             if (op == "i32x4.max_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::MaxSVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MaxSVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i32x4.max_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::MaxUVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MaxUVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6705,16 +6385,14 @@ switch (buf[0]) {
                         switch (buf[10]) {
                           case 's':
                             if (op == "i32x4.min_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::MinSVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MinSVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i32x4.min_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::MinUVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MinUVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6722,9 +6400,8 @@ switch (buf[0]) {
                       }
                       case 'u':
                         if (op == "i32x4.mul"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::MulVecI32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MulVecI32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -6734,16 +6411,14 @@ switch (buf[0]) {
                     switch (buf[8]) {
                       case '\0':
                         if (op == "i32x4.ne"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::NeVecI32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NeVecI32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'g':
                         if (op == "i32x4.neg"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::NegVecI32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::NegVecI32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -6757,16 +6432,14 @@ switch (buf[0]) {
                             switch (buf[26]) {
                               case 's':
                                 if (op == "i32x4.relaxed_trunc_f32x4_s"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::RelaxedTruncSVecF32x4ToVecI32x4);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::RelaxedTruncSVecF32x4ToVecI32x4));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i32x4.relaxed_trunc_f32x4_u"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::RelaxedTruncUVecF32x4ToVecI32x4);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::RelaxedTruncUVecF32x4ToVecI32x4));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -6776,16 +6449,14 @@ switch (buf[0]) {
                             switch (buf[26]) {
                               case 's':
                                 if (op == "i32x4.relaxed_trunc_f64x2_s_zero"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::RelaxedTruncZeroSVecF64x2ToVecI32x4);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::RelaxedTruncZeroSVecF64x2ToVecI32x4));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i32x4.relaxed_trunc_f64x2_u_zero"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::RelaxedTruncZeroUVecF64x2ToVecI32x4);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::RelaxedTruncZeroUVecF64x2ToVecI32x4));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -6796,9 +6467,8 @@ switch (buf[0]) {
                       }
                       case 'p':
                         if (op == "i32x4.replace_lane"sv) {
-                          auto ret = makeSIMDReplace(ctx, pos, SIMDReplaceOp::ReplaceLaneVecI32x4, 4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeSIMDReplace(ctx, pos, annotations, SIMDReplaceOp::ReplaceLaneVecI32x4, 4));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -6810,25 +6480,22 @@ switch (buf[0]) {
                         switch (buf[8]) {
                           case 'l':
                             if (op == "i32x4.shl"sv) {
-                              auto ret = makeSIMDShift(ctx, pos, SIMDShiftOp::ShlVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeSIMDShift(ctx, pos, annotations, SIMDShiftOp::ShlVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'r': {
                             switch (buf[10]) {
                               case 's':
                                 if (op == "i32x4.shr_s"sv) {
-                                  auto ret = makeSIMDShift(ctx, pos, SIMDShiftOp::ShrSVecI32x4);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeSIMDShift(ctx, pos, annotations, SIMDShiftOp::ShrSVecI32x4));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i32x4.shr_u"sv) {
-                                  auto ret = makeSIMDShift(ctx, pos, SIMDShiftOp::ShrUVecI32x4);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeSIMDShift(ctx, pos, annotations, SIMDShiftOp::ShrUVecI32x4));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -6839,16 +6506,14 @@ switch (buf[0]) {
                       }
                       case 'p':
                         if (op == "i32x4.splat"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::SplatVecI32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::SplatVecI32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i32x4.sub"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::SubVecI32x4);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubVecI32x4));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -6860,16 +6525,14 @@ switch (buf[0]) {
                         switch (buf[22]) {
                           case 's':
                             if (op == "i32x4.trunc_sat_f32x4_s"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::TruncSatSVecF32x4ToVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSatSVecF32x4ToVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i32x4.trunc_sat_f32x4_u"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::TruncSatUVecF32x4ToVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSatUVecF32x4ToVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6879,16 +6542,14 @@ switch (buf[0]) {
                         switch (buf[22]) {
                           case 's':
                             if (op == "i32x4.trunc_sat_f64x2_s_zero"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::TruncSatZeroSVecF64x2ToVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSatZeroSVecF64x2ToVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i32x4.trunc_sat_f64x2_u_zero"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::TruncSatZeroUVecF64x2ToVecI32x4);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSatZeroUVecF64x2ToVecI32x4));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6914,16 +6575,14 @@ switch (buf[0]) {
                 switch (buf[5]) {
                   case 'd':
                     if (op == "i64.add"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::AddInt64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddInt64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'n':
                     if (op == "i64.and"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::AndInt64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AndInt64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't': {
@@ -6932,30 +6591,26 @@ switch (buf[0]) {
                         switch (buf[15]) {
                           case '\0':
                             if (op == "i64.atomic.load"sv) {
-                              auto ret = makeLoad(ctx, pos, Type::i64, /*signed=*/false, 8, /*isAtomic=*/true);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i64, /*signed=*/false, 8, /*isAtomic=*/true));
+                              return Ok{};
                             }
                             goto parse_error;
                           case '1':
                             if (op == "i64.atomic.load16_u"sv) {
-                              auto ret = makeLoad(ctx, pos, Type::i64, /*signed=*/false, 2, /*isAtomic=*/true);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i64, /*signed=*/false, 2, /*isAtomic=*/true));
+                              return Ok{};
                             }
                             goto parse_error;
                           case '3':
                             if (op == "i64.atomic.load32_u"sv) {
-                              auto ret = makeLoad(ctx, pos, Type::i64, /*signed=*/false, 4, /*isAtomic=*/true);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i64, /*signed=*/false, 4, /*isAtomic=*/true));
+                              return Ok{};
                             }
                             goto parse_error;
                           case '8':
                             if (op == "i64.atomic.load8_u"sv) {
-                              auto ret = makeLoad(ctx, pos, Type::i64, /*signed=*/false, 1, /*isAtomic=*/true);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i64, /*signed=*/false, 1, /*isAtomic=*/true));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -6969,16 +6624,14 @@ switch (buf[0]) {
                                 switch (buf[16]) {
                                   case 'd':
                                     if (op == "i64.atomic.rmw.add"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAdd, Type::i64, 8);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAdd, Type::i64, 8));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'n':
                                     if (op == "i64.atomic.rmw.and"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAnd, Type::i64, 8);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAnd, Type::i64, 8));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -6986,39 +6639,34 @@ switch (buf[0]) {
                               }
                               case 'c':
                                 if (op == "i64.atomic.rmw.cmpxchg"sv) {
-                                  auto ret = makeAtomicCmpxchg(ctx, pos, Type::i64, 8);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeAtomicCmpxchg(ctx, pos, annotations, Type::i64, 8));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'o':
                                 if (op == "i64.atomic.rmw.or"sv) {
-                                  auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWOr, Type::i64, 8);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWOr, Type::i64, 8));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 's':
                                 if (op == "i64.atomic.rmw.sub"sv) {
-                                  auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWSub, Type::i64, 8);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWSub, Type::i64, 8));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'x': {
                                 switch (buf[16]) {
                                   case 'c':
                                     if (op == "i64.atomic.rmw.xchg"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXchg, Type::i64, 8);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXchg, Type::i64, 8));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'o':
                                     if (op == "i64.atomic.rmw.xor"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXor, Type::i64, 8);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXor, Type::i64, 8));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -7033,16 +6681,14 @@ switch (buf[0]) {
                                 switch (buf[18]) {
                                   case 'd':
                                     if (op == "i64.atomic.rmw16.add_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAdd, Type::i64, 2);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAdd, Type::i64, 2));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'n':
                                     if (op == "i64.atomic.rmw16.and_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAnd, Type::i64, 2);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAnd, Type::i64, 2));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -7050,39 +6696,34 @@ switch (buf[0]) {
                               }
                               case 'c':
                                 if (op == "i64.atomic.rmw16.cmpxchg_u"sv) {
-                                  auto ret = makeAtomicCmpxchg(ctx, pos, Type::i64, 2);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeAtomicCmpxchg(ctx, pos, annotations, Type::i64, 2));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'o':
                                 if (op == "i64.atomic.rmw16.or_u"sv) {
-                                  auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWOr, Type::i64, 2);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWOr, Type::i64, 2));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 's':
                                 if (op == "i64.atomic.rmw16.sub_u"sv) {
-                                  auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWSub, Type::i64, 2);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWSub, Type::i64, 2));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'x': {
                                 switch (buf[18]) {
                                   case 'c':
                                     if (op == "i64.atomic.rmw16.xchg_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXchg, Type::i64, 2);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXchg, Type::i64, 2));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'o':
                                     if (op == "i64.atomic.rmw16.xor_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXor, Type::i64, 2);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXor, Type::i64, 2));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -7097,16 +6738,14 @@ switch (buf[0]) {
                                 switch (buf[18]) {
                                   case 'd':
                                     if (op == "i64.atomic.rmw32.add_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAdd, Type::i64, 4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAdd, Type::i64, 4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'n':
                                     if (op == "i64.atomic.rmw32.and_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAnd, Type::i64, 4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAnd, Type::i64, 4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -7114,39 +6753,34 @@ switch (buf[0]) {
                               }
                               case 'c':
                                 if (op == "i64.atomic.rmw32.cmpxchg_u"sv) {
-                                  auto ret = makeAtomicCmpxchg(ctx, pos, Type::i64, 4);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeAtomicCmpxchg(ctx, pos, annotations, Type::i64, 4));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'o':
                                 if (op == "i64.atomic.rmw32.or_u"sv) {
-                                  auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWOr, Type::i64, 4);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWOr, Type::i64, 4));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 's':
                                 if (op == "i64.atomic.rmw32.sub_u"sv) {
-                                  auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWSub, Type::i64, 4);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWSub, Type::i64, 4));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'x': {
                                 switch (buf[18]) {
                                   case 'c':
                                     if (op == "i64.atomic.rmw32.xchg_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXchg, Type::i64, 4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXchg, Type::i64, 4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'o':
                                     if (op == "i64.atomic.rmw32.xor_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXor, Type::i64, 4);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXor, Type::i64, 4));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -7161,16 +6795,14 @@ switch (buf[0]) {
                                 switch (buf[17]) {
                                   case 'd':
                                     if (op == "i64.atomic.rmw8.add_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAdd, Type::i64, 1);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAdd, Type::i64, 1));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'n':
                                     if (op == "i64.atomic.rmw8.and_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWAnd, Type::i64, 1);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWAnd, Type::i64, 1));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -7178,39 +6810,34 @@ switch (buf[0]) {
                               }
                               case 'c':
                                 if (op == "i64.atomic.rmw8.cmpxchg_u"sv) {
-                                  auto ret = makeAtomicCmpxchg(ctx, pos, Type::i64, 1);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeAtomicCmpxchg(ctx, pos, annotations, Type::i64, 1));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'o':
                                 if (op == "i64.atomic.rmw8.or_u"sv) {
-                                  auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWOr, Type::i64, 1);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWOr, Type::i64, 1));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 's':
                                 if (op == "i64.atomic.rmw8.sub_u"sv) {
-                                  auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWSub, Type::i64, 1);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWSub, Type::i64, 1));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'x': {
                                 switch (buf[17]) {
                                   case 'c':
                                     if (op == "i64.atomic.rmw8.xchg_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXchg, Type::i64, 1);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXchg, Type::i64, 1));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   case 'o':
                                     if (op == "i64.atomic.rmw8.xor_u"sv) {
-                                      auto ret = makeAtomicRMW(ctx, pos, AtomicRMWOp::RMWXor, Type::i64, 1);
-                                      CHECK_ERR(ret);
-                                      return *ret;
+                                      CHECK_ERR(makeAtomicRMW(ctx, pos, annotations, AtomicRMWOp::RMWXor, Type::i64, 1));
+                                      return Ok{};
                                     }
                                     goto parse_error;
                                   default: goto parse_error;
@@ -7226,30 +6853,26 @@ switch (buf[0]) {
                         switch (buf[16]) {
                           case '\0':
                             if (op == "i64.atomic.store"sv) {
-                              auto ret = makeStore(ctx, pos, Type::i64, 8, /*isAtomic=*/true);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStore(ctx, pos, annotations, Type::i64, 8, /*isAtomic=*/true));
+                              return Ok{};
                             }
                             goto parse_error;
                           case '1':
                             if (op == "i64.atomic.store16"sv) {
-                              auto ret = makeStore(ctx, pos, Type::i64, 2, /*isAtomic=*/true);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStore(ctx, pos, annotations, Type::i64, 2, /*isAtomic=*/true));
+                              return Ok{};
                             }
                             goto parse_error;
                           case '3':
                             if (op == "i64.atomic.store32"sv) {
-                              auto ret = makeStore(ctx, pos, Type::i64, 4, /*isAtomic=*/true);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStore(ctx, pos, annotations, Type::i64, 4, /*isAtomic=*/true));
+                              return Ok{};
                             }
                             goto parse_error;
                           case '8':
                             if (op == "i64.atomic.store8"sv) {
-                              auto ret = makeStore(ctx, pos, Type::i64, 1, /*isAtomic=*/true);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStore(ctx, pos, annotations, Type::i64, 1, /*isAtomic=*/true));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -7265,23 +6888,20 @@ switch (buf[0]) {
                 switch (buf[5]) {
                   case 'l':
                     if (op == "i64.clz"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::ClzInt64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ClzInt64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'o':
                     if (op == "i64.const"sv) {
-                      auto ret = makeConst(ctx, pos, Type::i64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeConst(ctx, pos, annotations, Type::i64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't':
                     if (op == "i64.ctz"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::CtzInt64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::CtzInt64));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -7291,16 +6911,14 @@ switch (buf[0]) {
                 switch (buf[8]) {
                   case 's':
                     if (op == "i64.div_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::DivSInt64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::DivSInt64));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i64.div_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::DivUInt64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::DivUInt64));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -7312,16 +6930,14 @@ switch (buf[0]) {
                     switch (buf[6]) {
                       case '\0':
                         if (op == "i64.eq"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::EqInt64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::EqInt64));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'z':
                         if (op == "i64.eqz"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::EqZInt64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::EqZInt64));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -7331,39 +6947,34 @@ switch (buf[0]) {
                     switch (buf[10]) {
                       case '1':
                         if (op == "i64.extend16_s"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::ExtendS16Int64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendS16Int64));
+                          return Ok{};
                         }
                         goto parse_error;
                       case '3':
                         if (op == "i64.extend32_s"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::ExtendS32Int64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendS32Int64));
+                          return Ok{};
                         }
                         goto parse_error;
                       case '8':
                         if (op == "i64.extend8_s"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::ExtendS8Int64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendS8Int64));
+                          return Ok{};
                         }
                         goto parse_error;
                       case '_': {
                         switch (buf[15]) {
                           case 's':
                             if (op == "i64.extend_i32_s"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::ExtendSInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendSInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i64.extend_i32_u"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::ExtendUInt32);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendUInt32));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -7381,16 +6992,14 @@ switch (buf[0]) {
                     switch (buf[7]) {
                       case 's':
                         if (op == "i64.ge_s"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::GeSInt64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeSInt64));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i64.ge_u"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::GeUInt64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeUInt64));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -7400,16 +7009,14 @@ switch (buf[0]) {
                     switch (buf[7]) {
                       case 's':
                         if (op == "i64.gt_s"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::GtSInt64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtSInt64));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i64.gt_u"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::GtUInt64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtUInt64));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -7424,16 +7031,14 @@ switch (buf[0]) {
                     switch (buf[7]) {
                       case 's':
                         if (op == "i64.le_s"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::LeSInt64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeSInt64));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i64.le_u"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::LeUInt64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeUInt64));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -7443,25 +7048,22 @@ switch (buf[0]) {
                     switch (buf[8]) {
                       case '\0':
                         if (op == "i64.load"sv) {
-                          auto ret = makeLoad(ctx, pos, Type::i64, /*signed=*/false, 8, /*isAtomic=*/false);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i64, /*signed=*/false, 8, /*isAtomic=*/false));
+                          return Ok{};
                         }
                         goto parse_error;
                       case '1': {
                         switch (buf[11]) {
                           case 's':
                             if (op == "i64.load16_s"sv) {
-                              auto ret = makeLoad(ctx, pos, Type::i64, /*signed=*/true, 2, /*isAtomic=*/false);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i64, /*signed=*/true, 2, /*isAtomic=*/false));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i64.load16_u"sv) {
-                              auto ret = makeLoad(ctx, pos, Type::i64, /*signed=*/false, 2, /*isAtomic=*/false);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i64, /*signed=*/false, 2, /*isAtomic=*/false));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -7471,16 +7073,14 @@ switch (buf[0]) {
                         switch (buf[11]) {
                           case 's':
                             if (op == "i64.load32_s"sv) {
-                              auto ret = makeLoad(ctx, pos, Type::i64, /*signed=*/true, 4, /*isAtomic=*/false);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i64, /*signed=*/true, 4, /*isAtomic=*/false));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i64.load32_u"sv) {
-                              auto ret = makeLoad(ctx, pos, Type::i64, /*signed=*/false, 4, /*isAtomic=*/false);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i64, /*signed=*/false, 4, /*isAtomic=*/false));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -7490,16 +7090,14 @@ switch (buf[0]) {
                         switch (buf[10]) {
                           case 's':
                             if (op == "i64.load8_s"sv) {
-                              auto ret = makeLoad(ctx, pos, Type::i64, /*signed=*/true, 1, /*isAtomic=*/false);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i64, /*signed=*/true, 1, /*isAtomic=*/false));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i64.load8_u"sv) {
-                              auto ret = makeLoad(ctx, pos, Type::i64, /*signed=*/false, 1, /*isAtomic=*/false);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeLoad(ctx, pos, annotations, Type::i64, /*signed=*/false, 1, /*isAtomic=*/false));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -7512,16 +7110,14 @@ switch (buf[0]) {
                     switch (buf[7]) {
                       case 's':
                         if (op == "i64.lt_s"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::LtSInt64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtSInt64));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i64.lt_u"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::LtUInt64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtUInt64));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -7532,30 +7128,26 @@ switch (buf[0]) {
               }
               case 'm':
                 if (op == "i64.mul"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::MulInt64);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MulInt64));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'n':
                 if (op == "i64.ne"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::NeInt64);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NeInt64));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'o':
                 if (op == "i64.or"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::OrInt64);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::OrInt64));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'p':
                 if (op == "i64.popcnt"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::PopcntInt64);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::PopcntInt64));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'r': {
@@ -7564,25 +7156,22 @@ switch (buf[0]) {
                     switch (buf[6]) {
                       case 'i':
                         if (op == "i64.reinterpret_f64"sv) {
-                          auto ret = makeUnary(ctx, pos, UnaryOp::ReinterpretFloat64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ReinterpretFloat64));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'm': {
                         switch (buf[8]) {
                           case 's':
                             if (op == "i64.rem_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::RemSInt64);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RemSInt64));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i64.rem_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::RemUInt64);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RemUInt64));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -7595,16 +7184,14 @@ switch (buf[0]) {
                     switch (buf[7]) {
                       case 'l':
                         if (op == "i64.rotl"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::RotLInt64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RotLInt64));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'r':
                         if (op == "i64.rotr"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::RotRInt64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RotRInt64));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -7619,25 +7206,22 @@ switch (buf[0]) {
                     switch (buf[6]) {
                       case 'l':
                         if (op == "i64.shl"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::ShlInt64);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ShlInt64));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'r': {
                         switch (buf[8]) {
                           case 's':
                             if (op == "i64.shr_s"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::ShrSInt64);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ShrSInt64));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i64.shr_u"sv) {
-                              auto ret = makeBinary(ctx, pos, BinaryOp::ShrUInt64);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ShrUInt64));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -7650,30 +7234,26 @@ switch (buf[0]) {
                     switch (buf[9]) {
                       case '\0':
                         if (op == "i64.store"sv) {
-                          auto ret = makeStore(ctx, pos, Type::i64, 8, /*isAtomic=*/false);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeStore(ctx, pos, annotations, Type::i64, 8, /*isAtomic=*/false));
+                          return Ok{};
                         }
                         goto parse_error;
                       case '1':
                         if (op == "i64.store16"sv) {
-                          auto ret = makeStore(ctx, pos, Type::i64, 2, /*isAtomic=*/false);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeStore(ctx, pos, annotations, Type::i64, 2, /*isAtomic=*/false));
+                          return Ok{};
                         }
                         goto parse_error;
                       case '3':
                         if (op == "i64.store32"sv) {
-                          auto ret = makeStore(ctx, pos, Type::i64, 4, /*isAtomic=*/false);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeStore(ctx, pos, annotations, Type::i64, 4, /*isAtomic=*/false));
+                          return Ok{};
                         }
                         goto parse_error;
                       case '8':
                         if (op == "i64.store8"sv) {
-                          auto ret = makeStore(ctx, pos, Type::i64, 1, /*isAtomic=*/false);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeStore(ctx, pos, annotations, Type::i64, 1, /*isAtomic=*/false));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -7681,9 +7261,8 @@ switch (buf[0]) {
                   }
                   case 'u':
                     if (op == "i64.sub"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::SubInt64);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubInt64));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -7697,16 +7276,14 @@ switch (buf[0]) {
                         switch (buf[14]) {
                           case 's':
                             if (op == "i64.trunc_f32_s"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::TruncSFloat32ToInt64);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSFloat32ToInt64));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i64.trunc_f32_u"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::TruncUFloat32ToInt64);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncUFloat32ToInt64));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -7716,16 +7293,14 @@ switch (buf[0]) {
                         switch (buf[14]) {
                           case 's':
                             if (op == "i64.trunc_f64_s"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::TruncSFloat64ToInt64);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSFloat64ToInt64));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i64.trunc_f64_u"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::TruncUFloat64ToInt64);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncUFloat64ToInt64));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -7740,16 +7315,14 @@ switch (buf[0]) {
                         switch (buf[18]) {
                           case 's':
                             if (op == "i64.trunc_sat_f32_s"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::TruncSatSFloat32ToInt64);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSatSFloat32ToInt64));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i64.trunc_sat_f32_u"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::TruncSatUFloat32ToInt64);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSatUFloat32ToInt64));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -7759,16 +7332,14 @@ switch (buf[0]) {
                         switch (buf[18]) {
                           case 's':
                             if (op == "i64.trunc_sat_f64_s"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::TruncSatSFloat64ToInt64);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSatSFloat64ToInt64));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i64.trunc_sat_f64_u"sv) {
-                              auto ret = makeUnary(ctx, pos, UnaryOp::TruncSatUFloat64ToInt64);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::TruncSatUFloat64ToInt64));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -7782,9 +7353,8 @@ switch (buf[0]) {
               }
               case 'x':
                 if (op == "i64.xor"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::XorInt64);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::XorInt64));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -7796,23 +7366,20 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'b':
                     if (op == "i64x2.abs"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::AbsVecI64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::AbsVecI64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'd':
                     if (op == "i64x2.add"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::AddVecI64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddVecI64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'l':
                     if (op == "i64x2.all_true"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::AllTrueVecI64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::AllTrueVecI64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -7820,18 +7387,16 @@ switch (buf[0]) {
               }
               case 'b':
                 if (op == "i64x2.bitmask"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::BitmaskVecI64x2);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::BitmaskVecI64x2));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'e': {
                 switch (buf[7]) {
                   case 'q':
                     if (op == "i64x2.eq"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::EqVecI64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::EqVecI64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'x': {
@@ -7842,16 +7407,14 @@ switch (buf[0]) {
                             switch (buf[24]) {
                               case 's':
                                 if (op == "i64x2.extend_high_i32x4_s"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::ExtendHighSVecI32x4ToVecI64x2);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendHighSVecI32x4ToVecI64x2));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i64x2.extend_high_i32x4_u"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::ExtendHighUVecI32x4ToVecI64x2);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendHighUVecI32x4ToVecI64x2));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -7861,16 +7424,14 @@ switch (buf[0]) {
                             switch (buf[23]) {
                               case 's':
                                 if (op == "i64x2.extend_low_i32x4_s"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::ExtendLowSVecI32x4ToVecI64x2);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendLowSVecI32x4ToVecI64x2));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i64x2.extend_low_i32x4_u"sv) {
-                                  auto ret = makeUnary(ctx, pos, UnaryOp::ExtendLowUVecI32x4ToVecI64x2);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::ExtendLowUVecI32x4ToVecI64x2));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -7885,16 +7446,14 @@ switch (buf[0]) {
                             switch (buf[24]) {
                               case 's':
                                 if (op == "i64x2.extmul_high_i32x4_s"sv) {
-                                  auto ret = makeBinary(ctx, pos, BinaryOp::ExtMulHighSVecI64x2);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ExtMulHighSVecI64x2));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i64x2.extmul_high_i32x4_u"sv) {
-                                  auto ret = makeBinary(ctx, pos, BinaryOp::ExtMulHighUVecI64x2);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ExtMulHighUVecI64x2));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -7904,16 +7463,14 @@ switch (buf[0]) {
                             switch (buf[23]) {
                               case 's':
                                 if (op == "i64x2.extmul_low_i32x4_s"sv) {
-                                  auto ret = makeBinary(ctx, pos, BinaryOp::ExtMulLowSVecI64x2);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ExtMulLowSVecI64x2));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case 'u':
                                 if (op == "i64x2.extmul_low_i32x4_u"sv) {
-                                  auto ret = makeBinary(ctx, pos, BinaryOp::ExtMulLowUVecI64x2);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::ExtMulLowUVecI64x2));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -7924,9 +7481,8 @@ switch (buf[0]) {
                       }
                       case 'r':
                         if (op == "i64x2.extract_lane"sv) {
-                          auto ret = makeSIMDExtract(ctx, pos, SIMDExtractOp::ExtractLaneVecI64x2, 2);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeSIMDExtract(ctx, pos, annotations, SIMDExtractOp::ExtractLaneVecI64x2, 2));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -7939,16 +7495,14 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'e':
                     if (op == "i64x2.ge_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GeSVecI64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeSVecI64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't':
                     if (op == "i64x2.gt_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GtSVecI64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtSVecI64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -7958,23 +7512,20 @@ switch (buf[0]) {
                 switch (buf[7]) {
                   case 'a':
                     if (op == "i64x2.laneselect"sv) {
-                      auto ret = makeSIMDTernary(ctx, pos, SIMDTernaryOp::LaneselectI64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDTernary(ctx, pos, annotations, SIMDTernaryOp::LaneselectI64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'e':
                     if (op == "i64x2.le_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LeSVecI64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeSVecI64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 't':
                     if (op == "i64x2.lt_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LtSVecI64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtSVecI64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -7982,25 +7533,22 @@ switch (buf[0]) {
               }
               case 'm':
                 if (op == "i64x2.mul"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::MulVecI64x2);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MulVecI64x2));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'n': {
                 switch (buf[8]) {
                   case '\0':
                     if (op == "i64x2.ne"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::NeVecI64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NeVecI64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'g':
                     if (op == "i64x2.neg"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::NegVecI64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::NegVecI64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -8008,9 +7556,8 @@ switch (buf[0]) {
               }
               case 'r':
                 if (op == "i64x2.replace_lane"sv) {
-                  auto ret = makeSIMDReplace(ctx, pos, SIMDReplaceOp::ReplaceLaneVecI64x2, 2);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeSIMDReplace(ctx, pos, annotations, SIMDReplaceOp::ReplaceLaneVecI64x2, 2));
+                  return Ok{};
                 }
                 goto parse_error;
               case 's': {
@@ -8019,25 +7566,22 @@ switch (buf[0]) {
                     switch (buf[8]) {
                       case 'l':
                         if (op == "i64x2.shl"sv) {
-                          auto ret = makeSIMDShift(ctx, pos, SIMDShiftOp::ShlVecI64x2);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeSIMDShift(ctx, pos, annotations, SIMDShiftOp::ShlVecI64x2));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'r': {
                         switch (buf[10]) {
                           case 's':
                             if (op == "i64x2.shr_s"sv) {
-                              auto ret = makeSIMDShift(ctx, pos, SIMDShiftOp::ShrSVecI64x2);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeSIMDShift(ctx, pos, annotations, SIMDShiftOp::ShrSVecI64x2));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'u':
                             if (op == "i64x2.shr_u"sv) {
-                              auto ret = makeSIMDShift(ctx, pos, SIMDShiftOp::ShrUVecI64x2);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeSIMDShift(ctx, pos, annotations, SIMDShiftOp::ShrUVecI64x2));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -8048,16 +7592,14 @@ switch (buf[0]) {
                   }
                   case 'p':
                     if (op == "i64x2.splat"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::SplatVecI64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::SplatVecI64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i64x2.sub"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::SubVecI64x2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubVecI64x2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -8075,34 +7617,30 @@ switch (buf[0]) {
             switch (buf[7]) {
               case 'b':
                 if (op == "i8x16.abs"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::AbsVecI8x16);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::AbsVecI8x16));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'd': {
                 switch (buf[9]) {
                   case '\0':
                     if (op == "i8x16.add"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::AddVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   case '_': {
                     switch (buf[14]) {
                       case 's':
                         if (op == "i8x16.add_sat_s"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::AddSatSVecI8x16);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddSatSVecI8x16));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i8x16.add_sat_u"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::AddSatUVecI8x16);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AddSatUVecI8x16));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -8113,16 +7651,14 @@ switch (buf[0]) {
               }
               case 'l':
                 if (op == "i8x16.all_true"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::AllTrueVecI8x16);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::AllTrueVecI8x16));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'v':
                 if (op == "i8x16.avgr_u"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::AvgrUVecI8x16);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AvgrUVecI8x16));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -8130,34 +7666,30 @@ switch (buf[0]) {
           }
           case 'b':
             if (op == "i8x16.bitmask"sv) {
-              auto ret = makeUnary(ctx, pos, UnaryOp::BitmaskVecI8x16);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::BitmaskVecI8x16));
+              return Ok{};
             }
             goto parse_error;
           case 'e': {
             switch (buf[7]) {
               case 'q':
                 if (op == "i8x16.eq"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::EqVecI8x16);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::EqVecI8x16));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'x': {
                 switch (buf[19]) {
                   case 's':
                     if (op == "i8x16.extract_lane_s"sv) {
-                      auto ret = makeSIMDExtract(ctx, pos, SIMDExtractOp::ExtractLaneSVecI8x16, 16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDExtract(ctx, pos, annotations, SIMDExtractOp::ExtractLaneSVecI8x16, 16));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i8x16.extract_lane_u"sv) {
-                      auto ret = makeSIMDExtract(ctx, pos, SIMDExtractOp::ExtractLaneUVecI8x16, 16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDExtract(ctx, pos, annotations, SIMDExtractOp::ExtractLaneUVecI8x16, 16));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -8172,16 +7704,14 @@ switch (buf[0]) {
                 switch (buf[9]) {
                   case 's':
                     if (op == "i8x16.ge_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GeSVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeSVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i8x16.ge_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GeUVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GeUVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -8191,16 +7721,14 @@ switch (buf[0]) {
                 switch (buf[9]) {
                   case 's':
                     if (op == "i8x16.gt_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GtSVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtSVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i8x16.gt_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::GtUVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::GtUVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -8213,25 +7741,22 @@ switch (buf[0]) {
             switch (buf[7]) {
               case 'a':
                 if (op == "i8x16.laneselect"sv) {
-                  auto ret = makeSIMDTernary(ctx, pos, SIMDTernaryOp::LaneselectI8x16);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeSIMDTernary(ctx, pos, annotations, SIMDTernaryOp::LaneselectI8x16));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'e': {
                 switch (buf[9]) {
                   case 's':
                     if (op == "i8x16.le_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LeSVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeSVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i8x16.le_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LeUVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LeUVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -8241,16 +7766,14 @@ switch (buf[0]) {
                 switch (buf[9]) {
                   case 's':
                     if (op == "i8x16.lt_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LtSVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtSVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i8x16.lt_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::LtUVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::LtUVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -8265,16 +7788,14 @@ switch (buf[0]) {
                 switch (buf[10]) {
                   case 's':
                     if (op == "i8x16.max_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MaxSVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MaxSVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i8x16.max_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MaxUVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MaxUVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -8284,16 +7805,14 @@ switch (buf[0]) {
                 switch (buf[10]) {
                   case 's':
                     if (op == "i8x16.min_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MinSVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MinSVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i8x16.min_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::MinUVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::MinUVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -8308,16 +7827,14 @@ switch (buf[0]) {
                 switch (buf[19]) {
                   case 's':
                     if (op == "i8x16.narrow_i16x8_s"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::NarrowSVecI16x8ToVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NarrowSVecI16x8ToVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "i8x16.narrow_i16x8_u"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::NarrowUVecI16x8ToVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NarrowUVecI16x8ToVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -8327,16 +7844,14 @@ switch (buf[0]) {
                 switch (buf[8]) {
                   case '\0':
                     if (op == "i8x16.ne"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::NeVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::NeVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'g':
                     if (op == "i8x16.neg"sv) {
-                      auto ret = makeUnary(ctx, pos, UnaryOp::NegVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::NegVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -8347,25 +7862,22 @@ switch (buf[0]) {
           }
           case 'p':
             if (op == "i8x16.popcnt"sv) {
-              auto ret = makeUnary(ctx, pos, UnaryOp::PopcntVecI8x16);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::PopcntVecI8x16));
+              return Ok{};
             }
             goto parse_error;
           case 'r': {
             switch (buf[8]) {
               case 'l':
                 if (op == "i8x16.relaxed_swizzle"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::RelaxedSwizzleVecI8x16);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::RelaxedSwizzleVecI8x16));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'p':
                 if (op == "i8x16.replace_lane"sv) {
-                  auto ret = makeSIMDReplace(ctx, pos, SIMDReplaceOp::ReplaceLaneVecI8x16, 16);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeSIMDReplace(ctx, pos, annotations, SIMDReplaceOp::ReplaceLaneVecI8x16, 16));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -8377,25 +7889,22 @@ switch (buf[0]) {
                 switch (buf[8]) {
                   case 'l':
                     if (op == "i8x16.shl"sv) {
-                      auto ret = makeSIMDShift(ctx, pos, SIMDShiftOp::ShlVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDShift(ctx, pos, annotations, SIMDShiftOp::ShlVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'r': {
                     switch (buf[10]) {
                       case 's':
                         if (op == "i8x16.shr_s"sv) {
-                          auto ret = makeSIMDShift(ctx, pos, SIMDShiftOp::ShrSVecI8x16);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeSIMDShift(ctx, pos, annotations, SIMDShiftOp::ShrSVecI8x16));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i8x16.shr_u"sv) {
-                          auto ret = makeSIMDShift(ctx, pos, SIMDShiftOp::ShrUVecI8x16);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeSIMDShift(ctx, pos, annotations, SIMDShiftOp::ShrUVecI8x16));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -8403,9 +7912,8 @@ switch (buf[0]) {
                   }
                   case 'u':
                     if (op == "i8x16.shuffle"sv) {
-                      auto ret = makeSIMDShuffle(ctx, pos);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDShuffle(ctx, pos, annotations));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -8413,34 +7921,30 @@ switch (buf[0]) {
               }
               case 'p':
                 if (op == "i8x16.splat"sv) {
-                  auto ret = makeUnary(ctx, pos, UnaryOp::SplatVecI8x16);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::SplatVecI8x16));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'u': {
                 switch (buf[9]) {
                   case '\0':
                     if (op == "i8x16.sub"sv) {
-                      auto ret = makeBinary(ctx, pos, BinaryOp::SubVecI8x16);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubVecI8x16));
+                      return Ok{};
                     }
                     goto parse_error;
                   case '_': {
                     switch (buf[14]) {
                       case 's':
                         if (op == "i8x16.sub_sat_s"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::SubSatSVecI8x16);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubSatSVecI8x16));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "i8x16.sub_sat_u"sv) {
-                          auto ret = makeBinary(ctx, pos, BinaryOp::SubSatUVecI8x16);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SubSatUVecI8x16));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -8451,9 +7955,8 @@ switch (buf[0]) {
               }
               case 'w':
                 if (op == "i8x16.swizzle"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::SwizzleVecI8x16);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::SwizzleVecI8x16));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -8462,49 +7965,27 @@ switch (buf[0]) {
           default: goto parse_error;
         }
       }
-      case 'f':
-        if (op == "if"sv) {
-          auto ret = makeIf(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
-        }
-        goto parse_error;
       default: goto parse_error;
     }
   }
   case 'l': {
-    switch (buf[2]) {
-      case 'c': {
-        switch (buf[6]) {
-          case 'g':
-            if (op == "local.get"sv) {
-              auto ret = makeLocalGet(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
-            }
-            goto parse_error;
-          case 's':
-            if (op == "local.set"sv) {
-              auto ret = makeLocalSet(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
-            }
-            goto parse_error;
-          case 't':
-            if (op == "local.tee"sv) {
-              auto ret = makeLocalTee(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
-            }
-            goto parse_error;
-          default: goto parse_error;
+    switch (buf[6]) {
+      case 'g':
+        if (op == "local.get"sv) {
+          CHECK_ERR(makeLocalGet(ctx, pos, annotations));
+          return Ok{};
         }
-      }
-      case 'o':
-        if (op == "loop"sv) {
-          auto ret = makeLoop(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+        goto parse_error;
+      case 's':
+        if (op == "local.set"sv) {
+          CHECK_ERR(makeLocalSet(ctx, pos, annotations));
+          return Ok{};
+        }
+        goto parse_error;
+      case 't':
+        if (op == "local.tee"sv) {
+          CHECK_ERR(makeLocalTee(ctx, pos, annotations));
+          return Ok{};
         }
         goto parse_error;
       default: goto parse_error;
@@ -8516,25 +7997,22 @@ switch (buf[0]) {
         switch (buf[14]) {
           case 'n':
             if (op == "memory.atomic.notify"sv) {
-              auto ret = makeAtomicNotify(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeAtomicNotify(ctx, pos, annotations));
+              return Ok{};
             }
             goto parse_error;
           case 'w': {
             switch (buf[18]) {
               case '3':
                 if (op == "memory.atomic.wait32"sv) {
-                  auto ret = makeAtomicWait(ctx, pos, Type::i32);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeAtomicWait(ctx, pos, annotations, Type::i32));
+                  return Ok{};
                 }
                 goto parse_error;
               case '6':
                 if (op == "memory.atomic.wait64"sv) {
-                  auto ret = makeAtomicWait(ctx, pos, Type::i64);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeAtomicWait(ctx, pos, annotations, Type::i64));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -8545,37 +8023,32 @@ switch (buf[0]) {
       }
       case 'c':
         if (op == "memory.copy"sv) {
-          auto ret = makeMemoryCopy(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeMemoryCopy(ctx, pos, annotations));
+          return Ok{};
         }
         goto parse_error;
       case 'f':
         if (op == "memory.fill"sv) {
-          auto ret = makeMemoryFill(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeMemoryFill(ctx, pos, annotations));
+          return Ok{};
         }
         goto parse_error;
       case 'g':
         if (op == "memory.grow"sv) {
-          auto ret = makeMemoryGrow(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeMemoryGrow(ctx, pos, annotations));
+          return Ok{};
         }
         goto parse_error;
       case 'i':
         if (op == "memory.init"sv) {
-          auto ret = makeMemoryInit(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeMemoryInit(ctx, pos, annotations));
+          return Ok{};
         }
         goto parse_error;
       case 's':
         if (op == "memory.size"sv) {
-          auto ret = makeMemorySize(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeMemorySize(ctx, pos, annotations));
+          return Ok{};
         }
         goto parse_error;
       default: goto parse_error;
@@ -8583,126 +8056,56 @@ switch (buf[0]) {
   }
   case 'n':
     if (op == "nop"sv) {
-      auto ret = makeNop(ctx, pos);
-      CHECK_ERR(ret);
-      return *ret;
+      CHECK_ERR(makeNop(ctx, pos, annotations));
+      return Ok{};
     }
     goto parse_error;
   case 'p':
     if (op == "pop"sv) {
-      auto ret = makePop(ctx, pos);
-      CHECK_ERR(ret);
-      return *ret;
+      CHECK_ERR(makePop(ctx, pos, annotations));
+      return Ok{};
     }
     goto parse_error;
   case 'r': {
     switch (buf[2]) {
       case 'f': {
         switch (buf[4]) {
-          case 'a': {
-            switch (buf[7]) {
-              case 'f':
-                if (op == "ref.as_func"sv) {
-                  auto ret = makeRefCast(ctx, pos, Type(HeapType::func, NonNullable));
-                  CHECK_ERR(ret);
-                  return *ret;
-                }
-                goto parse_error;
-              case 'i':
-                if (op == "ref.as_i31"sv) {
-                  auto ret = makeRefCast(ctx, pos, Type(HeapType::i31, NonNullable));
-                  CHECK_ERR(ret);
-                  return *ret;
-                }
-                goto parse_error;
-              case 'n':
-                if (op == "ref.as_non_null"sv) {
-                  auto ret = makeRefAs(ctx, pos, RefAsNonNull);
-                  CHECK_ERR(ret);
-                  return *ret;
-                }
-                goto parse_error;
-              default: goto parse_error;
+          case 'a':
+            if (op == "ref.as_non_null"sv) {
+              CHECK_ERR(makeRefAs(ctx, pos, annotations, RefAsNonNull));
+              return Ok{};
             }
-          }
-          case 'c': {
-            switch (buf[8]) {
-              case '\0':
-                if (op == "ref.cast"sv) {
-                  auto ret = makeRefCast(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
-                }
-                goto parse_error;
-              case '_': {
-                switch (buf[9]) {
-                  case 'n': {
-                    switch (buf[12]) {
-                      case '\0':
-                        if (op == "ref.cast_nop"sv) {
-                          auto ret = makeRefCastNop(ctx, pos);
-                          CHECK_ERR(ret);
-                          return *ret;
-                        }
-                        goto parse_error;
-                      case '_':
-                        if (op == "ref.cast_nop_static"sv) {
-                          auto ret = makeRefCastNop(ctx, pos);
-                          CHECK_ERR(ret);
-                          return *ret;
-                        }
-                        goto parse_error;
-                      default: goto parse_error;
-                    }
-                  }
-                  case 's':
-                    if (op == "ref.cast_static"sv) {
-                      auto ret = makeRefCast(ctx, pos);
-                      CHECK_ERR(ret);
-                      return *ret;
-                    }
-                    goto parse_error;
-                  default: goto parse_error;
-                }
-              }
-              default: goto parse_error;
+            goto parse_error;
+          case 'c':
+            if (op == "ref.cast"sv) {
+              CHECK_ERR(makeRefCast(ctx, pos, annotations));
+              return Ok{};
             }
-          }
+            goto parse_error;
           case 'e':
             if (op == "ref.eq"sv) {
-              auto ret = makeRefEq(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeRefEq(ctx, pos, annotations));
+              return Ok{};
             }
             goto parse_error;
           case 'f':
             if (op == "ref.func"sv) {
-              auto ret = makeRefFunc(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeRefFunc(ctx, pos, annotations));
+              return Ok{};
             }
             goto parse_error;
           case 'i': {
-            switch (buf[7]) {
-              case 'f':
-                if (op == "ref.is_func"sv) {
-                  auto ret = makeRefTest(ctx, pos, Type(HeapType::func, NonNullable));
-                  CHECK_ERR(ret);
-                  return *ret;
+            switch (buf[5]) {
+              case '3':
+                if (op == "ref.i31"sv) {
+                  CHECK_ERR(makeRefI31(ctx, pos, annotations));
+                  return Ok{};
                 }
                 goto parse_error;
-              case 'i':
-                if (op == "ref.is_i31"sv) {
-                  auto ret = makeRefTest(ctx, pos, Type(HeapType::i31, NonNullable));
-                  CHECK_ERR(ret);
-                  return *ret;
-                }
-                goto parse_error;
-              case 'n':
+              case 's':
                 if (op == "ref.is_null"sv) {
-                  auto ret = makeRefIsNull(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeRefIsNull(ctx, pos, annotations));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -8710,74 +8113,61 @@ switch (buf[0]) {
           }
           case 'n':
             if (op == "ref.null"sv) {
-              auto ret = makeRefNull(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeRefNull(ctx, pos, annotations));
+              return Ok{};
             }
             goto parse_error;
-          case 't': {
-            switch (buf[8]) {
-              case '\0':
-                if (op == "ref.test"sv) {
-                  auto ret = makeRefTest(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
-                }
-                goto parse_error;
-              case '_':
-                if (op == "ref.test_static"sv) {
-                  auto ret = makeRefTest(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
-                }
-                goto parse_error;
-              default: goto parse_error;
+          case 't':
+            if (op == "ref.test"sv) {
+              CHECK_ERR(makeRefTest(ctx, pos, annotations));
+              return Ok{};
             }
-          }
+            goto parse_error;
           default: goto parse_error;
         }
       }
+      case 's':
+        if (op == "resume"sv) {
+          CHECK_ERR(makeResume(ctx, pos, annotations));
+          return Ok{};
+        }
+        goto parse_error;
       case 't': {
         switch (buf[3]) {
           case 'h':
             if (op == "rethrow"sv) {
-              auto ret = makeRethrow(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeRethrow(ctx, pos, annotations));
+              return Ok{};
             }
             goto parse_error;
           case 'u': {
             switch (buf[6]) {
               case '\0':
                 if (op == "return"sv) {
-                  auto ret = makeReturn(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeReturn(ctx, pos, annotations));
+                  return Ok{};
                 }
                 goto parse_error;
               case '_': {
                 switch (buf[11]) {
                   case '\0':
                     if (op == "return_call"sv) {
-                      auto ret = makeCall(ctx, pos, /*isReturn=*/true);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeCall(ctx, pos, annotations, /*isReturn=*/true));
+                      return Ok{};
                     }
                     goto parse_error;
                   case '_': {
                     switch (buf[12]) {
                       case 'i':
                         if (op == "return_call_indirect"sv) {
-                          auto ret = makeCallIndirect(ctx, pos, /*isReturn=*/true);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeCallIndirect(ctx, pos, annotations, /*isReturn=*/true));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'r':
                         if (op == "return_call_ref"sv) {
-                          auto ret = makeCallRef(ctx, pos, /*isReturn=*/true);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeCallRef(ctx, pos, annotations, /*isReturn=*/true));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -8799,9 +8189,8 @@ switch (buf[0]) {
     switch (buf[1]) {
       case 'e':
         if (op == "select"sv) {
-          auto ret = makeSelect(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeSelect(ctx, pos, annotations));
+          return Ok{};
         }
         goto parse_error;
       case 't': {
@@ -8814,25 +8203,22 @@ switch (buf[0]) {
                     switch (buf[10]) {
                       case 'i':
                         if (op == "string.as_iter"sv) {
-                          auto ret = makeStringAs(ctx, pos, StringAsIter);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeStringAs(ctx, pos, annotations, StringAsIter));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'w': {
                         switch (buf[13]) {
                           case '1':
                             if (op == "string.as_wtf16"sv) {
-                              auto ret = makeStringAs(ctx, pos, StringAsWTF16);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStringAs(ctx, pos, annotations, StringAsWTF16));
+                              return Ok{};
                             }
                             goto parse_error;
                           case '8':
                             if (op == "string.as_wtf8"sv) {
-                              auto ret = makeStringAs(ctx, pos, StringAsWTF8);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStringAs(ctx, pos, annotations, StringAsWTF8));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -8845,25 +8231,22 @@ switch (buf[0]) {
                     switch (buf[9]) {
                       case 'm':
                         if (op == "string.compare"sv) {
-                          auto ret = makeStringEq(ctx, pos, StringEqCompare);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeStringEq(ctx, pos, annotations, StringEqCompare));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'n': {
                         switch (buf[10]) {
                           case 'c':
                             if (op == "string.concat"sv) {
-                              auto ret = makeStringConcat(ctx, pos);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStringConcat(ctx, pos, annotations));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 's':
                             if (op == "string.const"sv) {
-                              auto ret = makeStringConst(ctx, pos);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStringConst(ctx, pos, annotations));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -8875,42 +8258,77 @@ switch (buf[0]) {
                   case 'e': {
                     switch (buf[8]) {
                       case 'n': {
-                        switch (buf[17]) {
-                          case '1': {
-                            switch (buf[19]) {
+                        switch (buf[14]) {
+                          case 'l': {
+                            switch (buf[24]) {
                               case '\0':
-                                if (op == "string.encode_wtf16"sv) {
-                                  auto ret = makeStringEncode(ctx, pos, StringEncodeWTF16);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                if (op == "string.encode_lossy_utf8"sv) {
+                                  CHECK_ERR(makeStringEncode(ctx, pos, annotations, StringEncodeLossyUTF8));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case '_':
-                                if (op == "string.encode_wtf16_array"sv) {
-                                  auto ret = makeStringEncode(ctx, pos, StringEncodeWTF16Array);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                if (op == "string.encode_lossy_utf8_array"sv) {
+                                  CHECK_ERR(makeStringEncode(ctx, pos, annotations, StringEncodeLossyUTF8Array));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
                             }
                           }
-                          case '8': {
+                          case 'u': {
                             switch (buf[18]) {
                               case '\0':
-                                if (op == "string.encode_wtf8"sv) {
-                                  auto ret = makeStringEncode(ctx, pos, StringEncodeWTF8);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                if (op == "string.encode_utf8"sv) {
+                                  CHECK_ERR(makeStringEncode(ctx, pos, annotations, StringEncodeUTF8));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case '_':
-                                if (op == "string.encode_wtf8_array"sv) {
-                                  auto ret = makeStringEncode(ctx, pos, StringEncodeWTF8Array);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                if (op == "string.encode_utf8_array"sv) {
+                                  CHECK_ERR(makeStringEncode(ctx, pos, annotations, StringEncodeUTF8Array));
+                                  return Ok{};
                                 }
                                 goto parse_error;
+                              default: goto parse_error;
+                            }
+                          }
+                          case 'w': {
+                            switch (buf[17]) {
+                              case '1': {
+                                switch (buf[19]) {
+                                  case '\0':
+                                    if (op == "string.encode_wtf16"sv) {
+                                      CHECK_ERR(makeStringEncode(ctx, pos, annotations, StringEncodeWTF16));
+                                      return Ok{};
+                                    }
+                                    goto parse_error;
+                                  case '_':
+                                    if (op == "string.encode_wtf16_array"sv) {
+                                      CHECK_ERR(makeStringEncode(ctx, pos, annotations, StringEncodeWTF16Array));
+                                      return Ok{};
+                                    }
+                                    goto parse_error;
+                                  default: goto parse_error;
+                                }
+                              }
+                              case '8': {
+                                switch (buf[18]) {
+                                  case '\0':
+                                    if (op == "string.encode_wtf8"sv) {
+                                      CHECK_ERR(makeStringEncode(ctx, pos, annotations, StringEncodeWTF8));
+                                      return Ok{};
+                                    }
+                                    goto parse_error;
+                                  case '_':
+                                    if (op == "string.encode_wtf8_array"sv) {
+                                      CHECK_ERR(makeStringEncode(ctx, pos, annotations, StringEncodeWTF8Array));
+                                      return Ok{};
+                                    }
+                                    goto parse_error;
+                                  default: goto parse_error;
+                                }
+                              }
                               default: goto parse_error;
                             }
                           }
@@ -8919,9 +8337,8 @@ switch (buf[0]) {
                       }
                       case 'q':
                         if (op == "string.eq"sv) {
-                          auto ret = makeStringEq(ctx, pos, StringEqEqual);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeStringEq(ctx, pos, annotations, StringEqEqual));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -8929,62 +8346,105 @@ switch (buf[0]) {
                   }
                   case 'f':
                     if (op == "string.from_code_point"sv) {
-                      auto ret = makeStringNew(ctx, pos, StringNewFromCodePoint, false);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeStringNew(ctx, pos, annotations, StringNewFromCodePoint, false));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'h':
                     if (op == "string.hash"sv) {
-                      auto ret = makeStringMeasure(ctx, pos, StringMeasureHash);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeStringMeasure(ctx, pos, annotations, StringMeasureHash));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'i':
                     if (op == "string.is_usv_sequence"sv) {
-                      auto ret = makeStringMeasure(ctx, pos, StringMeasureIsUSV);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeStringMeasure(ctx, pos, annotations, StringMeasureIsUSV));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'm': {
-                    switch (buf[18]) {
-                      case '1':
-                        if (op == "string.measure_wtf16"sv) {
-                          auto ret = makeStringMeasure(ctx, pos, StringMeasureWTF16);
-                          CHECK_ERR(ret);
-                          return *ret;
+                    switch (buf[15]) {
+                      case 'u':
+                        if (op == "string.measure_utf8"sv) {
+                          CHECK_ERR(makeStringMeasure(ctx, pos, annotations, StringMeasureUTF8));
+                          return Ok{};
                         }
                         goto parse_error;
-                      case '8':
-                        if (op == "string.measure_wtf8"sv) {
-                          auto ret = makeStringMeasure(ctx, pos, StringMeasureWTF8);
-                          CHECK_ERR(ret);
-                          return *ret;
+                      case 'w': {
+                        switch (buf[18]) {
+                          case '1':
+                            if (op == "string.measure_wtf16"sv) {
+                              CHECK_ERR(makeStringMeasure(ctx, pos, annotations, StringMeasureWTF16));
+                              return Ok{};
+                            }
+                            goto parse_error;
+                          case '8':
+                            if (op == "string.measure_wtf8"sv) {
+                              CHECK_ERR(makeStringMeasure(ctx, pos, annotations, StringMeasureWTF8));
+                              return Ok{};
+                            }
+                            goto parse_error;
+                          default: goto parse_error;
                         }
-                        goto parse_error;
+                      }
                       default: goto parse_error;
                     }
                   }
                   case 'n': {
                     switch (buf[11]) {
+                      case 'l': {
+                        switch (buf[21]) {
+                          case '\0':
+                            if (op == "string.new_lossy_utf8"sv) {
+                              CHECK_ERR(makeStringNew(ctx, pos, annotations, StringNewLossyUTF8, false));
+                              return Ok{};
+                            }
+                            goto parse_error;
+                          case '_':
+                            if (op == "string.new_lossy_utf8_array"sv) {
+                              CHECK_ERR(makeStringNew(ctx, pos, annotations, StringNewLossyUTF8Array, false));
+                              return Ok{};
+                            }
+                            goto parse_error;
+                          default: goto parse_error;
+                        }
+                      }
                       case 'u': {
-                        switch (buf[16]) {
-                          case 'a':
-                            if (op == "string.new_utf8_array_try"sv) {
-                              auto ret = makeStringNew(ctx, pos, StringNewUTF8Array, true);
-                              CHECK_ERR(ret);
-                              return *ret;
+                        switch (buf[15]) {
+                          case '\0':
+                            if (op == "string.new_utf8"sv) {
+                              CHECK_ERR(makeStringNew(ctx, pos, annotations, StringNewUTF8, false));
+                              return Ok{};
                             }
                             goto parse_error;
-                          case 't':
-                            if (op == "string.new_utf8_try"sv) {
-                              auto ret = makeStringNew(ctx, pos, StringNewUTF8, true);
-                              CHECK_ERR(ret);
-                              return *ret;
+                          case '_': {
+                            switch (buf[16]) {
+                              case 'a': {
+                                switch (buf[21]) {
+                                  case '\0':
+                                    if (op == "string.new_utf8_array"sv) {
+                                      CHECK_ERR(makeStringNew(ctx, pos, annotations, StringNewUTF8Array, false));
+                                      return Ok{};
+                                    }
+                                    goto parse_error;
+                                  case '_':
+                                    if (op == "string.new_utf8_array_try"sv) {
+                                      CHECK_ERR(makeStringNew(ctx, pos, annotations, StringNewUTF8Array, true));
+                                      return Ok{};
+                                    }
+                                    goto parse_error;
+                                  default: goto parse_error;
+                                }
+                              }
+                              case 't':
+                                if (op == "string.new_utf8_try"sv) {
+                                  CHECK_ERR(makeStringNew(ctx, pos, annotations, StringNewUTF8, true));
+                                  return Ok{};
+                                }
+                                goto parse_error;
+                              default: goto parse_error;
                             }
-                            goto parse_error;
+                          }
                           default: goto parse_error;
                         }
                       }
@@ -8994,16 +8454,14 @@ switch (buf[0]) {
                             switch (buf[16]) {
                               case '\0':
                                 if (op == "string.new_wtf16"sv) {
-                                  auto ret = makeStringNew(ctx, pos, StringNewWTF16, false);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeStringNew(ctx, pos, annotations, StringNewWTF16, false));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case '_':
                                 if (op == "string.new_wtf16_array"sv) {
-                                  auto ret = makeStringNew(ctx, pos, StringNewWTF16Array, false);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeStringNew(ctx, pos, annotations, StringNewWTF16Array, false));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -9013,16 +8471,14 @@ switch (buf[0]) {
                             switch (buf[15]) {
                               case '\0':
                                 if (op == "string.new_wtf8"sv) {
-                                  auto ret = makeStringNew(ctx, pos, StringNewWTF8, false);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeStringNew(ctx, pos, annotations, StringNewWTF8, false));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               case '_':
                                 if (op == "string.new_wtf8_array"sv) {
-                                  auto ret = makeStringNew(ctx, pos, StringNewWTF8Array, false);
-                                  CHECK_ERR(ret);
-                                  return *ret;
+                                  CHECK_ERR(makeStringNew(ctx, pos, annotations, StringNewWTF8Array, false));
+                                  return Ok{};
                                 }
                                 goto parse_error;
                               default: goto parse_error;
@@ -9043,30 +8499,26 @@ switch (buf[0]) {
                     switch (buf[16]) {
                       case 'a':
                         if (op == "stringview_iter.advance"sv) {
-                          auto ret = makeStringIterMove(ctx, pos, StringIterMoveAdvance);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeStringIterMove(ctx, pos, annotations, StringIterMoveAdvance));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'n':
                         if (op == "stringview_iter.next"sv) {
-                          auto ret = makeStringIterNext(ctx, pos);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeStringIterNext(ctx, pos, annotations));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'r':
                         if (op == "stringview_iter.rewind"sv) {
-                          auto ret = makeStringIterMove(ctx, pos, StringIterMoveRewind);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeStringIterMove(ctx, pos, annotations, StringIterMoveRewind));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 's':
                         if (op == "stringview_iter.slice"sv) {
-                          auto ret = makeStringSliceIter(ctx, pos);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeStringSliceIter(ctx, pos, annotations));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -9078,23 +8530,20 @@ switch (buf[0]) {
                         switch (buf[17]) {
                           case 'g':
                             if (op == "stringview_wtf16.get_codeunit"sv) {
-                              auto ret = makeStringWTF16Get(ctx, pos);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStringWTF16Get(ctx, pos, annotations));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 'l':
                             if (op == "stringview_wtf16.length"sv) {
-                              auto ret = makeStringMeasure(ctx, pos, StringMeasureWTF16View);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStringMeasure(ctx, pos, annotations, StringMeasureWTF16View));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 's':
                             if (op == "stringview_wtf16.slice"sv) {
-                              auto ret = makeStringSliceWTF(ctx, pos, StringSliceWTF16);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStringSliceWTF(ctx, pos, annotations, StringSliceWTF16));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -9104,16 +8553,14 @@ switch (buf[0]) {
                         switch (buf[16]) {
                           case 'a':
                             if (op == "stringview_wtf8.advance"sv) {
-                              auto ret = makeStringWTF8Advance(ctx, pos);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStringWTF8Advance(ctx, pos, annotations));
+                              return Ok{};
                             }
                             goto parse_error;
                           case 's':
                             if (op == "stringview_wtf8.slice"sv) {
-                              auto ret = makeStringSliceWTF(ctx, pos, StringSliceWTF8);
-                              CHECK_ERR(ret);
-                              return *ret;
+                              CHECK_ERR(makeStringSliceWTF(ctx, pos, annotations, StringSliceWTF8));
+                              return Ok{};
                             }
                             goto parse_error;
                           default: goto parse_error;
@@ -9134,25 +8581,22 @@ switch (buf[0]) {
                 switch (buf[10]) {
                   case '\0':
                     if (op == "struct.get"sv) {
-                      auto ret = makeStructGet(ctx, pos);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeStructGet(ctx, pos, annotations));
+                      return Ok{};
                     }
                     goto parse_error;
                   case '_': {
                     switch (buf[11]) {
                       case 's':
                         if (op == "struct.get_s"sv) {
-                          auto ret = makeStructGet(ctx, pos, true);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeStructGet(ctx, pos, annotations, true));
+                          return Ok{};
                         }
                         goto parse_error;
                       case 'u':
                         if (op == "struct.get_u"sv) {
-                          auto ret = makeStructGet(ctx, pos, false);
-                          CHECK_ERR(ret);
-                          return *ret;
+                          CHECK_ERR(makeStructGet(ctx, pos, annotations, false));
+                          return Ok{};
                         }
                         goto parse_error;
                       default: goto parse_error;
@@ -9165,16 +8609,14 @@ switch (buf[0]) {
                 switch (buf[10]) {
                   case '\0':
                     if (op == "struct.new"sv) {
-                      auto ret = makeStructNew(ctx, pos, false);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeStructNew(ctx, pos, annotations, false));
+                      return Ok{};
                     }
                     goto parse_error;
                   case '_':
                     if (op == "struct.new_default"sv) {
-                      auto ret = makeStructNew(ctx, pos, true);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeStructNew(ctx, pos, annotations, true));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -9182,9 +8624,8 @@ switch (buf[0]) {
               }
               case 's':
                 if (op == "struct.set"sv) {
-                  auto ret = makeStructSet(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeStructSet(ctx, pos, annotations));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -9200,20 +8641,30 @@ switch (buf[0]) {
     switch (buf[1]) {
       case 'a': {
         switch (buf[6]) {
+          case 'c':
+            if (op == "table.copy"sv) {
+              CHECK_ERR(makeTableCopy(ctx, pos, annotations));
+              return Ok{};
+            }
+            goto parse_error;
+          case 'f':
+            if (op == "table.fill"sv) {
+              CHECK_ERR(makeTableFill(ctx, pos, annotations));
+              return Ok{};
+            }
+            goto parse_error;
           case 'g': {
             switch (buf[7]) {
               case 'e':
                 if (op == "table.get"sv) {
-                  auto ret = makeTableGet(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeTableGet(ctx, pos, annotations));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'r':
                 if (op == "table.grow"sv) {
-                  auto ret = makeTableGrow(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeTableGrow(ctx, pos, annotations));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -9223,16 +8674,14 @@ switch (buf[0]) {
             switch (buf[7]) {
               case 'e':
                 if (op == "table.set"sv) {
-                  auto ret = makeTableSet(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeTableSet(ctx, pos, annotations));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'i':
                 if (op == "table.size"sv) {
-                  auto ret = makeTableSize(ctx, pos);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeTableSize(ctx, pos, annotations));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -9242,45 +8691,40 @@ switch (buf[0]) {
         }
       }
       case 'h': {
-        switch (buf[2]) {
-          case 'e':
-            if (op == "then"sv) {
-              auto ret = makeThenOrElse(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+        switch (buf[5]) {
+          case '\0':
+            if (op == "throw"sv) {
+              CHECK_ERR(makeThrow(ctx, pos, annotations));
+              return Ok{};
             }
             goto parse_error;
-          case 'r':
-            if (op == "throw"sv) {
-              auto ret = makeThrow(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+          case '_':
+            if (op == "throw_ref"sv) {
+              CHECK_ERR(makeThrowRef(ctx, pos, annotations));
+              return Ok{};
             }
             goto parse_error;
           default: goto parse_error;
         }
       }
-      case 'r':
-        if (op == "try"sv) {
-          auto ret = makeTry(ctx, pos);
-          CHECK_ERR(ret);
-          return *ret;
-        }
-        goto parse_error;
       case 'u': {
         switch (buf[6]) {
+          case 'd':
+            if (op == "tuple.drop"sv) {
+              CHECK_ERR(makeTupleDrop(ctx, pos, annotations));
+              return Ok{};
+            }
+            goto parse_error;
           case 'e':
             if (op == "tuple.extract"sv) {
-              auto ret = makeTupleExtract(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeTupleExtract(ctx, pos, annotations));
+              return Ok{};
             }
             goto parse_error;
           case 'm':
             if (op == "tuple.make"sv) {
-              auto ret = makeTupleMake(ctx, pos);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeTupleMake(ctx, pos, annotations));
+              return Ok{};
             }
             goto parse_error;
           default: goto parse_error;
@@ -9291,9 +8735,8 @@ switch (buf[0]) {
   }
   case 'u':
     if (op == "unreachable"sv) {
-      auto ret = makeUnreachable(ctx, pos);
-      CHECK_ERR(ret);
-      return *ret;
+      CHECK_ERR(makeUnreachable(ctx, pos, annotations));
+      return Ok{};
     }
     goto parse_error;
   case 'v': {
@@ -9304,16 +8747,14 @@ switch (buf[0]) {
             switch (buf[8]) {
               case '\0':
                 if (op == "v128.and"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::AndVec128);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AndVec128));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'n':
                 if (op == "v128.andnot"sv) {
-                  auto ret = makeBinary(ctx, pos, BinaryOp::AndNotVec128);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::AndNotVec128));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -9321,9 +8762,8 @@ switch (buf[0]) {
           }
           case 'y':
             if (op == "v128.any_true"sv) {
-              auto ret = makeUnary(ctx, pos, UnaryOp::AnyTrueVec128);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::AnyTrueVec128));
+              return Ok{};
             }
             goto parse_error;
           default: goto parse_error;
@@ -9331,25 +8771,22 @@ switch (buf[0]) {
       }
       case 'b':
         if (op == "v128.bitselect"sv) {
-          auto ret = makeSIMDTernary(ctx, pos, SIMDTernaryOp::Bitselect);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeSIMDTernary(ctx, pos, annotations, SIMDTernaryOp::Bitselect));
+          return Ok{};
         }
         goto parse_error;
       case 'c':
         if (op == "v128.const"sv) {
-          auto ret = makeConst(ctx, pos, Type::v128);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeConst(ctx, pos, annotations, Type::v128));
+          return Ok{};
         }
         goto parse_error;
       case 'l': {
         switch (buf[9]) {
           case '\0':
             if (op == "v128.load"sv) {
-              auto ret = makeLoad(ctx, pos, Type::v128, /*signed=*/false, 16, /*isAtomic=*/false);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeLoad(ctx, pos, annotations, Type::v128, /*signed=*/false, 16, /*isAtomic=*/false));
+              return Ok{};
             }
             goto parse_error;
           case '1': {
@@ -9358,16 +8795,14 @@ switch (buf[0]) {
                 switch (buf[12]) {
                   case 'l':
                     if (op == "v128.load16_lane"sv) {
-                      auto ret = makeSIMDLoadStoreLane(ctx, pos, SIMDLoadStoreLaneOp::Load16LaneVec128, 2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDLoadStoreLane(ctx, pos, annotations, SIMDLoadStoreLaneOp::Load16LaneVec128, 2));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 's':
                     if (op == "v128.load16_splat"sv) {
-                      auto ret = makeSIMDLoad(ctx, pos, SIMDLoadOp::Load16SplatVec128, 2);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDLoad(ctx, pos, annotations, SIMDLoadOp::Load16SplatVec128, 2));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -9377,16 +8812,14 @@ switch (buf[0]) {
                 switch (buf[14]) {
                   case 's':
                     if (op == "v128.load16x4_s"sv) {
-                      auto ret = makeSIMDLoad(ctx, pos, SIMDLoadOp::Load16x4SVec128, 8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDLoad(ctx, pos, annotations, SIMDLoadOp::Load16x4SVec128, 8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "v128.load16x4_u"sv) {
-                      auto ret = makeSIMDLoad(ctx, pos, SIMDLoadOp::Load16x4UVec128, 8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDLoad(ctx, pos, annotations, SIMDLoadOp::Load16x4UVec128, 8));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -9401,23 +8834,20 @@ switch (buf[0]) {
                 switch (buf[12]) {
                   case 'l':
                     if (op == "v128.load32_lane"sv) {
-                      auto ret = makeSIMDLoadStoreLane(ctx, pos, SIMDLoadStoreLaneOp::Load32LaneVec128, 4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDLoadStoreLane(ctx, pos, annotations, SIMDLoadStoreLaneOp::Load32LaneVec128, 4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 's':
                     if (op == "v128.load32_splat"sv) {
-                      auto ret = makeSIMDLoad(ctx, pos, SIMDLoadOp::Load32SplatVec128, 4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDLoad(ctx, pos, annotations, SIMDLoadOp::Load32SplatVec128, 4));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'z':
                     if (op == "v128.load32_zero"sv) {
-                      auto ret = makeSIMDLoad(ctx, pos, SIMDLoadOp::Load32ZeroVec128, 4);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDLoad(ctx, pos, annotations, SIMDLoadOp::Load32ZeroVec128, 4));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -9427,16 +8857,14 @@ switch (buf[0]) {
                 switch (buf[14]) {
                   case 's':
                     if (op == "v128.load32x2_s"sv) {
-                      auto ret = makeSIMDLoad(ctx, pos, SIMDLoadOp::Load32x2SVec128, 8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDLoad(ctx, pos, annotations, SIMDLoadOp::Load32x2SVec128, 8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "v128.load32x2_u"sv) {
-                      auto ret = makeSIMDLoad(ctx, pos, SIMDLoadOp::Load32x2UVec128, 8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDLoad(ctx, pos, annotations, SIMDLoadOp::Load32x2UVec128, 8));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -9449,23 +8877,20 @@ switch (buf[0]) {
             switch (buf[12]) {
               case 'l':
                 if (op == "v128.load64_lane"sv) {
-                  auto ret = makeSIMDLoadStoreLane(ctx, pos, SIMDLoadStoreLaneOp::Load64LaneVec128, 8);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeSIMDLoadStoreLane(ctx, pos, annotations, SIMDLoadStoreLaneOp::Load64LaneVec128, 8));
+                  return Ok{};
                 }
                 goto parse_error;
               case 's':
                 if (op == "v128.load64_splat"sv) {
-                  auto ret = makeSIMDLoad(ctx, pos, SIMDLoadOp::Load64SplatVec128, 8);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeSIMDLoad(ctx, pos, annotations, SIMDLoadOp::Load64SplatVec128, 8));
+                  return Ok{};
                 }
                 goto parse_error;
               case 'z':
                 if (op == "v128.load64_zero"sv) {
-                  auto ret = makeSIMDLoad(ctx, pos, SIMDLoadOp::Load64ZeroVec128, 8);
-                  CHECK_ERR(ret);
-                  return *ret;
+                  CHECK_ERR(makeSIMDLoad(ctx, pos, annotations, SIMDLoadOp::Load64ZeroVec128, 8));
+                  return Ok{};
                 }
                 goto parse_error;
               default: goto parse_error;
@@ -9477,16 +8902,14 @@ switch (buf[0]) {
                 switch (buf[11]) {
                   case 'l':
                     if (op == "v128.load8_lane"sv) {
-                      auto ret = makeSIMDLoadStoreLane(ctx, pos, SIMDLoadStoreLaneOp::Load8LaneVec128, 1);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDLoadStoreLane(ctx, pos, annotations, SIMDLoadStoreLaneOp::Load8LaneVec128, 1));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 's':
                     if (op == "v128.load8_splat"sv) {
-                      auto ret = makeSIMDLoad(ctx, pos, SIMDLoadOp::Load8SplatVec128, 1);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDLoad(ctx, pos, annotations, SIMDLoadOp::Load8SplatVec128, 1));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -9496,16 +8919,14 @@ switch (buf[0]) {
                 switch (buf[13]) {
                   case 's':
                     if (op == "v128.load8x8_s"sv) {
-                      auto ret = makeSIMDLoad(ctx, pos, SIMDLoadOp::Load8x8SVec128, 8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDLoad(ctx, pos, annotations, SIMDLoadOp::Load8x8SVec128, 8));
+                      return Ok{};
                     }
                     goto parse_error;
                   case 'u':
                     if (op == "v128.load8x8_u"sv) {
-                      auto ret = makeSIMDLoad(ctx, pos, SIMDLoadOp::Load8x8UVec128, 8);
-                      CHECK_ERR(ret);
-                      return *ret;
+                      CHECK_ERR(makeSIMDLoad(ctx, pos, annotations, SIMDLoadOp::Load8x8UVec128, 8));
+                      return Ok{};
                     }
                     goto parse_error;
                   default: goto parse_error;
@@ -9519,53 +8940,46 @@ switch (buf[0]) {
       }
       case 'n':
         if (op == "v128.not"sv) {
-          auto ret = makeUnary(ctx, pos, UnaryOp::NotVec128);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeUnary(ctx, pos, annotations, UnaryOp::NotVec128));
+          return Ok{};
         }
         goto parse_error;
       case 'o':
         if (op == "v128.or"sv) {
-          auto ret = makeBinary(ctx, pos, BinaryOp::OrVec128);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::OrVec128));
+          return Ok{};
         }
         goto parse_error;
       case 's': {
         switch (buf[10]) {
           case '\0':
             if (op == "v128.store"sv) {
-              auto ret = makeStore(ctx, pos, Type::v128, 16, /*isAtomic=*/false);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeStore(ctx, pos, annotations, Type::v128, 16, /*isAtomic=*/false));
+              return Ok{};
             }
             goto parse_error;
           case '1':
             if (op == "v128.store16_lane"sv) {
-              auto ret = makeSIMDLoadStoreLane(ctx, pos, SIMDLoadStoreLaneOp::Store16LaneVec128, 2);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeSIMDLoadStoreLane(ctx, pos, annotations, SIMDLoadStoreLaneOp::Store16LaneVec128, 2));
+              return Ok{};
             }
             goto parse_error;
           case '3':
             if (op == "v128.store32_lane"sv) {
-              auto ret = makeSIMDLoadStoreLane(ctx, pos, SIMDLoadStoreLaneOp::Store32LaneVec128, 4);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeSIMDLoadStoreLane(ctx, pos, annotations, SIMDLoadStoreLaneOp::Store32LaneVec128, 4));
+              return Ok{};
             }
             goto parse_error;
           case '6':
             if (op == "v128.store64_lane"sv) {
-              auto ret = makeSIMDLoadStoreLane(ctx, pos, SIMDLoadStoreLaneOp::Store64LaneVec128, 8);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeSIMDLoadStoreLane(ctx, pos, annotations, SIMDLoadStoreLaneOp::Store64LaneVec128, 8));
+              return Ok{};
             }
             goto parse_error;
           case '8':
             if (op == "v128.store8_lane"sv) {
-              auto ret = makeSIMDLoadStoreLane(ctx, pos, SIMDLoadStoreLaneOp::Store8LaneVec128, 1);
-              CHECK_ERR(ret);
-              return *ret;
+              CHECK_ERR(makeSIMDLoadStoreLane(ctx, pos, annotations, SIMDLoadStoreLaneOp::Store8LaneVec128, 1));
+              return Ok{};
             }
             goto parse_error;
           default: goto parse_error;
@@ -9573,9 +8987,8 @@ switch (buf[0]) {
       }
       case 'x':
         if (op == "v128.xor"sv) {
-          auto ret = makeBinary(ctx, pos, BinaryOp::XorVec128);
-          CHECK_ERR(ret);
-          return *ret;
+          CHECK_ERR(makeBinary(ctx, pos, annotations, BinaryOp::XorVec128));
+          return Ok{};
         }
         goto parse_error;
       default: goto parse_error;

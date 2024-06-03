@@ -248,14 +248,22 @@ struct TypeUpdater
           return; // did not turn
         }
       } else if (auto* iff = curr->dynCast<If>()) {
-        // may not be unreachable if just one side is
+        // We only want to change a concrete type to unreachable here, so undo
+        // anything else. Other changes can be a problem, like refining the type
+        // of an if for GC-using code, as the code all around us only assumes we
+        // are propagating unreachability and not doing a full refinalize.
+        auto old = iff->type;
         iff->finalize();
         if (curr->type != Type::unreachable) {
+          iff->type = old;
           return; // did not turn
         }
       } else if (auto* tryy = curr->dynCast<Try>()) {
+        // See comment on If, above.
+        auto old = tryy->type;
         tryy->finalize();
         if (curr->type != Type::unreachable) {
+          tryy->type = old;
           return; // did not turn
         }
       } else {
@@ -303,9 +311,13 @@ struct TypeUpdater
     if (!curr->type.isConcrete()) {
       return; // nothing concrete to change to unreachable
     }
+    // See comment in propagateTypesUp() for If regarding restoring the type.
+    auto old = curr->type;
     curr->finalize();
     if (curr->type == Type::unreachable) {
       propagateTypesUp(curr);
+    } else {
+      curr->type = old;
     }
   }
 
@@ -313,9 +325,13 @@ struct TypeUpdater
     if (!curr->type.isConcrete()) {
       return; // nothing concrete to change to unreachable
     }
+    // See comment in propagateTypesUp() for Try regarding restoring the type.
+    auto old = curr->type;
     curr->finalize();
     if (curr->type == Type::unreachable) {
       propagateTypesUp(curr);
+    } else {
+      curr->type = old;
     }
   }
 
@@ -357,11 +373,19 @@ public:
   virtual void modifyArray(HeapType oldType, Array& array) {}
   virtual void modifySignature(HeapType oldType, Signature& sig) {}
 
+  // This additional hook is called after modify* and other operations, and
+  // allows the caller to do things like typeBuilder[i].setOpen(false);
+  //
+  // This is provided the builder, the index we are on, and the old heap type
+  // for that index.
+  virtual void
+  modifyTypeBuilderEntry(TypeBuilder& typeBuilder, Index i, HeapType oldType) {}
+
   // Subclasses can override this method to modify supertypes. The new
   // supertype, if any, must be a supertype (or the same as) the original
   // supertype.
-  virtual std::optional<HeapType> getSuperType(HeapType oldType) {
-    return oldType.getSuperType();
+  virtual std::optional<HeapType> getDeclaredSuperType(HeapType oldType) {
+    return oldType.getDeclaredSuperType();
   }
 
   // Map an old type to a temp type. This can be called from the above hooks,
@@ -398,6 +422,17 @@ public:
     } rewriter(wasm, updates);
   }
 
+protected:
+  // Builds new types after updating their contents using the hooks below and
+  // returns a map from the old types to the modified types. Used internally in
+  // update().
+  //
+  // This only operates on private types (so as not to modify the module's
+  // external ABI). It takes as a parameter a list of public types to consider
+  // private, which allows more flexibility.
+  TypeMap
+  rebuildTypes(const std::vector<HeapType>& additionalPrivateTypes = {});
+
 private:
   TypeBuilder typeBuilder;
 
@@ -413,18 +448,32 @@ public:
 
   std::unordered_map<HeapType, Signature> newSignatures;
 
-public:
   TypeMapper(Module& wasm, const TypeUpdates& mapping)
     : GlobalTypeRewriter(wasm), mapping(mapping) {}
 
-  void map() {
-    // Map the types of expressions (curr->type, etc.) to their merged
-    // types.
-    mapTypes(mapping);
-
+  // As rebuildTypes, this can take an optional set of additional types to
+  // consider private (and therefore to modify).
+  void map(const std::vector<HeapType>& additionalPrivateTypes = {}) {
     // Update the internals of types (struct fields, signatures, etc.) to
     // refer to the merged types.
-    update();
+    auto newMapping = rebuildTypes(additionalPrivateTypes);
+
+    // Compose the user-provided mapping from old types to other old types with
+    // the new mapping from old types to new types. `newMapping` will become
+    // a copy of `mapping` except that the destination types will be the newly
+    // built types.
+    for (auto& [src, dest] : mapping) {
+      if (auto it = newMapping.find(dest); it != newMapping.end()) {
+        newMapping[src] = it->second;
+      } else {
+        // This mapping was to a type that was not rebuilt, perhaps because it
+        // is a basic type. Just use this mapping unmodified.
+        newMapping[src] = dest;
+      }
+    }
+
+    // Map the types of expressions (curr->type, etc.) to the correct new types.
+    mapTypes(newMapping);
   }
 
   Type getNewType(Type type) {
@@ -463,9 +512,9 @@ public:
     sig.params = getUpdatedTypeList(oldSig.params);
     sig.results = getUpdatedTypeList(oldSig.results);
   }
-  std::optional<HeapType> getSuperType(HeapType oldType) override {
+  std::optional<HeapType> getDeclaredSuperType(HeapType oldType) override {
     // If the super is mapped, get it from the mapping.
-    auto super = oldType.getSuperType();
+    auto super = oldType.getDeclaredSuperType();
     if (super) {
       if (auto it = mapping.find(*super); it != mapping.end()) {
         return it->second;

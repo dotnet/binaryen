@@ -253,8 +253,9 @@ public:
     if (allocatedElements < size) {
       static_cast<SubType*>(this)->allocate(size);
     }
-    for (size_t i = 0; i < size; i++) {
-      data[i] = list[i];
+    size_t i = 0;
+    for (auto elem : list) {
+      data[i++] = elem;
     }
     usedElements = size;
   }
@@ -402,7 +403,15 @@ public:
   ArenaVector(MixedArena& allocator) : allocator(allocator) {}
 
   ArenaVector(ArenaVector<T>&& other) : allocator(other.allocator) {
-    *this = other;
+    swap(other);
+  }
+
+  ArenaVector<T>& operator=(ArenaVector<T>&& other) {
+    if (this != &other) {
+      this->clear();
+      this->swap(other);
+    }
+    return *this;
   }
 
   void allocate(size_t size) {

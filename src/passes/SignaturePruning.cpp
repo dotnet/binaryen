@@ -35,6 +35,7 @@
 #include "ir/type-updating.h"
 #include "param-utils.h"
 #include "pass.h"
+#include "support/insert_ordered.h"
 #include "support/sorted_vector.h"
 #include "wasm-type.h"
 #include "wasm.h"
@@ -98,10 +99,14 @@ struct SignaturePruning : public Pass {
     std::unordered_map<HeapType, Info> allInfo;
 
     // Map heap types to all functions with that type.
-    std::unordered_map<HeapType, std::vector<Function*>> sigFuncs;
+    InsertOrderedMap<HeapType, std::vector<Function*>> sigFuncs;
 
-    // Combine all the information we gathered into that map.
-    for (auto& [func, info] : analysis.map) {
+    // Combine all the information we gathered into that map, iterating in a
+    // deterministic order as we build up vectors where the order matters.
+    for (auto& f : module->functions) {
+      auto* func = f.get();
+      auto& info = analysis.map[func];
+
       // For direct calls, add each call to the type of the function being
       // called.
       for (auto* call : info.calls) {
@@ -158,6 +163,14 @@ struct SignaturePruning : public Pass {
     SubTypes subTypes(*module);
 
     // Find parameters to prune.
+    //
+    // TODO: The order matters here, and more than one cycle can find more work
+    //       in some cases, as finding a parameter is a constant and removing it
+    //       can lead to another call (that receives that parameter's value) to
+    //       now have constant parameters as well, and so it becomes
+    //       optimizable. We could do a topological sort or greatest fixed point
+    //       analysis to be optimal (that could handle a recursive call with a
+    //       constant).
     for (auto& [type, funcs] : sigFuncs) {
       auto sig = type.getSignature();
       auto& info = allInfo[type];
@@ -168,10 +181,10 @@ struct SignaturePruning : public Pass {
         continue;
       }
 
-      if (!subTypes.getStrictSubTypes(type).empty()) {
+      if (!subTypes.getImmediateSubTypes(type).empty()) {
         continue;
       }
-      if (auto super = type.getSuperType()) {
+      if (auto super = type.getDeclaredSuperType()) {
         if (super->isSignature()) {
           continue;
         }

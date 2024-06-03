@@ -24,8 +24,8 @@ instructions = [
     ("if",             "makeIf(s)"),
     ("then",           "makeThenOrElse(s)"),
     ("else",           "makeThenOrElse(s)"),
-    ("br",             "makeBreak(s)"),
-    ("br_if",          "makeBreak(s)"),
+    ("br",             "makeBreak(s, false)"),
+    ("br_if",          "makeBreak(s, true)"),
     ("br_table",       "makeBreakTable(s)"),
     ("return",         "makeReturn(s)"),
     ("call",           "makeCall(s, /*isReturn=*/false)"),
@@ -547,42 +547,39 @@ instructions = [
     ("table.set",            "makeTableSet(s)"),
     ("table.size",           "makeTableSize(s)"),
     ("table.grow",           "makeTableGrow(s)"),
+    ("table.fill",           "makeTableFill(s)"),
+    ("table.copy",           "makeTableCopy(s)"),
     # TODO:
     # table.init
-    # table.fill
-    # table.copy
     #
     # exception handling instructions
     ("try",                  "makeTry(s)"),
+    ("try_table",            "makeTryTable(s)"),
     ("throw",                "makeThrow(s)"),
     ("rethrow",              "makeRethrow(s)"),
+    ("throw_ref",            "makeThrowRef(s)"),
     # Multivalue pseudoinstructions
     ("tuple.make",           "makeTupleMake(s)"),
     ("tuple.extract",        "makeTupleExtract(s)"),
+    ("tuple.drop",           "makeTupleDrop(s)"),
     ("pop",                  "makePop(s)"),
     # Typed function references instructions
     ("call_ref",             "makeCallRef(s, /*isReturn=*/false)"),
     ("return_call_ref",      "makeCallRef(s, /*isReturn=*/true)"),
+    # Typed continuations instructions
+    ("cont.new",             "makeContNew(s)"),
+    ("resume",               "makeResume(s)"),
     # GC
-    ("i31.new",              "makeI31New(s)"),
+    ("i31.new",              "makeRefI31(s)"),  # deprecated
+    ("ref.i31",              "makeRefI31(s)"),
     ("i31.get_s",            "makeI31Get(s, true)"),
     ("i31.get_u",            "makeI31Get(s, false)"),
     ("ref.test",             "makeRefTest(s)"),
-    ("ref.test_static",      "makeRefTest(s)"),
     ("ref.cast",             "makeRefCast(s)"),
-    ("ref.cast_static",      "makeRefCast(s)"),
-    ("ref.cast_nop",         "makeRefCastNop(s)"),
-    ("ref.cast_nop_static",  "makeRefCastNop(s)"),
     ("br_on_null",           "makeBrOnNull(s)"),
     ("br_on_non_null",       "makeBrOnNull(s, true)"),
-    ("br_on_cast",           "makeBrOnCast(s, std::nullopt)"),
-    ("br_on_cast_static",    "makeBrOnCast(s, std::nullopt)"),
-    ("br_on_cast_fail",      "makeBrOnCast(s, std::nullopt, true)"),
-    ("br_on_cast_static_fail", "makeBrOnCast(s, std::nullopt, true)"),
-    ("br_on_func",           "makeBrOnCast(s, Type(HeapType::func, NonNullable))"),
-    ("br_on_non_func",       "makeBrOnCast(s, Type(HeapType::func, NonNullable), true)"),
-    ("br_on_i31",            "makeBrOnCast(s, Type(HeapType::i31, NonNullable))"),
-    ("br_on_non_i31",        "makeBrOnCast(s, Type(HeapType::i31, NonNullable), true)"),
+    ("br_on_cast",           "makeBrOnCast(s)"),
+    ("br_on_cast_fail",      "makeBrOnCast(s, true)"),
     ("struct.new",           "makeStructNew(s, false)"),
     ("struct.new_default",   "makeStructNew(s, true)"),
     ("struct.get",           "makeStructGet(s)"),
@@ -591,36 +588,44 @@ instructions = [
     ("struct.set",           "makeStructSet(s)"),
     ("array.new",            "makeArrayNew(s, false)"),
     ("array.new_default",    "makeArrayNew(s, true)"),
-    ("array.new_data",       "makeArrayNewSeg(s, NewData)"),
-    ("array.new_elem",       "makeArrayNewSeg(s, NewElem)"),
-    ("array.init_static",    "makeArrayInitStatic(s)"),
+    ("array.new_data",       "makeArrayNewData(s)"),
+    ("array.new_elem",       "makeArrayNewElem(s)"),
+    ("array.new_fixed",      "makeArrayNewFixed(s)"),
     ("array.get",            "makeArrayGet(s)"),
     ("array.get_s",          "makeArrayGet(s, true)"),
     ("array.get_u",          "makeArrayGet(s, false)"),
     ("array.set",            "makeArraySet(s)"),
     ("array.len",            "makeArrayLen(s)"),
     ("array.copy",           "makeArrayCopy(s)"),
-    ("ref.is_func",          "makeRefTest(s, Type(HeapType::func, NonNullable))"),
-    ("ref.is_i31",           "makeRefTest(s, Type(HeapType::i31, NonNullable))"),
+    ("array.fill",           "makeArrayFill(s)"),
+    ("array.init_data",      "makeArrayInitData(s)"),
+    ("array.init_elem",      "makeArrayInitElem(s)"),
     ("ref.as_non_null",      "makeRefAs(s, RefAsNonNull)"),
-    ("ref.as_func",          "makeRefCast(s, Type(HeapType::func, NonNullable))"),
-    ("ref.as_i31",           "makeRefCast(s, Type(HeapType::i31, NonNullable))"),
     ("extern.internalize",   "makeRefAs(s, ExternInternalize)"),
     ("extern.externalize",   "makeRefAs(s, ExternExternalize)"),
+    ("string.new_utf8",      "makeStringNew(s, StringNewUTF8, false)"),
+    ("string.new_lossy_utf8",  "makeStringNew(s, StringNewLossyUTF8, false)"),
     ("string.new_wtf8",      "makeStringNew(s, StringNewWTF8, false)"),
     ("string.new_wtf16",     "makeStringNew(s, StringNewWTF16, false)"),
+    ("string.new_utf8_array",  "makeStringNew(s, StringNewUTF8Array, false)"),
+    ("string.new_lossy_utf8_array",  "makeStringNew(s, StringNewLossyUTF8Array, false)"),
     ("string.new_wtf8_array",  "makeStringNew(s, StringNewWTF8Array, false)"),
     ("string.new_wtf16_array", "makeStringNew(s, StringNewWTF16Array, false)"),
     ("string.from_code_point", "makeStringNew(s, StringNewFromCodePoint, false)"),
     ("string.new_utf8_try",  "makeStringNew(s, StringNewUTF8, true)"),
     ("string.new_utf8_array_try",  "makeStringNew(s, StringNewUTF8Array, true)"),
     ("string.const",         "makeStringConst(s)"),
+    ("string.measure_utf8",  "makeStringMeasure(s, StringMeasureUTF8)"),
     ("string.measure_wtf8",  "makeStringMeasure(s, StringMeasureWTF8)"),
     ("string.measure_wtf16", "makeStringMeasure(s, StringMeasureWTF16)"),
     ("string.is_usv_sequence", "makeStringMeasure(s, StringMeasureIsUSV)"),
     ("string.hash",          "makeStringMeasure(s, StringMeasureHash)"),
+    ("string.encode_utf8",   "makeStringEncode(s, StringEncodeUTF8)"),
+    ("string.encode_lossy_utf8",   "makeStringEncode(s, StringEncodeLossyUTF8)"),
     ("string.encode_wtf8",   "makeStringEncode(s, StringEncodeWTF8)"),
     ("string.encode_wtf16",  "makeStringEncode(s, StringEncodeWTF16)"),
+    ("string.encode_utf8_array",   "makeStringEncode(s, StringEncodeUTF8Array)"),
+    ("string.encode_lossy_utf8_array",   "makeStringEncode(s, StringEncodeLossyUTF8Array)"),
     ("string.encode_wtf8_array",   "makeStringEncode(s, StringEncodeWTF8Array)"),
     ("string.encode_wtf16_array",  "makeStringEncode(s, StringEncodeWTF16Array)"),
     ("string.concat",        "makeStringConcat(s)"),
@@ -709,9 +714,15 @@ class Node:
 
 def instruction_parser(new_parser=False):
     """Build a trie out of all the instructions, then emit it as C++ code."""
+    global instructions
     trie = Node()
     inst_length = 0
     for inst, expr in instructions:
+        if new_parser and inst in {"block", "loop", "if", "try", "then",
+                                   "else", "try_table"}:
+            # These are either control flow handled manually or not real
+            # instructions. Skip them.
+            continue
         inst_length = max(inst_length, len(inst))
         trie.insert(inst, expr)
 
@@ -728,13 +739,12 @@ def instruction_parser(new_parser=False):
 
     def print_leaf(expr, inst):
         if new_parser:
-            expr = expr.replace("()", "(ctx, pos)")
-            expr = expr.replace("(s", "(ctx, pos")
+            expr = expr.replace("()", "(ctx, pos, annotations)")
+            expr = expr.replace("(s", "(ctx, pos, annotations")
             printer.print_line("if (op == \"{inst}\"sv) {{".format(inst=inst))
             with printer.indent():
-                printer.print_line("auto ret = {expr};".format(expr=expr))
-                printer.print_line("CHECK_ERR(ret);")
-                printer.print_line("return *ret;")
+                printer.print_line("CHECK_ERR({expr});".format(expr=expr))
+                printer.print_line("return Ok{};")
             printer.print_line("}")
         else:
             printer.print_line("if (op == \"{inst}\"sv) {{ return {expr}; }}"

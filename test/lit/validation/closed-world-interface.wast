@@ -3,13 +3,9 @@
 ;; RUN: not wasm-opt -all --closed-world %s 2>&1 | filecheck %s
 
 
-;; This is pulled in because it is part of a rec group with $partial-pair-0.
-;; CHECK:      publicly exposed type disallowed with a closed world: $partial-pair-1, on
-;; CHECK-NEXT: (func)
-
 ;; This is pulled in by a global.
 ;; CHECK:      publicly exposed type disallowed with a closed world: $array, on
-;; CHECK-NEXT: (array (mut i8))
+;; CHECK-NEXT: (array (mut i32))
 
 ;; This is pulled in only by a global, so it is disallowed even though it is a function type.
 ;; CHECK:      publicly exposed type disallowed with a closed world: $private, on
@@ -17,11 +13,11 @@
 
 ;; This is referred to by the type of a function export, but is still not allowed.
 ;; CHECK:      publicly exposed type disallowed with a closed world: $struct, on
-;; CHECK-NEXT: (struct)
+;; CHECK-NEXT: (struct )
 
 (module
   (type $struct (struct))
-  (type $array (array (mut i8)))
+  (type $array (array (mut i32)))
 
   (type $void (func))
   (type $abstract (func (param anyref)))
@@ -32,36 +28,41 @@
     (type $exported-pair-1 (func (param (ref $exported-pair-0))))
   )
   (rec
+    ;; This is on an exported function.
     (type $partial-pair-0 (func))
+    ;; The latter type types are not public, but allowed to be because the
+    ;; entire rec group is allowed due to the first.
     (type $partial-pair-1 (func))
+    ;; Test a non-function type.
+    (type $partial-pair-2 (struct))
   )
 
   (type $private (func (param v128)))
 
-  (func $1 (export "test1") (type $void)
+  ;; Ok even though it is an import instead of an export.
+  (func $1 (import "env" "test5") (type $exported-pair-1))
+
+  (func $2 (export "test1") (type $void)
     (unreachable)
   )
 
   ;; Ok because it only refers to basic heap types
-  (func $2 (export "test2") (type $abstract)
+  (func $3 (export "test2") (type $abstract)
     (unreachable)
   )
 
   ;; Not ok because it refers to $struct.
-  (func $3 (export "test3") (type $concrete)
+  (func $4 (export "test3") (type $concrete)
     (unreachable)
   )
 
   ;; Ok even though it is in a rec group because the rest of the group and the
   ;; types this refers to are on the boundary as well.
-  (func $4 (export "test4") (type $exported-pair-0)
+  (func $5 (export "test4") (type $exported-pair-0)
     (unreachable)
   )
 
-  ;; Ok even though it is an import instead of an export.
-  (func $5 (import "env" "test5") (type $exported-pair-1))
-
-  ;; Not ok because another type in the group is not on the boundary.
+  ;; Ok, and we also allow the other type in the group.
   (func $6 (export "test6") (type $partial-pair-0)
     (unreachable)
   )

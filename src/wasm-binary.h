@@ -21,6 +21,24 @@
 #ifndef wasm_wasm_binary_h
 #define wasm_wasm_binary_h
 
+// Default to using the standard encodings. Override the default with
+// USE_STANDARD_GC_ENCODINGS or USE_LEGACY_GC_ENCODINGS.
+#define STANDARD_GC_ENCODINGS 1
+
+#ifdef USE_STANDARD_GC_ENCODINGS
+#ifdef USE_LEGACY_GC_ENCODINGS
+#error                                                                         \
+  "Cannot define both USE_STANDARD_GC_ENCODINGS and USE_LEGACY_GC_ENCODINGS"
+#endif
+#undef STANDARD_GC_ENCODINGS
+#define STANDARD_GC_ENCODINGS 1
+#else
+#ifdef USE_LEGACY_GC_ENCODINGS
+#undef STANDARD_GC_ENCODINGS
+#define STANDARD_GC_ENCODINGS 0
+#endif
+#endif
+
 #include <cassert>
 #include <ostream>
 #include <type_traits>
@@ -350,73 +368,132 @@ enum SegmentFlag {
 };
 
 enum EncodedType {
-  // value_type
+  // value types
   i32 = -0x1,  // 0x7f
   i64 = -0x2,  // 0x7e
   f32 = -0x3,  // 0x7d
   f64 = -0x4,  // 0x7c
   v128 = -0x5, // 0x7b
-  i8 = -0x6,   // 0x7a
-  i16 = -0x7,  // 0x79
-  // function reference type
-  funcref = -0x10, // 0x70
-  // external (host) references
-  externref = -0x11, // 0x6f
-  // top type of references to non-function Wasm data.
-  anyref = -0x12, // 0x6e
-  // comparable reference type
-  eqref = -0x13, // 0x6d
-  // nullable typed function reference type, with parameter
-  nullable = -0x14, // 0x6c
-  // non-nullable typed function reference type, with parameter
-  nonnullable = -0x15, // 0x6b
-  // integer reference type
-  i31ref = -0x16, // 0x6a
-  // gc and string reference types
-  structref = -0x19,        // 0x67
-  arrayref = -0x1a,         // 0x66
-  stringref = -0x1c,        // 0x64
-  stringview_wtf8 = -0x1d,  // 0x63
-  stringview_wtf16 = -0x1e, // 0x62
-  stringview_iter = -0x1f,  // 0x61
-  // bottom types
+// packed types
+#if STANDARD_GC_ENCODINGS
+  i8 = -0x8,  // 0x78
+  i16 = -0x9, // 0x77
+#else
+  i8 = -0x6,  // 0x7a
+  i16 = -0x7, // 0x79
+#endif
+// reference types
+#if STANDARD_GC_ENCODINGS
+  nullfuncref = -0xd,   // 0x73
+  nullexternref = -0xe, // 0x72
+  nullref = -0xf,       // 0x71
+  i31ref = -0x14,       // 0x6c
+  structref = -0x15,    // 0x6b
+  arrayref = -0x16,     // 0x6a
+#else
   nullexternref = -0x17, // 0x69
   nullfuncref = -0x18,   // 0x68
   nullref = -0x1b,       // 0x65
+  i31ref = -0x16,        // 0x6a
+  structref = -0x19,     // 0x67
+  arrayref = -0x1a,      // 0x66
+#endif
+  funcref = -0x10,   // 0x70
+  externref = -0x11, // 0x6f
+  anyref = -0x12,    // 0x6e
+  eqref = -0x13,     // 0x6d
+#if STANDARD_GC_ENCODINGS
+#else
+#endif
+#if STANDARD_GC_ENCODINGS
+  nonnullable = -0x1c, // 0x64
+  nullable = -0x1d,    // 0x63
+#else
+  nullable = -0x14,    // 0x6c
+  nonnullable = -0x15, // 0x6b
+#endif
+#if STANDARD_GC_ENCODINGS
+  // exception handling
+  exnref = -0x17, // 0x69
+#else
+  // Currently the legacy GC encoding's nullexternref encoding overlaps with
+  // exnref's. We assume the legacy GC encoding won't be used with the exnref
+  // for the moment and assign a random value to it to prevent the clash.
+  exnref = -0xfe,
+#endif
+  nullexnref = -0xc, // 0x74
+// string reference types
+#if STANDARD_GC_ENCODINGS
+  stringref = -0x19,       // 0x67
+  stringview_wtf8 = -0x1a, // 0x66
+#else
+  stringref = -0x1c,       // 0x64
+  stringview_wtf8 = -0x1d, // 0x63
+#endif
+  stringview_wtf16 = -0x1e, // 0x62
+  stringview_iter = -0x1f,  // 0x61
   // type forms
   Func = -0x20,   // 0x60
+  Cont = -0x23,   // 0x5d
   Struct = -0x21, // 0x5f
   Array = -0x22,  // 0x5e
   Sub = -0x30,    // 0x50
-  // prototype nominal forms we still parse
-  FuncSubtype = -0x23,   // 0x5d
-  StructSubtype = -0x24, // 0x5c
-  ArraySubtype = -0x25,  // 0x5b
-  // isorecursive recursion groups
+#if STANDARD_GC_ENCODINGS
+  SubFinal = -0x31, // 0x4f
+#else
+  SubFinal = -0x32, // 0x4e
+#endif
+// isorecursive recursion groups
+#if STANDARD_GC_ENCODINGS
+  Rec = -0x32, // 0x4e
+#else
   Rec = -0x31, // 0x4f
+#endif
   // block_type
-  Empty = -0x40 // 0x40
+  Empty = -0x40, // 0x40
 };
 
 enum EncodedHeapType {
-  func = -0x10,    // 0x70
-  ext = -0x11,     // 0x6f
-  any = -0x12,     // 0x6e
-  eq = -0x13,      // 0x6d
-  i31 = -0x16,     // 0x6a
-  struct_ = -0x19, // 0x67
-  array = -0x1a,   // 0x66
-  string = -0x1c,  // 0x64
-  // stringview/iter constants are identical to type, and cannot be duplicated
-  // here as that would be a compiler error, so add _heap suffixes. See
-  // https://github.com/WebAssembly/stringref/issues/12
-  stringview_wtf8_heap = -0x1d,  // 0x63
-  stringview_wtf16_heap = -0x1e, // 0x62
-  stringview_iter_heap = -0x1f,  // 0x61
-  // bottom types
+#if STANDARD_GC_ENCODINGS
+  nofunc = -0xd, // 0x73
+  noext = -0xe,  // 0x72
+  none = -0xf,   // 0x71
+#else
   noext = -0x17,  // 0x69
   nofunc = -0x18, // 0x68
   none = -0x1b,   // 0x65
+#endif
+  func = -0x10, // 0x70
+  ext = -0x11,  // 0x6f
+  any = -0x12,  // 0x6e
+  eq = -0x13,   // 0x6d
+#if STANDARD_GC_ENCODINGS
+  exn = -0x17, // 0x69
+#else
+  // Currently the legacy GC encoding's nullexternref encoding overlaps with
+  // exnref's. We assume the legacy GC encoding won't be used with the exnref
+  // for the moment and assign a random value to it to prevent the clash.
+  exn = -0xfe,
+#endif
+  noexn = -0xc, // 0x74
+#if STANDARD_GC_ENCODINGS
+  i31 = -0x14,     // 0x6c
+  struct_ = -0x15, // 0x6b
+  array = -0x16,   // 0x6a
+  string = -0x19,  // 0x67
+  // stringview/iter constants are identical to type, and cannot be duplicated
+  // here as that would be a compiler error, so add _heap suffixes. See
+  // https://github.com/WebAssembly/stringref/issues/12
+  stringview_wtf8_heap = -0x1a, // 0x66
+#else
+  i31 = -0x16,                  // 0x6a
+  struct_ = -0x19,              // 0x67
+  array = -0x1a,                // 0x66
+  string = -0x1c,               // 0x64
+  stringview_wtf8_heap = -0x1d, // 0x63
+#endif
+  stringview_wtf16_heap = -0x1e, // 0x62
+  stringview_iter_heap = -0x1f,  // 0x61
 };
 
 namespace CustomSections {
@@ -444,7 +521,8 @@ extern const char* Memory64Feature;
 extern const char* RelaxedSIMDFeature;
 extern const char* ExtendedConstFeature;
 extern const char* StringsFeature;
-extern const char* MultiMemoriesFeature;
+extern const char* MultiMemoryFeature;
+extern const char* TypedContinuationsFeature;
 
 enum Subsection {
   NameModule = 0,
@@ -1072,30 +1150,77 @@ enum ASTNodes {
 
   TableGrow = 0x0f,
   TableSize = 0x10,
+  TableFill = 0x11,
+  TableCopy = 0x0e,
   RefNull = 0xd0,
   RefIsNull = 0xd1,
   RefFunc = 0xd2,
+#if STANDARD_GC_ENCODINGS
+  RefEq = 0xd3,
+  RefAsNonNull = 0xd4,
+  BrOnNull = 0xd5,
+  BrOnNonNull = 0xd6,
+#else
   RefAsNonNull = 0xd3,
   BrOnNull = 0xd4,
+  RefEq = 0xd5,
   BrOnNonNull = 0xd6,
+#endif
 
   // exception handling opcodes
 
   Try = 0x06,
-  Catch = 0x07,
-  CatchAll = 0x19,
+  Catch_P3 = 0x07,    // Old Phase 3 'catch'
+  CatchAll_P3 = 0x19, // Old Phase 3 'catch_all'
   Delegate = 0x18,
   Throw = 0x08,
   Rethrow = 0x09,
+  TryTable = 0x1f,
+  Catch = 0x00,
+  CatchRef = 0x01,
+  CatchAll = 0x02,
+  CatchAllRef = 0x03,
+  ThrowRef = 0x0a,
 
   // typed function references opcodes
 
   CallRef = 0x14,
   RetCallRef = 0x15,
 
-  // gc opcodes
-
-  RefEq = 0xd5,
+// gc opcodes
+#if STANDARD_GC_ENCODINGS
+  StructNew = 0x00,
+  StructNewDefault = 0x01,
+  StructGet = 0x02,
+  StructGetS = 0x03,
+  StructGetU = 0x04,
+  StructSet = 0x05,
+  ArrayNew = 0x06,
+  ArrayNewDefault = 0x07,
+  ArrayNewFixed = 0x08,
+  ArrayNewData = 0x09,
+  ArrayNewElem = 0x0a,
+  ArrayGet = 0x0b,
+  ArrayGetS = 0x0c,
+  ArrayGetU = 0x0d,
+  ArraySet = 0x0e,
+  ArrayLen = 0x0f,
+  ArrayFill = 0x10,
+  ArrayCopy = 0x11,
+  ArrayInitData = 0x12,
+  ArrayInitElem = 0x13,
+  RefTest = 0x14,
+  RefTestNull = 0x15,
+  RefCast = 0x16,
+  RefCastNull = 0x17,
+  BrOnCast = 0x18,
+  BrOnCastFail = 0x19,
+  ExternInternalize = 0x1a,
+  ExternExternalize = 0x1b,
+  RefI31 = 0x1c,
+  I31GetS = 0x1d,
+  I31GetU = 0x1e,
+#else
   StructGet = 0x03,
   StructGetS = 0x04,
   StructGetU = 0x05,
@@ -1107,49 +1232,45 @@ enum ASTNodes {
   ArrayGetS = 0x14,
   ArrayGetU = 0x15,
   ArraySet = 0x16,
-  ArrayLenAnnotated = 0x17,
   ArrayCopy = 0x18,
   ArrayLen = 0x19,
-  ArrayInitStatic = 0x1a,
+  ArrayNewFixed = 0x1a,
   ArrayNew = 0x1b,
   ArrayNewDefault = 0x1c,
   ArrayNewData = 0x1d,
-  I31New = 0x20,
+  RefI31 = 0x20,
   I31GetS = 0x21,
   I31GetU = 0x22,
   RefTest = 0x40,
   RefCast = 0x41,
-  BrOnCast = 0x42,
-  BrOnCastFail = 0x43,
-  RefTestStatic = 0x44,
-  RefCastStatic = 0x45,
-  BrOnCastStatic = 0x46,
-  BrOnCastStaticFail = 0x47,
+  BrOnCast = 0x4e,
+  BrOnCastFail = 0x4f,
   RefTestNull = 0x48,
   RefCastNull = 0x49,
-  BrOnCastNull = 0x4a,
-  BrOnCastFailNull = 0x4b,
-  RefCastNop = 0x4c,
-  RefIsFunc = 0x50,
-  RefIsI31 = 0x52,
-  RefAsFunc = 0x58,
-  RefAsI31 = 0x5a,
-  BrOnFunc = 0x60,
-  BrOnI31 = 0x62,
-  BrOnNonFunc = 0x63,
-  BrOnNonI31 = 0x65,
   ExternInternalize = 0x70,
   ExternExternalize = 0x71,
-  StringNewWTF8 = 0x80,
+  ArrayFill = 0x0f,
+  ArrayInitData = 0x54,
+  ArrayInitElem = 0x55,
+#endif
+
+  // stringref opcodes
+
+  StringNewUTF8 = 0x80,
   StringNewWTF16 = 0x81,
   StringConst = 0x82,
+  StringMeasureUTF8 = 0x83,
   StringMeasureWTF8 = 0x84,
   StringMeasureWTF16 = 0x85,
-  StringEncodeWTF8 = 0x86,
+  StringEncodeUTF8 = 0x86,
   StringEncodeWTF16 = 0x87,
   StringConcat = 0x88,
   StringEq = 0x89,
   StringIsUSV = 0x8a,
+  StringNewLossyUTF8 = 0x8b,
+  StringNewWTF8 = 0x8c,
+  StringEncodeLossyUTF8 = 0x8d,
+  StringEncodeWTF8 = 0x8e,
   StringNewUTF8Try = 0x8f,
   StringAsWTF8 = 0x90,
   StringViewWTF8Advance = 0x91,
@@ -1166,11 +1287,20 @@ enum ASTNodes {
   StringCompare = 0xa8,
   StringFromCodePoint = 0xa9,
   StringHash = 0xaa,
-  StringNewWTF8Array = 0xb0,
+  StringNewUTF8Array = 0xb0,
   StringNewWTF16Array = 0xb1,
-  StringEncodeWTF8Array = 0xb2,
+  StringEncodeUTF8Array = 0xb2,
   StringEncodeWTF16Array = 0xb3,
+  StringNewLossyUTF8Array = 0xb4,
+  StringNewWTF8Array = 0xb5,
+  StringEncodeLossyUTF8Array = 0xb6,
+  StringEncodeWTF8Array = 0xb7,
   StringNewUTF8ArrayTry = 0xb8,
+
+  // typed continuation opcodes
+  ContNew = 0xe0,
+  Resume = 0xe3,
+
 };
 
 enum MemoryAccess {
@@ -1180,12 +1310,6 @@ enum MemoryAccess {
 };
 
 enum MemoryFlags { HasMaximum = 1 << 0, IsShared = 1 << 1, Is64 = 1 << 2 };
-
-enum StringPolicy {
-  UTF8 = 0x00,
-  WTF8 = 0x01,
-  Replace = 0x02,
-};
 
 enum FeaturePrefix {
   FeatureUsed = '+',
@@ -1327,7 +1451,10 @@ public:
   uint32_t getMemoryIndex(Name name) const;
   uint32_t getGlobalIndex(Name name) const;
   uint32_t getTagIndex(Name name) const;
+  uint32_t getDataSegmentIndex(Name name) const;
+  uint32_t getElementSegmentIndex(Name name) const;
   uint32_t getTypeIndex(HeapType type) const;
+  uint32_t getSignatureIndex(Signature sig) const;
   uint32_t getStringIndex(Name string) const;
 
   void writeTableDeclarations();
@@ -1382,6 +1509,7 @@ private:
   BufferWithRandomAccess& o;
   BinaryIndexes indexes;
   ModuleUtils::IndexedHeapTypes indexedTypes;
+  std::unordered_map<Signature, uint32_t> signatureIndexes;
 
   bool debugInfo = true;
 
@@ -1397,8 +1525,11 @@ private:
 
   MixedArena allocator;
 
-  // storage of source map locations until the section is placed at its final
-  // location (shrinking LEBs may cause changes there)
+  // Storage of source map locations until the section is placed at its final
+  // location (shrinking LEBs may cause changes there).
+  //
+  // A null DebugLocation* indicates we have no debug information for that
+  // location.
   std::vector<std::pair<size_t, const Function::DebugLocation*>>
     sourceMapLocations;
   size_t sourceMapLocationsSizeAtSectionStart;
@@ -1425,30 +1556,62 @@ private:
   void prepare();
 };
 
-class WasmBinaryBuilder {
+class WasmBinaryReader {
   Module& wasm;
   MixedArena& allocator;
   const std::vector<char>& input;
+
+  // Source map debugging support.
+
   std::istream* sourceMap;
-  std::pair<uint32_t, Function::DebugLocation> nextDebugLocation;
+
+  // The binary position that the next debug location refers to. That is, this
+  // is the first item in a source map entry that we have read (the "column", in
+  // source map terms, which for wasm means the offset in the binary). We have
+  // read this entry, but have not used it yet (we use it when we read the
+  // expression at this binary offset).
+  //
+  // This is set to 0 as an invalid value if we reach the end of the source map
+  // and there is nothing left to read.
+  size_t nextDebugPos;
+
+  // The debug location (file:line:col) corresponding to |nextDebugPos|. That
+  // is, this is the next 3 fields in a source map entry that we have read, but
+  // not used yet.
+  //
+  // If that location has no debug info (it lacks those 3 fields), then this
+  // contains the info from the previous one, because in a source map, these
+  // fields are relative to their last appearance, so we cannot forget them (we
+  // can't just do something like std::optional<DebugLocation> or such); for
+  // example, if we have line number 100, then no debug info, and then line
+  // number 500, then when we get to 500 we will see "+400" which is relative to
+  // the last existing line number (we "skip" over a place without debug info).
+  Function::DebugLocation nextDebugLocation;
+
+  // Whether debug info is present on |nextDebugPos| (see comment there).
+  bool nextDebugLocationHasDebugInfo;
+
+  // Settings.
+
   bool debugInfo = true;
   bool DWARF = false;
   bool skipFunctionBodies = false;
+
+  // Internal state.
 
   size_t pos = 0;
   Index startIndex = -1;
   std::set<Function::DebugLocation> debugLocation;
   size_t codeSectionLocation;
-
   std::set<BinaryConsts::Section> seenSections;
 
   // All types defined in the type section
   std::vector<HeapType> types;
 
 public:
-  WasmBinaryBuilder(Module& wasm,
-                    FeatureSet features,
-                    const std::vector<char>& input);
+  WasmBinaryReader(Module& wasm,
+                   FeatureSet features,
+                   const std::vector<char>& input);
 
   void setDebugInfo(bool value) { debugInfo = value; }
   void setDWARF(bool value) { DWARF = value; }
@@ -1503,6 +1666,8 @@ public:
   Name getMemoryName(Index index);
   Name getGlobalName(Index index);
   Name getTagName(Index index);
+  Name getDataName(Index index);
+  Name getElemName(Index index);
 
   // gets a memory in the combined import+defined space
   Memory* getMemory(Index index);
@@ -1552,6 +1717,12 @@ public:
 
   // at index i we have all refs to the tag i
   std::map<Index, std::vector<Name*>> tagRefs;
+
+  // at index i we have all refs to the data segment i
+  std::map<Index, std::vector<Name*>> dataRefs;
+
+  // at index i we have all refs to the element segment i
+  std::map<Index, std::vector<Name*>> elemRefs;
 
   // Throws a parsing error if we are not in a function context
   void requireFunctionContext(const char* error);
@@ -1703,7 +1874,9 @@ public:
   bool maybeVisitMemoryFill(Expression*& out, uint32_t code);
   bool maybeVisitTableSize(Expression*& out, uint32_t code);
   bool maybeVisitTableGrow(Expression*& out, uint32_t code);
-  bool maybeVisitI31New(Expression*& out, uint32_t code);
+  bool maybeVisitTableFill(Expression*& out, uint32_t code);
+  bool maybeVisitTableCopy(Expression*& out, uint32_t code);
+  bool maybeVisitRefI31(Expression*& out, uint32_t code);
   bool maybeVisitI31Get(Expression*& out, uint32_t code);
   bool maybeVisitRefTest(Expression*& out, uint32_t code);
   bool maybeVisitRefCast(Expression*& out, uint32_t code);
@@ -1711,13 +1884,15 @@ public:
   bool maybeVisitStructNew(Expression*& out, uint32_t code);
   bool maybeVisitStructGet(Expression*& out, uint32_t code);
   bool maybeVisitStructSet(Expression*& out, uint32_t code);
-  bool maybeVisitArrayNew(Expression*& out, uint32_t code);
-  bool maybeVisitArrayNewSeg(Expression*& out, uint32_t code);
-  bool maybeVisitArrayInit(Expression*& out, uint32_t code);
+  bool maybeVisitArrayNewData(Expression*& out, uint32_t code);
+  bool maybeVisitArrayNewElem(Expression*& out, uint32_t code);
+  bool maybeVisitArrayNewFixed(Expression*& out, uint32_t code);
   bool maybeVisitArrayGet(Expression*& out, uint32_t code);
   bool maybeVisitArraySet(Expression*& out, uint32_t code);
   bool maybeVisitArrayLen(Expression*& out, uint32_t code);
   bool maybeVisitArrayCopy(Expression*& out, uint32_t code);
+  bool maybeVisitArrayFill(Expression*& out, uint32_t code);
+  bool maybeVisitArrayInit(Expression*& out, uint32_t code);
   bool maybeVisitStringNew(Expression*& out, uint32_t code);
   bool maybeVisitStringConst(Expression*& out, uint32_t code);
   bool maybeVisitStringMeasure(Expression*& out, uint32_t code);
@@ -1740,17 +1915,20 @@ public:
   void visitDrop(Drop* curr);
   void visitRefNull(RefNull* curr);
   void visitRefIsNull(RefIsNull* curr);
-  void visitRefIs(RefTest* curr, uint8_t code);
   void visitRefFunc(RefFunc* curr);
   void visitRefEq(RefEq* curr);
   void visitTableGet(TableGet* curr);
   void visitTableSet(TableSet* curr);
   void visitTryOrTryInBlock(Expression*& out);
+  void visitTryTable(TryTable* curr);
   void visitThrow(Throw* curr);
   void visitRethrow(Rethrow* curr);
+  void visitThrowRef(ThrowRef* curr);
   void visitCallRef(CallRef* curr);
   void visitRefAsCast(RefCast* curr, uint32_t code);
   void visitRefAs(RefAs* curr, uint8_t code);
+  void visitContNew(ContNew* curr);
+  void visitResume(Resume* curr);
 
   [[noreturn]] void throwError(std::string text);
 

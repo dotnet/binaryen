@@ -4,26 +4,28 @@
 ;; RUN: foreach %s %t wasm-opt --legalize-js-interface-minimally -S -o - | filecheck %s
 
 (module
-  ;; CHECK:      (type $none_=>_i64 (func (result i64)))
+  ;; CHECK:      (type $0 (func (result i64)))
 
-  ;; CHECK:      (type $i32_=>_none (func (param i32)))
+  ;; CHECK:      (type $1 (func (param i32)))
 
-  ;; CHECK:      (type $none_=>_i32 (func (result i32)))
+  ;; CHECK:      (type $2 (func (result i32)))
 
-  ;; CHECK:      (type $i64_=>_none (func (param i64)))
+  ;; CHECK:      (type $3 (func (param i64)))
 
-  ;; CHECK:      (type $i32_i32_=>_none (func (param i32 i32)))
+  ;; CHECK:      (type $4 (func (param i32 i32)))
 
   ;; CHECK:      (import "env" "imported" (func $imported (result i64)))
   (import "env" "imported" (func $imported (result i64)))
-  ;; CHECK:      (import "env" "setTempRet0" (func $setTempRet0 (param i32)))
   (import "env" "invoke_vj" (func $invoke_vj (param i64)))
+  ;; CHECK:      (import "env" "setTempRet0" (func $setTempRet0 (param i32)))
+
   ;; CHECK:      (import "env" "invoke_vj" (func $legalimport$invoke_vj (param i32 i32)))
 
   ;; CHECK:      (export "func" (func $func))
   (export "func" (func $func))
-  ;; CHECK:      (export "dynCall_foo" (func $legalstub$dyn))
   (export "dynCall_foo" (func $dyn))
+  ;; CHECK:      (export "dynCall_foo" (func $legalstub$dyn))
+
   ;; CHECK:      (func $func (result i64)
   ;; CHECK-NEXT:  (drop
   ;; CHECK-NEXT:   (call $imported)

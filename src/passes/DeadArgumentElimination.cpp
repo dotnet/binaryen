@@ -216,6 +216,8 @@ struct DAE : public Pass {
         allDroppedCalls[name] = calls;
       }
     }
+    // Track which functions we changed, and optimize them later if necessary.
+    std::unordered_set<Function*> changed;
     // If we refine return types then we will need to do more type updating
     // at the end.
     bool refinedReturnTypes = false;
@@ -230,7 +232,9 @@ struct DAE : public Pass {
       // Refine argument types before doing anything else. This does not
       // affect whether an argument is used or not, it just refines the type
       // where possible.
-      refineArgumentTypes(func, calls, module, infoMap[name]);
+      if (refineArgumentTypes(func, calls, module, infoMap[name])) {
+        changed.insert(func);
+      }
       // Refine return types as well.
       if (refineReturnTypes(func, calls, module)) {
         refinedReturnTypes = true;
@@ -249,8 +253,6 @@ struct DAE : public Pass {
       // TODO: We could track in which functions we actually make changes.
       ReFinalize().run(getPassRunner(), module);
     }
-    // Track which functions we changed, and optimize them later if necessary.
-    std::unordered_set<Function*> changed;
     // We now know which parameters are unused, and can potentially remove them.
     for (auto& [name, calls] : allCalls) {
       if (infoMap[name].hasUnseenCalls) {
@@ -317,7 +319,21 @@ private:
   void
   removeReturnValue(Function* func, std::vector<Call*>& calls, Module* module) {
     func->setResults(Type::none);
-    Builder builder(*module);
+    // Remove the drops on the calls. Note that we must do this before updating
+    // returns in ReturnUpdater, as there may be recursive calls of this
+    // function to itself. So we first use the information in allDroppedCalls
+    // before the ReturnUpdater potentially invalidates that information as it
+    // modifies the function.
+    for (auto* call : calls) {
+      auto iter = allDroppedCalls.find(call);
+      assert(iter != allDroppedCalls.end());
+      Expression** location = iter->second;
+      *location = call;
+      // Update the call's type.
+      if (call->type != Type::unreachable) {
+        call->type = Type::none;
+      }
+    }
     // Remove any return values.
     struct ReturnUpdater : public PostWalker<ReturnUpdater> {
       Module* module;
@@ -334,18 +350,7 @@ private:
     } returnUpdater(func, module);
     // Remove any value flowing out.
     if (func->body->type.isConcrete()) {
-      func->body = builder.makeDrop(func->body);
-    }
-    // Remove the drops on the calls.
-    for (auto* call : calls) {
-      auto iter = allDroppedCalls.find(call);
-      assert(iter != allDroppedCalls.end());
-      Expression** location = iter->second;
-      *location = call;
-      // Update the call's type.
-      if (call->type != Type::unreachable) {
-        call->type = Type::none;
-      }
+      func->body = Builder(*module).makeDrop(func->body);
     }
   }
 
@@ -355,12 +360,12 @@ private:
   //
   // This assumes that the function has no calls aside from |calls|, that is, it
   // is not exported or called from the table or by reference.
-  void refineArgumentTypes(Function* func,
+  bool refineArgumentTypes(Function* func,
                            const std::vector<Call*>& calls,
                            Module* module,
                            const DAEFunctionInfo& info) {
     if (!module->features.hasGC()) {
-      return;
+      return false;
     }
     auto numParams = func->getNumParams();
     std::vector<Type> newParamTypes;
@@ -390,7 +395,7 @@ private:
 
       // Nothing is sent here at all; leave such optimizations to DCE.
       if (!lub.noted()) {
-        return;
+        return false;
       }
       newParamTypes.push_back(lub.getLUB());
     }
@@ -399,7 +404,7 @@ private:
     // function body.
     auto newParams = Type(newParamTypes);
     if (newParams == func->getParams()) {
-      return;
+      return false;
     }
 
     // We can do this!
@@ -407,6 +412,8 @@ private:
 
     // Update the function's type.
     func->setParams(newParams);
+
+    return true;
   }
 
   // See if the types returned from a function allow us to define a more refined

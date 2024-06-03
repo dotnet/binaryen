@@ -41,36 +41,33 @@
 #include "ir/find_all.h"
 #include "ir/intrinsics.h"
 #include "ir/module-utils.h"
+#include "ir/struct-utils.h"
 #include "ir/subtypes.h"
 #include "ir/utils.h"
 #include "pass.h"
+#include "support/stdckdint.h"
 #include "wasm-builder.h"
 #include "wasm.h"
 
 namespace wasm {
 
-// TODO: Add data segment, multiple memories (#5224)
-// TODO: use Effects below to determine if a memory is used
-// This pass does not have multi-memories support
-enum class ModuleElementKind { Function, Global, Tag, Table, ElementSegment };
+// TODO: remove this alias
+using ModuleElementKind = ModuleItemKind;
 
 // An element in the module that we track: a kind (function, global, etc.) + the
 // name of the particular element.
 using ModuleElement = std::pair<ModuleElementKind, Name>;
 
-// A pair of a struct type and a field index, together defining a field in a
-// particular type.
-using StructField = std::pair<HeapType, Index>;
-
 // Visit or walk an expression to find what things are referenced.
-struct ReferenceFinder : public PostWalker<ReferenceFinder> {
+struct ReferenceFinder
+  : public PostWalker<ReferenceFinder,
+                      UnifiedExpressionVisitor<ReferenceFinder>> {
   // Our findings are placed in these data structures, which the user of this
   // code can then process.
   std::vector<ModuleElement> elements;
   std::vector<HeapType> callRefTypes;
   std::vector<Name> refFuncs;
   std::vector<StructField> structFields;
-  bool usesMemory = false;
 
   // Add an item to the output data structures.
   void note(ModuleElement element) { elements.push_back(element); }
@@ -78,10 +75,38 @@ struct ReferenceFinder : public PostWalker<ReferenceFinder> {
   void noteRefFunc(Name refFunc) { refFuncs.push_back(refFunc); }
   void note(StructField structField) { structFields.push_back(structField); }
 
-  // Visitors
+  // Generic visitor
+
+  void visitExpression(Expression* curr) {
+#define DELEGATE_ID curr->_id
+
+#define DELEGATE_START(id) [[maybe_unused]] auto* cast = curr->cast<id>();
+
+#define DELEGATE_GET_FIELD(id, field) cast->field
+
+#define DELEGATE_FIELD_TYPE(id, field)
+#define DELEGATE_FIELD_HEAPTYPE(id, field)
+#define DELEGATE_FIELD_CHILD(id, field)
+#define DELEGATE_FIELD_OPTIONAL_CHILD(id, field)
+#define DELEGATE_FIELD_INT(id, field)
+#define DELEGATE_FIELD_LITERAL(id, field)
+#define DELEGATE_FIELD_NAME(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_DEF(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_USE(id, field)
+#define DELEGATE_FIELD_ADDRESS(id, field)
+
+#define DELEGATE_FIELD_NAME_KIND(id, field, kind)                              \
+  if (cast->field.is()) {                                                      \
+    note({kind, cast->field});                                                 \
+  }
+
+#include "wasm-delegations-fields.def"
+  }
+
+  // Specific visitors
 
   void visitCall(Call* curr) {
-    note(ModuleElement(ModuleElementKind::Function, curr->target));
+    note({ModuleElementKind::Function, curr->target});
 
     if (Intrinsics(*getModule()).isCallWithoutEffects(curr)) {
       // A call-without-effects receives a function reference and calls it, the
@@ -108,7 +133,7 @@ struct ReferenceFinder : public PostWalker<ReferenceFinder> {
   }
 
   void visitCallIndirect(CallIndirect* curr) {
-    note(ModuleElement(ModuleElementKind::Table, curr->table));
+    note({ModuleElementKind::Table, curr->table});
     // Note a possible call of a function reference as well, as something might
     // be written into the table during runtime. With precise tracking of what
     // is written into the table we could do better here; we could also see
@@ -125,69 +150,14 @@ struct ReferenceFinder : public PostWalker<ReferenceFinder> {
     noteCallRef(curr->target->type.getHeapType());
   }
 
-  void visitGlobalGet(GlobalGet* curr) {
-    note(ModuleElement(ModuleElementKind::Global, curr->name));
-  }
-  void visitGlobalSet(GlobalSet* curr) {
-    note(ModuleElement(ModuleElementKind::Global, curr->name));
-  }
-
-  void visitLoad(Load* curr) { usesMemory = true; }
-  void visitStore(Store* curr) { usesMemory = true; }
-  void visitAtomicCmpxchg(AtomicCmpxchg* curr) { usesMemory = true; }
-  void visitAtomicRMW(AtomicRMW* curr) { usesMemory = true; }
-  void visitAtomicWait(AtomicWait* curr) { usesMemory = true; }
-  void visitAtomicNotify(AtomicNotify* curr) { usesMemory = true; }
-  void visitAtomicFence(AtomicFence* curr) { usesMemory = true; }
-  void visitMemoryInit(MemoryInit* curr) { usesMemory = true; }
-  void visitDataDrop(DataDrop* curr) {
-    // TODO: Replace this with a use of a data segment (#5224).
-    usesMemory = true;
-  }
-  void visitMemoryCopy(MemoryCopy* curr) { usesMemory = true; }
-  void visitMemoryFill(MemoryFill* curr) { usesMemory = true; }
-  void visitMemorySize(MemorySize* curr) { usesMemory = true; }
-  void visitMemoryGrow(MemoryGrow* curr) { usesMemory = true; }
   void visitRefFunc(RefFunc* curr) { noteRefFunc(curr->func); }
-  void visitTableGet(TableGet* curr) {
-    note(ModuleElement(ModuleElementKind::Table, curr->table));
-  }
-  void visitTableSet(TableSet* curr) {
-    note(ModuleElement(ModuleElementKind::Table, curr->table));
-  }
-  void visitTableSize(TableSize* curr) {
-    note(ModuleElement(ModuleElementKind::Table, curr->table));
-  }
-  void visitTableGrow(TableGrow* curr) {
-    note(ModuleElement(ModuleElementKind::Table, curr->table));
-  }
-  void visitThrow(Throw* curr) {
-    note(ModuleElement(ModuleElementKind::Tag, curr->tag));
-  }
-  void visitTry(Try* curr) {
-    for (auto tag : curr->catchTags) {
-      note(ModuleElement(ModuleElementKind::Tag, tag));
-    }
-  }
+
   void visitStructGet(StructGet* curr) {
     if (curr->ref->type == Type::unreachable || curr->ref->type.isNull()) {
       return;
     }
     auto type = curr->ref->type.getHeapType();
     note(StructField{type, curr->index});
-  }
-  void visitArrayNewSeg(ArrayNewSeg* curr) {
-    switch (curr->op) {
-      case NewData:
-        // TODO: Replace this with a use of the specific data segment (#5224).
-        usesMemory = true;
-        return;
-      case NewElem:
-        auto segment = getModule()->elementSegments[curr->segment]->name;
-        note(ModuleElement(ModuleElementKind::ElementSegment, segment));
-        return;
-    }
-    WASM_UNREACHABLE("unexpected op");
   }
 };
 
@@ -223,8 +193,6 @@ struct Analyzer {
   // global is only used if we actually read that field from the struct. We
   // perform that analysis in readStructFields  unreadStructFieldExprMap, below.
   std::vector<Expression*> expressionQueue;
-
-  bool usesMemory = false;
 
   // The signatures that we have seen a call_ref for. When we see a RefFunc of a
   // signature in here, we know it is used; otherwise it may only be referred
@@ -269,18 +237,6 @@ struct Analyzer {
       use(element);
     }
 
-    // Globals used in memory/table init expressions are also roots.
-    for (auto& segment : module->dataSegments) {
-      if (!segment->isPassive) {
-        use(segment->offset);
-      }
-    }
-    for (auto& segment : module->elementSegments) {
-      if (segment->table.is()) {
-        use(segment->offset);
-      }
-    }
-
     // Main loop on both the module and the expression queues.
     while (processExpressions() || processModule()) {
     }
@@ -314,9 +270,6 @@ struct Analyzer {
       for (auto structField : finder.structFields) {
         useStructField(structField);
       }
-      if (finder.usesMemory) {
-        usesMemory = true;
-      }
 
       // Scan the children to continue our work.
       scanChildren(curr);
@@ -340,7 +293,7 @@ struct Analyzer {
 
     // Call all the functions of that signature, and subtypes. We can then
     // forget about them, as those signatures will be marked as called.
-    for (auto subType : subTypes->getAllSubTypes(type)) {
+    for (auto subType : subTypes->getSubTypes(type)) {
       auto iter = uncalledRefFuncMap.find(subType);
       if (iter != uncalledRefFuncMap.end()) {
         // We must not have a type in both calledSignatures and
@@ -349,7 +302,7 @@ struct Analyzer {
         assert(calledSignatures.count(subType) == 0);
 
         for (Name target : iter->second) {
-          use(ModuleElement(ModuleElementKind::Function, target));
+          use({ModuleElementKind::Function, target});
         }
 
         uncalledRefFuncMap.erase(iter);
@@ -363,13 +316,13 @@ struct Analyzer {
     if (!options.closedWorld) {
       // The world is open, so assume the worst and something (inside or outside
       // of the module) can call this.
-      use(ModuleElement(ModuleElementKind::Function, func));
+      use({ModuleElementKind::Function, func});
       return;
     }
 
     // Otherwise, we are in a closed world, and so we can try to optimize the
     // case where the target function is referenced but not used.
-    auto element = ModuleElement(ModuleElementKind::Function, func);
+    auto element = ModuleElement{ModuleElementKind::Function, func};
 
     auto type = module->getFunction(func)->type;
     if (calledSignatures.count(type)) {
@@ -429,25 +382,63 @@ struct Analyzer {
 
       assert(used.count(curr));
       auto& [kind, value] = curr;
-      if (kind == ModuleElementKind::Function) {
-        // if not an import, walk it
-        auto* func = module->getFunction(value);
-        if (!func->imported()) {
-          use(func->body);
+      switch (kind) {
+        case ModuleElementKind::Function: {
+          // if not an import, walk it
+          auto* func = module->getFunction(value);
+          if (!func->imported()) {
+            use(func->body);
+          }
+          break;
         }
-      } else if (kind == ModuleElementKind::Global) {
-        // if not imported, it has an init expression we can walk
-        auto* global = module->getGlobal(value);
-        if (!global->imported()) {
-          use(global->init);
+        case ModuleElementKind::Global: {
+          // if not imported, it has an init expression we can walk
+          auto* global = module->getGlobal(value);
+          if (!global->imported()) {
+            use(global->init);
+          }
+          break;
         }
-      } else if (kind == ModuleElementKind::Table) {
-        ModuleUtils::iterTableSegments(
-          *module, value, [&](ElementSegment* segment) {
+        case ModuleElementKind::Tag:
+          break;
+        case ModuleElementKind::Memory:
+          ModuleUtils::iterMemorySegments(
+            *module, value, [&](DataSegment* segment) {
+              if (!segment->data.empty()) {
+                use({ModuleElementKind::DataSegment, segment->name});
+              }
+            });
+          break;
+        case ModuleElementKind::Table:
+          ModuleUtils::iterTableSegments(
+            *module, value, [&](ElementSegment* segment) {
+              if (!segment->data.empty()) {
+                use({ModuleElementKind::ElementSegment, segment->name});
+              }
+            });
+          break;
+        case ModuleElementKind::DataSegment: {
+          auto* segment = module->getDataSegment(value);
+          if (segment->offset) {
             use(segment->offset);
-            use(
-              ModuleElement(ModuleElementKind::ElementSegment, segment->name));
-          });
+            use({ModuleElementKind::Memory, segment->memory});
+          }
+          break;
+        }
+        case ModuleElementKind::ElementSegment: {
+          auto* segment = module->getElementSegment(value);
+          if (segment->offset) {
+            use(segment->offset);
+            use({ModuleElementKind::Table, segment->table});
+          }
+          for (auto* expr : segment->data) {
+            use(expr);
+          }
+          break;
+        }
+        default: {
+          WASM_UNREACHABLE("invalid kind");
+        }
       }
     }
     return worked;
@@ -460,6 +451,9 @@ struct Analyzer {
     if (inserted) {
       moduleQueue.emplace_back(element);
     }
+  }
+  void use(ModuleElementKind kind, Name value) {
+    use(ModuleElement(kind, value));
   }
 
   void use(Expression* curr) {
@@ -582,14 +576,7 @@ struct Analyzer {
       // just adding a reference to the function, and not actually using the
       // RefFunc. (Only useRefFunc() + a CallRef of the proper type are enough
       // to make a function itself used.)
-      referenced.insert(ModuleElement(ModuleElementKind::Function, func));
-    }
-
-    if (finder.usesMemory) {
-      // TODO: We could do better here, but leave that for the full refactor
-      //       here that will also add multimemory. Then this will be as simple
-      //       as supporting tables here (which are just more module elements).
-      usesMemory = true;
+      referenced.insert({ModuleElementKind::Function, func});
     }
 
     // Note: nothing to do with |callRefTypes| and |structFields|, which only
@@ -612,6 +599,8 @@ struct RemoveUnusedModuleElements : public Pass {
     : rootAllFunctions(rootAllFunctions) {}
 
   void run(Module* module) override {
+    prepare(module);
+
     std::vector<ModuleElement> roots;
     // Module start is a root.
     if (module->start.is()) {
@@ -629,15 +618,7 @@ struct RemoveUnusedModuleElements : public Pass {
         roots.emplace_back(ModuleElementKind::Function, func->name);
       });
     }
-    ModuleUtils::iterActiveElementSegments(
-      *module, [&](ElementSegment* segment) {
-        auto table = module->getTable(segment->table);
-        if (table->imported() && !segment->data.empty()) {
-          roots.emplace_back(ModuleElementKind::ElementSegment, segment->name);
-        }
-      });
     // Exports are roots.
-    bool exportsMemory = false;
     for (auto& curr : module->exports) {
       if (curr->kind == ExternalKind::Function) {
         roots.emplace_back(ModuleElementKind::Function, curr->value);
@@ -647,20 +628,68 @@ struct RemoveUnusedModuleElements : public Pass {
         roots.emplace_back(ModuleElementKind::Tag, curr->value);
       } else if (curr->kind == ExternalKind::Table) {
         roots.emplace_back(ModuleElementKind::Table, curr->value);
-        ModuleUtils::iterTableSegments(
-          *module, curr->value, [&](ElementSegment* segment) {
-            roots.emplace_back(ModuleElementKind::ElementSegment,
-                               segment->name);
-          });
       } else if (curr->kind == ExternalKind::Memory) {
-        exportsMemory = true;
+        roots.emplace_back(ModuleElementKind::Memory, curr->value);
       }
     }
-    // Check for special imports, which are roots.
-    bool importsMemory = false;
-    if (!module->memories.empty() && module->memories[0]->imported()) {
-      importsMemory = true;
-    }
+
+    // Active segments that write to imported tables and memories are roots
+    // because those writes are externally observable even if the module does
+    // not otherwise use the tables or memories.
+    //
+    // Likewise, if traps are possible during startup then just trapping is an
+    // effect (which can happen if the offset is out of bounds).
+    auto maybeRootSegment = [&](ModuleElementKind kind,
+                                Name segmentName,
+                                Index segmentSize,
+                                Expression* offset,
+                                Importable* parent,
+                                Index parentSize) {
+      auto writesToVisible = parent->imported() && segmentSize;
+      auto mayTrap = false;
+      if (!getPassOptions().trapsNeverHappen) {
+        // Check if this might trap. If it is obviously in bounds then it
+        // cannot.
+        auto* c = offset->dynCast<Const>();
+        // Check for overflow in the largest possible space of addresses.
+        using AddressType = Address::address64_t;
+        AddressType maxWritten;
+        // If there is no integer, or if there is and the addition overflows, or
+        // if the addition leads to a too-large value, then we may trap.
+        mayTrap = !c ||
+                  std::ckd_add(&maxWritten,
+                               (AddressType)segmentSize,
+                               (AddressType)c->value.getInteger()) ||
+                  maxWritten > parentSize;
+      }
+      if (writesToVisible || mayTrap) {
+        roots.emplace_back(kind, segmentName);
+      }
+    };
+    ModuleUtils::iterActiveDataSegments(*module, [&](DataSegment* segment) {
+      if (segment->memory.is()) {
+        auto* memory = module->getMemory(segment->memory);
+        maybeRootSegment(ModuleElementKind::DataSegment,
+                         segment->name,
+                         segment->data.size(),
+                         segment->offset,
+                         memory,
+                         memory->initial * Memory::kPageSize);
+      }
+    });
+    ModuleUtils::iterActiveElementSegments(
+      *module, [&](ElementSegment* segment) {
+        if (segment->table.is()) {
+          auto* table = module->getTable(segment->table);
+          maybeRootSegment(ModuleElementKind::ElementSegment,
+                           segment->name,
+                           segment->data.size(),
+                           segment->offset,
+                           table,
+                           table->initial * Table::kPageSize);
+        }
+      });
+
     // For now, all functions that can be called indirectly are marked as roots.
     // TODO: Compute this based on which ElementSegments are actually used,
     //       and which functions have a call_indirect of the proper type.
@@ -681,7 +710,7 @@ struct RemoveUnusedModuleElements : public Pass {
     };
 
     module->removeFunctions([&](Function* curr) {
-      auto element = ModuleElement(ModuleElementKind::Function, curr->name);
+      auto element = ModuleElement{ModuleElementKind::Function, curr->name};
       if (analyzer.used.count(element)) {
         // This is used.
         return false;
@@ -701,39 +730,89 @@ struct RemoveUnusedModuleElements : public Pass {
     });
     module->removeGlobals([&](Global* curr) {
       // See TODO in addReferences - we may be able to do better here.
-      return !needed(ModuleElement(ModuleElementKind::Global, curr->name));
+      return !needed({ModuleElementKind::Global, curr->name});
     });
     module->removeTags([&](Tag* curr) {
-      return !needed(ModuleElement(ModuleElementKind::Tag, curr->name));
+      return !needed({ModuleElementKind::Tag, curr->name});
+    });
+    module->removeMemories([&](Memory* curr) {
+      return !needed(ModuleElement(ModuleElementKind::Memory, curr->name));
+    });
+    module->removeTables([&](Table* curr) {
+      return !needed(ModuleElement(ModuleElementKind::Table, curr->name));
+    });
+    module->removeDataSegments([&](DataSegment* curr) {
+      return !needed(ModuleElement(ModuleElementKind::DataSegment, curr->name));
     });
     module->removeElementSegments([&](ElementSegment* curr) {
-      return !needed(
-        ModuleElement(ModuleElementKind::ElementSegment, curr->name));
-    });
-    // Since we've removed all empty element segments, here we mark all tables
-    // that have a segment left.
-    std::unordered_set<Name> nonemptyTables;
-    ModuleUtils::iterActiveElementSegments(
-      *module,
-      [&](ElementSegment* segment) { nonemptyTables.insert(segment->table); });
-    module->removeTables([&](Table* curr) {
-      return (nonemptyTables.count(curr->name) == 0 || !curr->imported()) &&
-             !needed(ModuleElement(ModuleElementKind::Table, curr->name));
+      return !needed({ModuleElementKind::ElementSegment, curr->name});
     });
     // TODO: After removing elements, we may be able to remove more things, and
     //       should continue to work. (For example, after removing a reference
     //       to a function from an element segment, we may be able to remove
     //       that function, etc.)
+  }
 
-    // Handle the memory
-    if (!exportsMemory && !analyzer.usesMemory) {
-      if (!importsMemory) {
-        // The memory is unobservable to the outside, we can remove the
-        // contents.
-        module->removeDataSegments([&](DataSegment* curr) { return true; });
+  // Do simple work that prepares the module to be efficiently optimized.
+  void prepare(Module* module) {
+    // FIXME Disable these optimizations for now, as they uncovered bugs in
+    //       both LLVM and Binaryen,
+    //       https://github.com/WebAssembly/binaryen/pull/6026#issuecomment-1775674882
+    return;
+
+    // If a function export is a function that just calls another function, we
+    // can export that one directly. Doing so might make the function in the
+    // middle unused:
+    //
+    //  (export "export" (func $middle))
+    //  (func $middle
+    //    (call $real)
+    //  )
+    //
+    // =>
+    //
+    //  (export "export" (func $real))  ;; this changed
+    //  (func $middle
+    //    (call $real)
+    //  )
+    //
+    // (Normally this is not needed, as inlining will end up removing such
+    // silly trampoline functions, but the case of an import being exported does
+    // not have any code for inlining to work with, so we need to handle it
+    // directly.)
+    for (auto& exp : module->exports) {
+      if (exp->kind != ExternalKind::Function) {
+        continue;
       }
-      if (module->dataSegments.empty() && !module->memories.empty()) {
-        module->removeMemory(module->memories[0]->name);
+
+      auto* func = module->getFunction(exp->value);
+      if (!func->body) {
+        continue;
+      }
+
+      auto* call = func->body->dynCast<Call>();
+      if (!call) {
+        continue;
+      }
+
+      // Don't do this if the type is different, as then we might be
+      // changing the external interface to the module.
+      auto* calledFunc = module->getFunction(call->target);
+      if (calledFunc->type != func->type) {
+        continue;
+      }
+
+      // Finally, all the params must simply be forwarded.
+      auto ok = true;
+      for (Index i = 0; i < call->operands.size(); i++) {
+        auto* get = call->operands[i]->dynCast<LocalGet>();
+        if (!get || get->index != i) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        exp->value = calledFunc->name;
       }
     }
   }

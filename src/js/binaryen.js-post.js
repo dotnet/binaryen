@@ -9,7 +9,7 @@ function preserveStack(func) {
 }
 
 function strToStack(str) {
-  return str ? allocateUTF8OnStack(str) : 0;
+  return str ? stringToUTF8OnStack(str) : 0;
 }
 
 function i32sToStack(i32s) {
@@ -105,7 +105,7 @@ function initializeConstants() {
     'TupleMake',
     'TupleExtract',
     'Pop',
-    'I31New',
+    'RefI31',
     'I31Get',
     'CallRef',
     'RefTest',
@@ -115,7 +115,7 @@ function initializeConstants() {
     'StructGet',
     'StructSet',
     'ArrayNew',
-    'ArrayInit',
+    'ArrayNewFixed',
     'ArrayGet',
     'ArraySet',
     'ArrayLen',
@@ -167,7 +167,7 @@ function initializeConstants() {
     'RelaxedSIMD',
     'ExtendedConst',
     'Strings',
-    'MultiMemories',
+    'MultiMemory',
     'All'
   ].forEach(name => {
     Module['Features'][name] = Module['_BinaryenFeature' + name]();
@@ -578,11 +578,11 @@ function initializeConstants() {
     'BrOnCastFail',
     'StringNewUTF8',
     'StringNewWTF8',
-    'StringNewReplace',
+    'StringNewLossyUTF8',
     'StringNewWTF16',
     'StringNewUTF8Array',
     'StringNewWTF8Array',
-    'StringNewReplaceArray',
+    'StringNewLossyUTF8Array',
     'StringNewWTF16Array',
     'StringNewFromCodePoint',
     'StringMeasureUTF8',
@@ -591,9 +591,11 @@ function initializeConstants() {
     'StringMeasureIsUSV',
     'StringMeasureWTF16View',
     'StringEncodeUTF8',
+    'StringEncodeLossyUTF8',
     'StringEncodeWTF8',
     'StringEncodeWTF16',
     'StringEncodeUTF8Array',
+    'StringEncodeLossyUTF8Array',
     'StringEncodeWTF8Array',
     'StringEncodeWTF16Array',
     'StringAsWTF8',
@@ -758,7 +760,7 @@ function wrapModule(module, self = {}) {
       return Module['_BinaryenMemoryGrow'](module, value, strToStack(name), memory64);
     },
     'init'(segment, dest, offset, size, name) {
-      return Module['_BinaryenMemoryInit'](module, segment, dest, offset, size, strToStack(name));
+      return preserveStack(() => Module['_BinaryenMemoryInit'](module, strToStack(segment), dest, offset, size, strToStack(name)));
     },
     'copy'(dest, source, size, destMemory, sourceMemory) {
       return Module['_BinaryenMemoryCopy'](module, dest, source, size, strToStack(destMemory), strToStack(sourceMemory));
@@ -781,7 +783,7 @@ function wrapModule(module, self = {}) {
 
   self['data'] = {
     'drop'(segment) {
-      return Module['_BinaryenDataDrop'](module, segment);
+      return preserveStack(() => Module['_BinaryenDataDrop'](module, strToStack(segment)));
     }
   }
 
@@ -2368,6 +2370,9 @@ function wrapModule(module, self = {}) {
     'func'(func, type) {
       return preserveStack(() => Module['_BinaryenRefFunc'](module, strToStack(func), type));
     },
+    'i31'(value) {
+      return Module['_BinaryenRefI31'](module, value);
+    },
     'eq'(left, right) {
       return Module['_BinaryenRefEq'](module, left, right);
     }
@@ -2416,9 +2421,6 @@ function wrapModule(module, self = {}) {
   };
 
   self['i31'] = {
-    'new'(value) {
-      return Module['_BinaryenI31New'](module, value);
-    },
     'get_s'(i31) {
       return Module['_BinaryenI31Get'](module, i31, 1);
     },
@@ -2563,29 +2565,36 @@ function wrapModule(module, self = {}) {
     // segments are assumed to be { passive: bool, offset: expression ref, data: array of 8-bit data }
     return preserveStack(() => {
       const segmentsLen = segments.length;
-      const segmentData = new Array(segmentsLen);
-      const segmentDataLen = new Array(segmentsLen);
-      const segmentPassive = new Array(segmentsLen);
-      const segmentOffset = new Array(segmentsLen);
+      const names = new Array(segmentsLen);
+      const datas = new Array(segmentsLen);
+      const lengths = new Array(segmentsLen);
+      const passives = new Array(segmentsLen);
+      const offsets = new Array(segmentsLen);
       for (let i = 0; i < segmentsLen; i++) {
-        const { data, offset, passive } = segments[i];
-        segmentData[i] = stackAlloc(data.length);
-        HEAP8.set(data, segmentData[i]);
-        segmentDataLen[i] = data.length;
-        segmentPassive[i] = passive;
-        segmentOffset[i] = offset;
+        const { name, data, offset, passive } = segments[i];
+        names[i] = name ? strToStack(name) : null;
+        datas[i] = _malloc(data.length);
+        HEAP8.set(data, datas[i]);
+        lengths[i] = data.length;
+        passives[i] = passive;
+        offsets[i] = offset;
       }
-      return Module['_BinaryenSetMemory'](
+      const ret = Module['_BinaryenSetMemory'](
         module, initial, maximum, strToStack(exportName),
-        i32sToStack(segmentData),
-        i8sToStack(segmentPassive),
-        i32sToStack(segmentOffset),
-        i32sToStack(segmentDataLen),
-        segmentsLen,
-        shared,
-        memory64,
-        strToStack(internalName)
-      );
+          i32sToStack(names),
+          i32sToStack(datas),
+          i8sToStack(passives),
+          i32sToStack(offsets),
+          i32sToStack(lengths),
+          segmentsLen,
+          shared,
+          memory64,
+          strToStack(internalName)
+        );
+      for (let i = 0; i < segmentsLen; i++) {
+        _free(datas[i]);
+      }
+      return ret;
     });
   };
   self['hasMemory'] = function() {
@@ -2607,18 +2616,18 @@ function wrapModule(module, self = {}) {
   self['getNumMemorySegments'] = function() {
     return Module['_BinaryenGetNumMemorySegments'](module);
   };
-  self['getMemorySegmentInfoByIndex'] = function(id) {
-    const passive = Boolean(Module['_BinaryenGetMemorySegmentPassive'](module, id));
+  self['getMemorySegmentInfo'] = function(name) {
+    const passive = Boolean(Module['_BinaryenGetMemorySegmentPassive'](module, strToStack(name)));
     let offset = null;
     if (!passive) {
-      offset = Module['_BinaryenGetMemorySegmentByteOffset'](module, id);
+      offset = Module['_BinaryenGetMemorySegmentByteOffset'](module, strToStack(name));
     }
     return {
       'offset': offset,
       'data': (function(){
-        const size = Module['_BinaryenGetMemorySegmentByteLength'](module, id);
+        const size = Module['_BinaryenGetMemorySegmentByteLength'](module, strToStack(name));
         const ptr = _malloc(size);
-        Module['_BinaryenCopyMemorySegmentData'](module, id, ptr);
+        Module['_BinaryenCopyMemorySegmentData'](module, strToStack(name), ptr);
         const res = new Uint8Array(size);
         res.set(HEAP8.subarray(ptr, ptr + size));
         _free(ptr);
@@ -3172,7 +3181,7 @@ Module['getExpressionInfo'] = function(expr) {
     case Module['MemoryInitId']:
       return {
         'id': id,
-        'segment': Module['_BinaryenMemoryInitGetSegment'](expr),
+        'segment': UTF8ToString(Module['_BinaryenMemoryInitGetSegment'](expr)),
         'dest': Module['_BinaryenMemoryInitGetDest'](expr),
         'offset': Module['_BinaryenMemoryInitGetOffset'](expr),
         'size': Module['_BinaryenMemoryInitGetSize'](expr)
@@ -3180,7 +3189,7 @@ Module['getExpressionInfo'] = function(expr) {
     case Module['DataDropId']:
       return {
         'id': id,
-        'segment': Module['_BinaryenDataDropGetSegment'](expr),
+        'segment': UTF8ToString(Module['_BinaryenDataDropGetSegment'](expr)),
       };
     case Module['MemoryCopyId']:
       return {
@@ -3265,11 +3274,11 @@ Module['getExpressionInfo'] = function(expr) {
         'tuple': Module['_BinaryenTupleExtractGetTuple'](expr),
         'index': Module['_BinaryenTupleExtractGetIndex'](expr)
       };
-    case Module['I31NewId']:
+    case Module['RefI31Id']:
       return {
         'id': id,
         'type': type,
-        'value': Module['_BinaryenI31NewGetValue'](expr)
+        'value': Module['_BinaryenRefI31GetValue'](expr)
       };
     case Module['I31GetId']:
       return {
@@ -3417,7 +3426,7 @@ Module['readBinary'] = function(data) {
 // Parses text format to a module
 Module['parseText'] = function(text) {
   const buffer = _malloc(text.length + 1);
-  writeAsciiToMemory(text, buffer);
+  stringToAscii(text, buffer);
   const ptr = Module['_BinaryenModuleParse'](buffer);
   _free(buffer);
   return wrapModule(ptr);
@@ -4543,10 +4552,10 @@ Module['SIMDLoadStoreLane'] = makeExpressionWrapper({
 
 Module['MemoryInit'] = makeExpressionWrapper({
   'getSegment'(expr) {
-    return Module['_BinaryenMemoryInitGetSegment'](expr);
+    return UTF8ToString(Module['_BinaryenMemoryInitGetSegment'](expr));
   },
-  'setSegment'(expr, segmentIndex) {
-    Module['_BinaryenMemoryInitSetSegment'](expr, segmentIndex);
+  'setSegment'(expr, segment) {
+    preserveStack(() => Module['_BinaryenMemoryInitSetSegment'](expr, strToStack(segment)));
   },
   'getDest'(expr) {
     return Module['_BinaryenMemoryInitGetDest'](expr);
@@ -4570,10 +4579,10 @@ Module['MemoryInit'] = makeExpressionWrapper({
 
 Module['DataDrop'] = makeExpressionWrapper({
   'getSegment'(expr) {
-    return Module['_BinaryenDataDropGetSegment'](expr);
+    return UTF8ToString(Module['_BinaryenDataDropGetSegment'](expr));
   },
-  'setSegment'(expr, segmentIndex) {
-    Module['_BinaryenDataDropSetSegment'](expr, segmentIndex);
+  'setSegment'(expr, segment) {
+    preserveStack(() => Module['_BinaryenDataDropSetSegment'](expr, strToStack(segment)));
   }
 });
 
@@ -4831,12 +4840,12 @@ Module['TupleExtract'] = makeExpressionWrapper({
   }
 });
 
-Module['I31New'] = makeExpressionWrapper({
+Module['RefI31'] = makeExpressionWrapper({
   'getValue'(expr) {
-    return Module['_BinaryenI31NewGetValue'](expr);
+    return Module['_BinaryenRefI31GetValue'](expr);
   },
   'setValue'(expr, valueExpr) {
-    Module['_BinaryenI31NewSetValue'](expr, valueExpr);
+    Module['_BinaryenRefI31SetValue'](expr, valueExpr);
   }
 });
 

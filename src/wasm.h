@@ -42,6 +42,8 @@
 
 namespace wasm {
 
+class Module;
+
 // An index in a wasm module
 using Index = uint32_t;
 
@@ -563,11 +565,6 @@ enum RefAsOp {
   ExternExternalize,
 };
 
-enum ArrayNewSegOp {
-  NewData,
-  NewElem,
-};
-
 enum BrOnOp {
   BrOnNull,
   BrOnNonNull,
@@ -579,12 +576,12 @@ enum StringNewOp {
   // Linear memory
   StringNewUTF8,
   StringNewWTF8,
-  StringNewReplace,
+  StringNewLossyUTF8,
   StringNewWTF16,
   // GC
   StringNewUTF8Array,
   StringNewWTF8Array,
-  StringNewReplaceArray,
+  StringNewLossyUTF8Array,
   StringNewWTF16Array,
   // Other
   StringNewFromCodePoint,
@@ -601,9 +598,11 @@ enum StringMeasureOp {
 
 enum StringEncodeOp {
   StringEncodeUTF8,
+  StringEncodeLossyUTF8,
   StringEncodeWTF8,
   StringEncodeWTF16,
   StringEncodeUTF8Array,
+  StringEncodeLossyUTF8Array,
   StringEncodeWTF8Array,
   StringEncodeWTF16Array,
 };
@@ -701,12 +700,16 @@ public:
     TableSetId,
     TableSizeId,
     TableGrowId,
+    TableFillId,
+    TableCopyId,
     TryId,
+    TryTableId,
     ThrowId,
     RethrowId,
+    ThrowRefId,
     TupleMakeId,
     TupleExtractId,
-    I31NewId,
+    RefI31Id,
     I31GetId,
     CallRefId,
     RefTestId,
@@ -716,12 +719,16 @@ public:
     StructGetId,
     StructSetId,
     ArrayNewId,
-    ArrayNewSegId,
-    ArrayInitId,
+    ArrayNewDataId,
+    ArrayNewElemId,
+    ArrayNewFixedId,
     ArrayGetId,
     ArraySetId,
     ArrayLenId,
     ArrayCopyId,
+    ArrayFillId,
+    ArrayInitDataId,
+    ArrayInitElemId,
     RefAsId,
     StringNewId,
     StringConstId,
@@ -736,6 +743,8 @@ public:
     StringIterMoveId,
     StringSliceWTFId,
     StringSliceIterId,
+    ContNewId,
+    ResumeId,
     NumExpressionIds
   };
   Id _id;
@@ -821,23 +830,21 @@ public:
   Name name;
   ExpressionList list;
 
-  // set the type purely based on its contents. this scans the block, so it is
-  // not fast.
-  void finalize();
-
-  // set the type given you know its type, which is the case when parsing
-  // s-expression or binary, as explicit types are given. the only additional
-  // work this does is to set the type to unreachable in the cases that is
-  // needed (which may require scanning the block)
-  void finalize(Type type_);
-
   enum Breakability { Unknown, HasBreak, NoBreak };
 
-  // set the type given you know its type, and you know if there is a break to
-  // this block. this avoids the need to scan the contents of the block in the
-  // case that it might be unreachable, so it is recommended if you already know
-  // the type and breakability anyhow.
-  void finalize(Type type_, Breakability breakability);
+  // If type_ is not given, set the type purely based on its contents. this
+  // scans the block, so it is not fast.
+  // If type_ is given, set the type given you know its type, which is the case
+  // when parsing s-expression or binary, as explicit types are given. the only
+  // additional work this does is to set the type to unreachable in the cases
+  // that is needed (which may require scanning the block)
+  //
+  // If breakability is given, you know if there is a break to this block. this
+  // avoids the need to scan the contents of the block in the case that it might
+  // be unreachable, so it is recommended if you already know the type and
+  // breakability anyhow.
+  void finalize(std::optional<Type> type_ = std::nullopt,
+                Breakability breakability = Unknown);
 };
 
 class If : public SpecificExpression<Expression::IfId> {
@@ -849,14 +856,12 @@ public:
   Expression* ifTrue;
   Expression* ifFalse;
 
-  // set the type given you know its type, which is the case when parsing
-  // s-expression or binary, as explicit types are given. the only additional
-  // work this does is to set the type to unreachable in the cases that is
-  // needed.
-  void finalize(Type type_);
-
-  // set the type purely based on its contents.
-  void finalize();
+  // If type_ is not given, set the type purely based on its contents.
+  // If type_ is given, set the type given you know its type, which is the case
+  // when parsing s-expression or binary, as explicit types are given. the only
+  // additional work this does is to set the type to unreachable in the cases
+  // that is needed.
+  void finalize(std::optional<Type> type_ = std::nullopt);
 };
 
 class Loop : public SpecificExpression<Expression::LoopId> {
@@ -867,14 +872,12 @@ public:
   Name name;
   Expression* body;
 
-  // set the type given you know its type, which is the case when parsing
-  // s-expression or binary, as explicit types are given. the only additional
-  // work this does is to set the type to unreachable in the cases that is
-  // needed.
-  void finalize(Type type_);
-
-  // set the type purely based on its contents.
-  void finalize();
+  // If type_ is not given, set the type purely based on its contents.
+  // If type_ is given, set the type given you know its type, which is the case
+  // when parsing s-expression or binary, as explicit types are given. the only
+  // additional work this does is to set the type to unreachable in the cases
+  // that is needed.
+  void finalize(std::optional<Type> type_ = std::nullopt);
 };
 
 class Break : public SpecificExpression<Expression::BreakId> {
@@ -1176,7 +1179,7 @@ public:
   MemoryInit() = default;
   MemoryInit(MixedArena& allocator) : MemoryInit() {}
 
-  Index segment;
+  Name segment;
   Expression* dest;
   Expression* offset;
   Expression* size;
@@ -1190,7 +1193,7 @@ public:
   DataDrop() = default;
   DataDrop(MixedArena& allocator) : DataDrop() {}
 
-  Index segment;
+  Name segment;
 
   void finalize();
 };
@@ -1346,6 +1349,7 @@ public:
 
 class RefIsNull : public SpecificExpression<Expression::RefIsNullId> {
 public:
+  RefIsNull() = default;
   RefIsNull(MixedArena& allocator) {}
 
   Expression* value;
@@ -1365,6 +1369,7 @@ public:
 
 class RefEq : public SpecificExpression<Expression::RefEqId> {
 public:
+  RefEq() = default;
   RefEq(MixedArena& allocator) {}
 
   Expression* left;
@@ -1375,6 +1380,7 @@ public:
 
 class TableGet : public SpecificExpression<Expression::TableGetId> {
 public:
+  TableGet() = default;
   TableGet(MixedArena& allocator) {}
 
   Name table;
@@ -1386,6 +1392,7 @@ public:
 
 class TableSet : public SpecificExpression<Expression::TableSetId> {
 public:
+  TableSet() = default;
   TableSet(MixedArena& allocator) {}
 
   Name table;
@@ -1418,6 +1425,34 @@ public:
   void finalize();
 };
 
+class TableFill : public SpecificExpression<Expression::TableFillId> {
+public:
+  TableFill() = default;
+  TableFill(MixedArena& allocator) : TableFill() {}
+
+  Name table;
+  Expression* dest;
+  Expression* value;
+  Expression* size;
+
+  void finalize();
+};
+
+class TableCopy : public SpecificExpression<Expression::TableCopyId> {
+public:
+  TableCopy() = default;
+  TableCopy(MixedArena& allocator) : TableCopy() {}
+
+  Expression* dest;
+  Expression* source;
+  Expression* size;
+  Name destTable;
+  Name sourceTable;
+
+  void finalize();
+};
+
+// 'try' from the old (Phase 3) EH proposal
 class Try : public SpecificExpression<Expression::TryId> {
 public:
   Try(MixedArena& allocator) : catchTags(allocator), catchBodies(allocator) {}
@@ -1433,8 +1468,36 @@ public:
   }
   bool isCatch() const { return !catchBodies.empty(); }
   bool isDelegate() const { return delegateTarget.is(); }
-  void finalize();
-  void finalize(Type type_);
+  void finalize(std::optional<Type> type_ = std::nullopt);
+};
+
+// 'try_table' from the new EH proposal
+class TryTable : public SpecificExpression<Expression::TryTableId> {
+public:
+  TryTable(MixedArena& allocator)
+    : catchTags(allocator), catchDests(allocator), catchRefs(allocator),
+      sentTypes(allocator) {}
+
+  Expression* body;
+
+  // Tag names. Empty names (Name()) for catch_all and catch_all_ref
+  ArenaVector<Name> catchTags;
+  // catches' destination blocks
+  ArenaVector<Name> catchDests;
+  // true for catch_ref and catch_all_ref
+  ArenaVector<bool> catchRefs;
+
+  bool hasCatchAll() const;
+
+  // When 'Module*' parameter is given, we cache catch tags' types into
+  // 'sentTypes' array, so that the types can be accessed in other analyses
+  // without accessing the module.
+  void finalize(std::optional<Type> type_ = std::nullopt,
+                Module* wasm = nullptr);
+
+  // Caches tags' types in the catch clauses in order not to query the module
+  // every time we query the sent types
+  ArenaVector<Type> sentTypes;
 };
 
 class Throw : public SpecificExpression<Expression::ThrowId> {
@@ -1447,11 +1510,23 @@ public:
   void finalize();
 };
 
+// 'rethrow' from the old (Phase 3) EH proposal
 class Rethrow : public SpecificExpression<Expression::RethrowId> {
 public:
   Rethrow(MixedArena& allocator) {}
 
   Name target;
+
+  void finalize();
+};
+
+// 'throw_ref' from the new EH proposal
+class ThrowRef : public SpecificExpression<Expression::ThrowRefId> {
+public:
+  ThrowRef() = default;
+  ThrowRef(MixedArena& allocator) {}
+
+  Expression* exnref;
 
   void finalize();
 };
@@ -1467,6 +1542,7 @@ public:
 
 class TupleExtract : public SpecificExpression<Expression::TupleExtractId> {
 public:
+  TupleExtract() = default;
   TupleExtract(MixedArena& allocator) {}
 
   Expression* tuple;
@@ -1475,9 +1551,10 @@ public:
   void finalize();
 };
 
-class I31New : public SpecificExpression<Expression::I31NewId> {
+class RefI31 : public SpecificExpression<Expression::RefI31Id> {
 public:
-  I31New(MixedArena& allocator) {}
+  RefI31() = default;
+  RefI31(MixedArena& allocator) {}
 
   Expression* value;
 
@@ -1486,6 +1563,7 @@ public:
 
 class I31Get : public SpecificExpression<Expression::I31GetId> {
 public:
+  I31Get() = default;
   I31Get(MixedArena& allocator) {}
 
   Expression* i31;
@@ -1502,11 +1580,11 @@ public:
   bool isReturn = false;
 
   void finalize();
-  void finalize(Type type_);
 };
 
 class RefTest : public SpecificExpression<Expression::RefTestId> {
 public:
+  RefTest() = default;
   RefTest(MixedArena& allocator) {}
 
   Expression* ref;
@@ -1520,14 +1598,10 @@ public:
 
 class RefCast : public SpecificExpression<Expression::RefCastId> {
 public:
+  RefCast() = default;
   RefCast(MixedArena& allocator) {}
 
   Expression* ref;
-
-  // Support the unsafe `ref.cast_nop_static` to enable precise cast overhead
-  // measurements.
-  enum Safety { Safe, Unsafe };
-  Safety safety = Safe;
 
   void finalize();
 
@@ -1536,6 +1610,7 @@ public:
 
 class BrOn : public SpecificExpression<Expression::BrOnId> {
 public:
+  BrOn() = default;
   BrOn(MixedArena& allocator) {}
 
   BrOnOp op;
@@ -1567,6 +1642,7 @@ public:
 
 class StructGet : public SpecificExpression<Expression::StructGetId> {
 public:
+  StructGet() = default;
   StructGet(MixedArena& allocator) {}
 
   Index index;
@@ -1579,6 +1655,7 @@ public:
 
 class StructSet : public SpecificExpression<Expression::StructSetId> {
 public:
+  StructSet() = default;
   StructSet(MixedArena& allocator) {}
 
   Index index;
@@ -1590,6 +1667,7 @@ public:
 
 class ArrayNew : public SpecificExpression<Expression::ArrayNewId> {
 public:
+  ArrayNew() = default;
   ArrayNew(MixedArena& allocator) {}
 
   // If set, then the initial value is assigned to all entries in the array. If
@@ -1603,21 +1681,33 @@ public:
   void finalize();
 };
 
-class ArrayNewSeg : public SpecificExpression<Expression::ArrayNewSegId> {
+class ArrayNewData : public SpecificExpression<Expression::ArrayNewDataId> {
 public:
-  ArrayNewSeg(MixedArena& allocator) {}
+  ArrayNewData() = default;
+  ArrayNewData(MixedArena& allocator) {}
 
-  ArrayNewSegOp op;
-  Index segment;
+  Name segment;
   Expression* offset;
   Expression* size;
 
   void finalize();
 };
 
-class ArrayInit : public SpecificExpression<Expression::ArrayInitId> {
+class ArrayNewElem : public SpecificExpression<Expression::ArrayNewElemId> {
 public:
-  ArrayInit(MixedArena& allocator) : values(allocator) {}
+  ArrayNewElem() = default;
+  ArrayNewElem(MixedArena& allocator) {}
+
+  Name segment;
+  Expression* offset;
+  Expression* size;
+
+  void finalize();
+};
+
+class ArrayNewFixed : public SpecificExpression<Expression::ArrayNewFixedId> {
+public:
+  ArrayNewFixed(MixedArena& allocator) : values(allocator) {}
 
   ExpressionList values;
 
@@ -1626,6 +1716,7 @@ public:
 
 class ArrayGet : public SpecificExpression<Expression::ArrayGetId> {
 public:
+  ArrayGet() = default;
   ArrayGet(MixedArena& allocator) {}
 
   Expression* ref;
@@ -1638,6 +1729,7 @@ public:
 
 class ArraySet : public SpecificExpression<Expression::ArraySetId> {
 public:
+  ArraySet() = default;
   ArraySet(MixedArena& allocator) {}
 
   Expression* ref;
@@ -1649,6 +1741,7 @@ public:
 
 class ArrayLen : public SpecificExpression<Expression::ArrayLenId> {
 public:
+  ArrayLen() = default;
   ArrayLen(MixedArena& allocator) {}
 
   Expression* ref;
@@ -1658,6 +1751,7 @@ public:
 
 class ArrayCopy : public SpecificExpression<Expression::ArrayCopyId> {
 public:
+  ArrayCopy() = default;
   ArrayCopy(MixedArena& allocator) {}
 
   Expression* destRef;
@@ -1669,8 +1763,50 @@ public:
   void finalize();
 };
 
+class ArrayFill : public SpecificExpression<Expression::ArrayFillId> {
+public:
+  ArrayFill() = default;
+  ArrayFill(MixedArena& allocator) {}
+
+  Expression* ref;
+  Expression* index;
+  Expression* value;
+  Expression* size;
+
+  void finalize();
+};
+
+class ArrayInitData : public SpecificExpression<Expression::ArrayInitDataId> {
+public:
+  ArrayInitData() = default;
+  ArrayInitData(MixedArena& allocator) {}
+
+  Name segment;
+  Expression* ref;
+  Expression* index;
+  Expression* offset;
+  Expression* size;
+
+  void finalize();
+};
+
+class ArrayInitElem : public SpecificExpression<Expression::ArrayInitElemId> {
+public:
+  ArrayInitElem() = default;
+  ArrayInitElem(MixedArena& allocator) {}
+
+  Name segment;
+  Expression* ref;
+  Expression* index;
+  Expression* offset;
+  Expression* size;
+
+  void finalize();
+};
+
 class RefAs : public SpecificExpression<Expression::RefAsId> {
 public:
+  RefAs() = default;
   RefAs(MixedArena& allocator) {}
 
   RefAsOp op;
@@ -1682,6 +1818,7 @@ public:
 
 class StringNew : public SpecificExpression<Expression::StringNewId> {
 public:
+  StringNew() = default;
   StringNew(MixedArena& allocator) {}
 
   StringNewOp op;
@@ -1706,6 +1843,7 @@ public:
 
 class StringConst : public SpecificExpression<Expression::StringConstId> {
 public:
+  StringConst() = default;
   StringConst(MixedArena& allocator) {}
 
   // TODO: Use a different type to allow null bytes in the middle -
@@ -1718,6 +1856,7 @@ public:
 
 class StringMeasure : public SpecificExpression<Expression::StringMeasureId> {
 public:
+  StringMeasure() = default;
   StringMeasure(MixedArena& allocator) {}
 
   StringMeasureOp op;
@@ -1729,6 +1868,7 @@ public:
 
 class StringEncode : public SpecificExpression<Expression::StringEncodeId> {
 public:
+  StringEncode() = default;
   StringEncode(MixedArena& allocator) {}
 
   StringEncodeOp op;
@@ -1748,6 +1888,7 @@ public:
 
 class StringConcat : public SpecificExpression<Expression::StringConcatId> {
 public:
+  StringConcat() = default;
   StringConcat(MixedArena& allocator) {}
 
   Expression* left;
@@ -1758,6 +1899,7 @@ public:
 
 class StringEq : public SpecificExpression<Expression::StringEqId> {
 public:
+  StringEq() = default;
   StringEq(MixedArena& allocator) {}
 
   StringEqOp op;
@@ -1770,6 +1912,7 @@ public:
 
 class StringAs : public SpecificExpression<Expression::StringAsId> {
 public:
+  StringAs() = default;
   StringAs(MixedArena& allocator) {}
 
   StringAsOp op;
@@ -1782,6 +1925,7 @@ public:
 class StringWTF8Advance
   : public SpecificExpression<Expression::StringWTF8AdvanceId> {
 public:
+  StringWTF8Advance() = default;
   StringWTF8Advance(MixedArena& allocator) {}
 
   Expression* ref;
@@ -1793,6 +1937,7 @@ public:
 
 class StringWTF16Get : public SpecificExpression<Expression::StringWTF16GetId> {
 public:
+  StringWTF16Get() = default;
   StringWTF16Get(MixedArena& allocator) {}
 
   Expression* ref;
@@ -1803,6 +1948,7 @@ public:
 
 class StringIterNext : public SpecificExpression<Expression::StringIterNextId> {
 public:
+  StringIterNext() = default;
   StringIterNext(MixedArena& allocator) {}
 
   Expression* ref;
@@ -1812,6 +1958,7 @@ public:
 
 class StringIterMove : public SpecificExpression<Expression::StringIterMoveId> {
 public:
+  StringIterMove() = default;
   StringIterMove(MixedArena& allocator) {}
 
   // Whether the movement is to advance or reverse.
@@ -1827,6 +1974,7 @@ public:
 
 class StringSliceWTF : public SpecificExpression<Expression::StringSliceWTFId> {
 public:
+  StringSliceWTF() = default;
   StringSliceWTF(MixedArena& allocator) {}
 
   StringSliceWTFOp op;
@@ -1841,12 +1989,50 @@ public:
 class StringSliceIter
   : public SpecificExpression<Expression::StringSliceIterId> {
 public:
+  StringSliceIter() = default;
   StringSliceIter(MixedArena& allocator) {}
 
   Expression* ref;
   Expression* num;
 
   void finalize();
+};
+
+class ContNew : public SpecificExpression<Expression::ContNewId> {
+public:
+  ContNew() = default;
+  ContNew(MixedArena& allocator) {}
+
+  HeapType contType;
+  Expression* func;
+
+  void finalize();
+};
+
+class Resume : public SpecificExpression<Expression::ResumeId> {
+public:
+  Resume(MixedArena& allocator)
+    : handlerTags(allocator), handlerBlocks(allocator), operands(allocator),
+      sentTypes(allocator) {}
+
+  HeapType contType;
+  ArenaVector<Name> handlerTags;
+  ArenaVector<Name> handlerBlocks;
+
+  ExpressionList operands;
+  Expression* cont;
+
+  // When 'Module*' parameter is given, we populate the 'sentTypes' array, so
+  // that the types can be accessed in other analyses without accessing the
+  // module.
+  void finalize(Module* wasm = nullptr);
+
+  // sentTypes[i] contains the type of the values that will be sent to the block
+  // handlerBlocks[i] if suspending with tag handlerTags[i]. Not part of the
+  // instruction's syntax, but stored here for subsequent use.
+  // This information is cached here in order not to query the module
+  // every time we query the sent types.
+  ArenaVector<Type> sentTypes;
 };
 
 // Globals
@@ -1982,6 +2168,12 @@ public:
     delimiterLocations;
   BinaryLocations::FunctionLocations funcLocation;
 
+  // Inlining metadata: whether to disallow full and/or partial inlining (for
+  // details on what those mean, see Inlining.cpp).
+  bool noFullInline = false;
+  bool noPartialInline = false;
+
+  // Methods
   Signature getSig() { return type.getSignature(); }
   Type getParams() { return getSig().params; }
   Type getResults() { return getSig().results; }
@@ -2018,6 +2210,21 @@ enum class ExternalKind {
   Memory = 2,
   Global = 3,
   Tag = 4,
+  Invalid = -1
+};
+
+// The kind of a top-level module item. (This overlaps with ExternalKind, but
+// C++ has no good way to extend an enum.) All such items are referred to by
+// name in the IR (that is, the IR is relocatable), and so they are subclasses
+// of the Named class.
+enum class ModuleItemKind {
+  Function = 0,
+  Table = 1,
+  Memory = 2,
+  Global = 3,
+  Tag = 4,
+  DataSegment = 5,
+  ElementSegment = 6,
   Invalid = -1
 };
 
@@ -2205,6 +2412,13 @@ public:
   Global* getGlobalOrNull(Name name);
   Tag* getTagOrNull(Name name);
 
+  // get* methods that are generic over the kind, that is, items are identified
+  // by their kind and their name. Otherwise, they are similar to the above
+  // get* methods. These return items that can be imports.
+  // TODO: Add methods for things that cannot be imports (segments).
+  Importable* getImport(ModuleItemKind kind, Name name);
+  Importable* getImportOrNull(ModuleItemKind kind, Name name);
+
   Export* addExport(Export* curr);
   Function* addFunction(Function* curr);
   Global* addGlobal(Global* curr);
@@ -2239,13 +2453,22 @@ public:
   void removeGlobals(std::function<bool(Global*)> pred);
   void removeTags(std::function<bool(Tag*)> pred);
 
+  void updateFunctionsMap();
   void updateDataSegmentsMap();
   void updateMaps();
 
   void clearDebugInfo();
 };
 
+// Utility for printing an expression with named types.
 using ModuleExpression = std::pair<Module&, Expression*>;
+
+// Utility for printing only the top level of an expression. Named types will be
+// used if `module` is non-null.
+struct ShallowExpression {
+  Expression* expr;
+  Module* module = nullptr;
+};
 
 } // namespace wasm
 
@@ -2257,8 +2480,10 @@ template<> struct hash<wasm::Address> {
 };
 
 std::ostream& operator<<(std::ostream& o, wasm::Module& module);
+std::ostream& operator<<(std::ostream& o, wasm::Function& func);
 std::ostream& operator<<(std::ostream& o, wasm::Expression& expression);
 std::ostream& operator<<(std::ostream& o, wasm::ModuleExpression pair);
+std::ostream& operator<<(std::ostream& o, wasm::ShallowExpression expression);
 std::ostream& operator<<(std::ostream& o, wasm::StackInst& inst);
 std::ostream& operator<<(std::ostream& o, wasm::StackIR& ir);
 

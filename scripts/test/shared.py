@@ -96,8 +96,8 @@ def parse_args(args):
     # TODO Allow each script to inherit the default set of options and add its
     # own custom options on top of that
     parser.add_argument(
-        '--auto-initial-contents', dest='auto_initial_contents',
-        action='store_true', default=False,
+        '--no-auto-initial-contents', dest='auto_initial_contents',
+        action='store_false', default=True,
         help='Select important initial contents automaticaly in fuzzer. '
              'Default: disabled.')
 
@@ -192,9 +192,6 @@ def which(program):
                     return exe_file + '.bat'
 
 
-WATERFALL_BUILD_DIR = os.path.join(options.binaryen_test, 'wasm-install')
-BIN_DIR = os.path.abspath(os.path.join(WATERFALL_BUILD_DIR, 'wasm-install', 'bin'))
-
 NATIVECC = (os.environ.get('CC') or which('mingw32-gcc') or
             which('gcc') or which('clang'))
 NATIVEXX = (os.environ.get('CXX') or which('mingw32-g++') or
@@ -258,13 +255,13 @@ def has_shell_timeout():
 # See https://github.com/v8/v8/blob/master/src/wasm/wasm-feature-flags.h
 V8_OPTS = [
     '--wasm-staging',
-    '--experimental-wasm-eh',
     '--experimental-wasm-compilation-hints',
     '--experimental-wasm-gc',
     '--experimental-wasm-typed-funcref',
     '--experimental-wasm-memory64',
     '--experimental-wasm-extended-const',
-    '--experimental-wasm-nn-locals',
+    '--experimental-wasm-stringref',
+    '--wasm-final-types',
 ]
 
 # external tools
@@ -387,6 +384,7 @@ def get_tests(test_dir, extensions=[], recursive=False):
         tests += glob.glob(os.path.join(test_dir, star + ext), recursive=True)
     if options.test_name_filter:
         tests = fnmatch.filter(tests, options.test_name_filter)
+    tests = [item for item in tests if os.path.isfile(item)]
     return sorted(tests)
 
 
@@ -482,7 +480,7 @@ def binary_format_check(wast, verify_final_result=True, wasm_as_args=['-g'],
     assert os.path.exists('ab.wast')
 
     # make sure it is a valid wast
-    cmd = WASM_OPT + ['ab.wast', '-all']
+    cmd = WASM_OPT + ['ab.wast', '-all', '-q']
     print('            ', ' '.join(cmd))
     subprocess.check_call(cmd, stdout=subprocess.PIPE)
 

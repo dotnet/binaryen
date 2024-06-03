@@ -29,6 +29,12 @@
 // across modules, we still want to legalize dynCalls so JS can call into the
 // tables even to a signature that is not legal.
 //
+// Another variation also "prunes" imports and exports that we cannot yet
+// legalize, like exports and imports with SIMD or multivalue. Until we write
+// the logic to legalize them, removing those imports/exports still allows us to
+// fuzz all the legal imports/exports. (Note that multivalue is supported in
+// exports in newer VMs - node 16+ - so that part is only needed for older VMs.)
+//
 
 #include "asmjs/shared-constants.h"
 #include "ir/element-utils.h"
@@ -43,6 +49,8 @@
 
 namespace wasm {
 
+namespace {
+
 // These are aliases for getTempRet0/setTempRet0 which emscripten defines in
 // compiler-rt and exports under these names.
 static Name GET_TEMP_RET_EXPORT("__get_temp_ret");
@@ -54,6 +62,9 @@ static Name GET_TEMP_RET_IMPORT("getTempRet0");
 static Name SET_TEMP_RET_IMPORT("setTempRet0");
 
 struct LegalizeJSInterface : public Pass {
+  // Adds calls to new imports.
+  bool addsEffects() override { return true; }
+
   bool full;
 
   LegalizeJSInterface(bool full) : full(full) {}
@@ -287,11 +298,11 @@ private:
   // JS import
   Name makeLegalStubForCalledImport(Function* im, Module* module) {
     Builder builder(*module);
-    auto legalIm = make_unique<Function>();
+    auto legalIm = std::make_unique<Function>();
     legalIm->name = Name(std::string("legalimport$") + im->name.toString());
     legalIm->module = im->module;
     legalIm->base = im->base;
-    auto stub = make_unique<Function>();
+    auto stub = std::make_unique<Function>();
     stub->name = Name(std::string("legalfunc$") + im->name.toString());
     stub->type = im->type;
 
@@ -355,10 +366,88 @@ private:
   }
 };
 
+struct LegalizeAndPruneJSInterface : public LegalizeJSInterface {
+  // Legalize fully (true) and add pruning on top.
+  LegalizeAndPruneJSInterface() : LegalizeJSInterface(true) {}
+
+  void run(Module* module) override {
+    LegalizeJSInterface::run(module);
+
+    prune(module);
+  }
+
+  void prune(Module* module) {
+    // For each function name, the exported id it is exported with. For
+    // example,
+    //
+    //   (func $foo (export "bar")
+    //
+    // Would have exportedFunctions["foo"] = "bar";
+    std::unordered_map<Name, Name> exportedFunctions;
+    for (auto& exp : module->exports) {
+      if (exp->kind == ExternalKind::Function) {
+        exportedFunctions[exp->value] = exp->name;
+      }
+    }
+
+    for (auto& func : module->functions) {
+      // If the function is neither exported nor imported, no problem.
+      auto imported = func->imported();
+      auto exported = exportedFunctions.count(func->name);
+      if (!imported && !exported) {
+        continue;
+      }
+
+      // The params are allowed to be multivalue, but not the results. Otherwise
+      // look for SIMD.
+      auto sig = func->type.getSignature();
+      auto illegal = isIllegal(sig.results);
+      illegal =
+        illegal || std::any_of(sig.params.begin(),
+                               sig.params.end(),
+                               [&](const Type& t) { return isIllegal(t); });
+      if (!illegal) {
+        continue;
+      }
+
+      // Prune an import by implementing it in a trivial manner.
+      if (imported) {
+        func->module = func->base = Name();
+
+        Builder builder(*module);
+        if (sig.results == Type::none) {
+          func->body = builder.makeNop();
+        } else {
+          func->body =
+            builder.makeConstantExpression(Literal::makeZeros(sig.results));
+        }
+      }
+
+      // Prune an export by just removing it.
+      if (exported) {
+        module->removeExport(exportedFunctions[func->name]);
+      }
+    }
+
+    // TODO: globals etc.
+  }
+
+  bool isIllegal(Type type) {
+    auto features = type.getFeatures();
+    return features.hasSIMD() || features.hasMultivalue();
+  }
+};
+
+} // anonymous namespace
+
 Pass* createLegalizeJSInterfacePass() { return new LegalizeJSInterface(true); }
 
 Pass* createLegalizeJSInterfaceMinimallyPass() {
   return new LegalizeJSInterface(false);
+}
+
+Pass* createLegalizeAndPruneJSInterfacePass() {
+  return new LegalizeAndPruneJSInterface();
 }
 
 } // namespace wasm

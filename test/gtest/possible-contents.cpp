@@ -66,11 +66,6 @@ static std::unique_ptr<Module> parse(std::string module) {
 // that.
 class PossibleContentsTest : public testing::Test {
 protected:
-  void SetUp() override {
-    // Use nominal typing to test struct types.
-    wasm::setTypeSystem(TypeSystem::Nominal);
-  }
-
   Type anyref = Type(HeapType::any, Nullable);
   Type funcref = Type(HeapType::func, Nullable);
   Type i31ref = Type(HeapType::i31, Nullable);
@@ -268,6 +263,8 @@ TEST_F(PossibleContentsTest, TestCombinations) {
   assertCombination(anyGlobal, i31Null, coneAnyref);
 }
 
+static PassOptions options;
+
 TEST_F(PossibleContentsTest, TestOracleMinimal) {
   // A minimal test of the public API of PossibleTypesOracle. See the lit test
   // for coverage of all the internals (using lit makes the result more
@@ -278,7 +275,7 @@ TEST_F(PossibleContentsTest, TestOracleMinimal) {
       (global $something i32 (i32.const 42))
     )
   )");
-  ContentOracle oracle(*wasm);
+  ContentOracle oracle(*wasm, options);
 
   // This will be a null constant.
   EXPECT_TRUE(oracle.getContents(GlobalLocation{"null"}).isNull());
@@ -330,7 +327,7 @@ TEST_F(PossibleContentsTest, TestIntersection) {
   assertHaveIntersection(exactI32, exactI32);
   assertHaveIntersection(i32Zero, i32Zero);
   assertHaveIntersection(exactFuncSignatureType, exactFuncSignatureType);
-  assertHaveIntersection(i32Zero, i32One); // TODO: this could be inferred false
+  assertLackIntersection(i32Zero, i32One);
 
   // Exact types only differing by nullability can intersect (not on the null,
   // but on something else).
@@ -431,12 +428,12 @@ TEST_F(PossibleContentsTest, TestIntersectWithCombinations) {
           assertHaveIntersection(normalizedCone, item);
         }
 
-        // Test intersectWithFullCone() method, which is supported with a full
-        // cone type. In that case we can test that the intersection of A with
-        // A + B is simply A.
+        // Test intersect() method, which is supported with a full cone type.
+        // In that case we can test that the intersection of A with A + B is
+        // simply A.
         if (combination.isFullConeType()) {
           auto intersection = item;
-          intersection.intersectWithFullCone(combination);
+          intersection.intersect(combination);
           EXPECT_EQ(intersection, item);
 #if BINARYEN_TEST_DEBUG
           if (intersection != item) {
@@ -527,9 +524,8 @@ void assertIntersection(PossibleContents a,
                         PossibleContents b,
                         PossibleContents result) {
   auto intersection = a;
-  intersection.intersectWithFullCone(b);
+  intersection.intersect(b);
   EXPECT_EQ(intersection, result);
-
   EXPECT_EQ(PossibleContents::haveIntersection(a, b), !result.isNone());
 }
 
@@ -542,14 +538,12 @@ TEST_F(PossibleContentsTest, TestStructCones) {
             D
   */
   TypeBuilder builder(5);
-  builder.setHeapType(0, Struct(FieldList{}));
-  builder.setHeapType(1, Struct(FieldList{}));
-  builder.setHeapType(2, Struct(FieldList{}));
-  builder.setHeapType(3, Struct(FieldList{}));
-  builder.setHeapType(4, Struct(FieldList{}));
-  builder.setSubType(1, builder.getTempHeapType(0));
-  builder.setSubType(2, builder.getTempHeapType(0));
-  builder.setSubType(3, builder.getTempHeapType(2));
+  builder.createRecGroup(0, 5);
+  builder[0].setOpen() = Struct(FieldList{});
+  builder[1].setOpen().subTypeOf(builder[0]) = Struct(FieldList{});
+  builder[2].setOpen().subTypeOf(builder[0]) = Struct(FieldList{});
+  builder[3].setOpen().subTypeOf(builder[2]) = Struct(FieldList{});
+  builder[4].setOpen() = Struct(FieldList{});
   auto result = builder.build();
   ASSERT_TRUE(result);
   auto types = *result;
@@ -558,9 +552,10 @@ TEST_F(PossibleContentsTest, TestStructCones) {
   auto C = types[2];
   auto D = types[3];
   auto E = types[4];
-  ASSERT_TRUE(B.getSuperType() == A);
-  ASSERT_TRUE(C.getSuperType() == A);
-  ASSERT_TRUE(D.getSuperType() == C);
+  ASSERT_FALSE(A.getDeclaredSuperType());
+  ASSERT_EQ(B.getDeclaredSuperType(), A);
+  ASSERT_EQ(C.getDeclaredSuperType(), A);
+  ASSERT_EQ(D.getDeclaredSuperType(), C);
 
   auto nullA = Type(A, Nullable);
   auto nullB = Type(B, Nullable);
@@ -787,22 +782,47 @@ TEST_F(PossibleContentsTest, TestStructCones) {
                      PossibleContents::fullConeType(nnD),
                      none);
 
-  // Globals stay as globals if their type is in the cone. Otherwise, they lose
-  // the global info and we compute a normal cone intersection on them. The
-  // same for literals.
+  // Globals stay as globals, but their type might get refined.
   assertIntersection(
     funcGlobal, PossibleContents::fullConeType(funcref), funcGlobal);
 
+  // No global filtering.
   auto signature = Type(Signature(Type::none, Type::none), Nullable);
   assertIntersection(
     nonNullFunc, PossibleContents::fullConeType(signature), nonNullFunc);
+
+  // Filter a global to a more specific type.
   assertIntersection(funcGlobal,
                      PossibleContents::fullConeType(signature),
-                     PossibleContents::fullConeType(signature));
+                     PossibleContents::global("funcGlobal", signature));
+
+  // Filter a global's nullability only.
+  auto nonNullFuncRef = Type(HeapType::func, NonNullable);
+  assertIntersection(funcGlobal,
+                     PossibleContents::fullConeType(nonNullFuncRef),
+                     nonNullFuncGlobal);
+
+  // Incompatible global and cone types have no intersection.
+  assertIntersection(funcGlobal, PossibleContents::fullConeType(nullE), none);
 
   // Incompatible hierarchies have no intersection.
   assertIntersection(
     literalNullA, PossibleContents::fullConeType(funcref), none);
+
+  // Computing intersections is also supported with a Literal.
+  assertIntersection(i32Zero, i32Zero, i32Zero);
+  assertIntersection(i32One, i32Zero, none);
+  assertIntersection(i32Global1, i32Zero, i32Zero);
+  assertIntersection(funcGlobal, i32Zero, none);
+  assertIntersection(
+    PossibleContents::fullConeType(Type::i32), i32Zero, i32Zero);
+  assertIntersection(PossibleContents::fullConeType(Type::f64), i32Zero, none);
+
+  // Computing intersections is also supported with empty contents.
+  assertIntersection(none, none, none);
+  assertIntersection(literalNullA, none, none);
+  assertIntersection(funcGlobal, none, none);
+  assertIntersection(PossibleContents::fullConeType(signature), none, none);
 
   // Subcontents. This API only supports the case where one of the inputs is a
   // full cone type.
@@ -876,10 +896,10 @@ TEST_F(PossibleContentsTest, TestOracleManyTypes) {
   // we'll just report that more than one is possible, a cone of data.
   auto wasm = parse(R"(
     (module
-      (type $A (struct_subtype (field i32) data))
-      (type $B (struct_subtype (field i64) data))
-      (type $C (struct_subtype (field f32) data))
-      (type $D (struct_subtype (field f64) data))
+      (type $A (sub (struct (field i32))))
+      (type $B (sub (struct (field i64))))
+      (type $C (sub (struct (field f32))))
+      (type $D (sub (struct (field f64))))
       (func $foo (result (ref any))
         (select (result (ref any))
           (select (result (ref any))
@@ -897,7 +917,7 @@ TEST_F(PossibleContentsTest, TestOracleManyTypes) {
       )
     )
   )");
-  ContentOracle oracle(*wasm);
+  ContentOracle oracle(*wasm, options);
   // The body's contents must be a cone of data with depth 1.
   auto bodyContents =
     oracle.getContents(ResultLocation{wasm->getFunction("foo"), 0});
@@ -911,9 +931,9 @@ TEST_F(PossibleContentsTest, TestOracleNoFullCones) {
   // infinity).
   auto wasm = parse(R"(
     (module
-      (type $A (struct_subtype (field i32) data))
-      (type $B (struct_subtype (field i32) $A))
-      (type $C (struct_subtype (field i32) $B))
+      (type $A (sub (struct (field i32))))
+      (type $B (sub $A (struct (field i32))))
+      (type $C (sub $B (struct (field i32))))
       (func $foo (export "foo")
         ;; Note we must declare $C so that $B and $C have uses and are not
         ;; removed automatically from consideration.
@@ -923,7 +943,7 @@ TEST_F(PossibleContentsTest, TestOracleNoFullCones) {
       )
     )
   )");
-  ContentOracle oracle(*wasm);
+  ContentOracle oracle(*wasm, options);
   // The function is exported, and all we know about the parameter $a is that it
   // is some subtype of $A. This is normalized to depth 2 because that is the
   // actual depth of subtypes.

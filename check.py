@@ -82,7 +82,7 @@ def run_wasm_dis_tests():
 
         # also verify there are no validation errors
         def check():
-            cmd = shared.WASM_OPT + [t, '-all']
+            cmd = shared.WASM_OPT + [t, '-all', '-q']
             support.run_command(cmd)
 
         shared.with_pass_debug(check)
@@ -166,7 +166,7 @@ def run_wasm_reduce_tests():
     if 'fsanitize=thread' not in str(os.environ):
         print('\n[ checking wasm-reduce fuzz testcase ]\n')
         # TODO: re-enable multivalue once it is better optimized
-        support.run_command(shared.WASM_OPT + [os.path.join(shared.options.binaryen_test, 'signext.wast'), '-ttf', '-Os', '-o', 'a.wasm', '--detect-features', '--disable-multivalue'])
+        support.run_command(shared.WASM_OPT + [os.path.join(shared.options.binaryen_test, 'lit/basic/signext.wast'), '-ttf', '-Os', '-o', 'a.wasm', '--detect-features', '--disable-multivalue'])
         before = os.stat('a.wasm').st_size
         support.run_command(shared.WASM_REDUCE + ['a.wasm', '--command=%s b.wasm --fuzz-exec --detect-features' % shared.WASM_OPT[0], '-t', 'b.wasm', '-w', 'c.wasm'])
         after = os.stat('c.wasm').st_size
@@ -195,7 +195,7 @@ def run_spec_tests():
 
         def run_opt_test(wast):
             # check optimization validation
-            cmd = shared.WASM_OPT + [wast, '-O', '-all']
+            cmd = shared.WASM_OPT + [wast, '-O', '-all', '-q']
             support.run_command(cmd)
 
         def check_expected(actual, expected):

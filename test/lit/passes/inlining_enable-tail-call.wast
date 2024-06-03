@@ -6,11 +6,11 @@
 (module
   (table 1 1 funcref)
   (elem (i32.const 0) $tabled)
-  ;; CHECK:      (type $none_=>_none (func))
+  ;; CHECK:      (type $0 (func))
 
   ;; CHECK:      (table $0 1 1 funcref)
 
-  ;; CHECK:      (elem (i32.const 0) $tabled)
+  ;; CHECK:      (elem $0 (i32.const 0) $tabled)
 
   ;; CHECK:      (export "user" (func $user))
 
@@ -30,22 +30,22 @@
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (block
-  ;; CHECK-NEXT:   (block $__inlined_func$tabled
+  ;; CHECK-NEXT:   (block $__inlined_func$tabled$1
   ;; CHECK-NEXT:    (nop)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (block
-  ;; CHECK-NEXT:   (block $__inlined_func$multi
+  ;; CHECK-NEXT:   (block $__inlined_func$multi$2
   ;; CHECK-NEXT:    (nop)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (block
-  ;; CHECK-NEXT:   (block $__inlined_func$multi0
+  ;; CHECK-NEXT:   (block $__inlined_func$multi$3
   ;; CHECK-NEXT:    (nop)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (block
-  ;; CHECK-NEXT:   (block $__inlined_func$ok
+  ;; CHECK-NEXT:   (block $__inlined_func$ok$4
   ;; CHECK-NEXT:    (drop
   ;; CHECK-NEXT:     (i32.const 1)
   ;; CHECK-NEXT:    )
@@ -53,34 +53,34 @@
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (drop
   ;; CHECK-NEXT:   (block (result i32)
-  ;; CHECK-NEXT:    (block $__inlined_func$int (result i32)
+  ;; CHECK-NEXT:    (block $__inlined_func$int$5 (result i32)
   ;; CHECK-NEXT:     (i32.const 2)
   ;; CHECK-NEXT:    )
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (drop
   ;; CHECK-NEXT:   (block (result f64)
-  ;; CHECK-NEXT:    (block $__inlined_func$double (result f64)
+  ;; CHECK-NEXT:    (block $__inlined_func$double$6 (result f64)
   ;; CHECK-NEXT:     (f64.const 3.14159)
   ;; CHECK-NEXT:    )
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (local.set $x
   ;; CHECK-NEXT:   (block (result i32)
-  ;; CHECK-NEXT:    (block $__inlined_func$int2 (result i32)
+  ;; CHECK-NEXT:    (block $__inlined_func$int2$7 (result i32)
   ;; CHECK-NEXT:     (i32.const 112)
   ;; CHECK-NEXT:    )
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (local.set $y
   ;; CHECK-NEXT:   (block (result f64)
-  ;; CHECK-NEXT:    (block $__inlined_func$double2 (result f64)
+  ;; CHECK-NEXT:    (block $__inlined_func$double2$8 (result f64)
   ;; CHECK-NEXT:     (f64.const 113.14159)
   ;; CHECK-NEXT:    )
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (block
-  ;; CHECK-NEXT:   (block $__inlined_func$with-local
+  ;; CHECK-NEXT:   (block $__inlined_func$with-local$9
   ;; CHECK-NEXT:    (local.set $2
   ;; CHECK-NEXT:     (f32.const 0)
   ;; CHECK-NEXT:    )
@@ -90,7 +90,7 @@
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (block
-  ;; CHECK-NEXT:   (block $__inlined_func$with-local2
+  ;; CHECK-NEXT:   (block $__inlined_func$with-local2$10
   ;; CHECK-NEXT:    (local.set $3
   ;; CHECK-NEXT:     (i64.const 0)
   ;; CHECK-NEXT:    )
@@ -101,18 +101,18 @@
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (drop
   ;; CHECK-NEXT:   (block (result i32)
-  ;; CHECK-NEXT:    (block $__inlined_func$return (result i32)
-  ;; CHECK-NEXT:     (br $__inlined_func$return
+  ;; CHECK-NEXT:    (block $__inlined_func$return$11 (result i32)
+  ;; CHECK-NEXT:     (br $__inlined_func$return$11
   ;; CHECK-NEXT:      (i32.const 5)
   ;; CHECK-NEXT:     )
   ;; CHECK-NEXT:    )
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (block
-  ;; CHECK-NEXT:   (block $__inlined_func$multipass
+  ;; CHECK-NEXT:   (block $__inlined_func$multipass$12
   ;; CHECK-NEXT:    (block
   ;; CHECK-NEXT:     (block
-  ;; CHECK-NEXT:      (block $__inlined_func$multipass2
+  ;; CHECK-NEXT:      (block $__inlined_func$multipass2$15
   ;; CHECK-NEXT:       (drop
   ;; CHECK-NEXT:        (i32.const 6)
   ;; CHECK-NEXT:       )
@@ -122,7 +122,7 @@
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
   ;; CHECK-NEXT:  (block
-  ;; CHECK-NEXT:   (block $__inlined_func$param
+  ;; CHECK-NEXT:   (block $__inlined_func$param$13
   ;; CHECK-NEXT:    (local.set $4
   ;; CHECK-NEXT:     (f32.const 12.34000015258789)
   ;; CHECK-NEXT:    )
@@ -183,7 +183,7 @@
     (nop)
   )
   ;; CHECK:      (func $cycle1
-  ;; CHECK-NEXT:  (block $__inlined_func$cycle2
+  ;; CHECK-NEXT:  (block $__inlined_func$cycle2$14
   ;; CHECK-NEXT:   (block
   ;; CHECK-NEXT:    (call $cycle1)
   ;; CHECK-NEXT:   )
@@ -238,9 +238,9 @@
   )
 )
 (module
-  ;; CHECK:      (type $i32_=>_i32 (func (param i32) (result i32)))
+  ;; CHECK:      (type $0 (func (param i32) (result i32)))
 
-  ;; CHECK:      (type $none_=>_i32 (func (result i32)))
+  ;; CHECK:      (type $1 (func (result i32)))
 
   ;; CHECK:      (func $child (param $0 i32) (result i32)
   ;; CHECK-NEXT:  (i32.const 1234)
@@ -260,9 +260,9 @@
   )
 )
 (module
- ;; CHECK:      (type $f32_i32_=>_i32 (func (param f32 i32) (result i32)))
+ ;; CHECK:      (type $0 (func (param f32 i32) (result i32)))
 
- ;; CHECK:      (type $none_=>_none (func))
+ ;; CHECK:      (type $1 (func))
 
  ;; CHECK:      (global $hangLimit (mut i32) (i32.const 25))
  (global $hangLimit (mut i32) (i32.const 25))
@@ -294,8 +294,10 @@
  ;; CHECK-NEXT:     (i32.eqz
  ;; CHECK-NEXT:      (global.get $hangLimit)
  ;; CHECK-NEXT:     )
- ;; CHECK-NEXT:     (return
- ;; CHECK-NEXT:      (i32.const 54)
+ ;; CHECK-NEXT:     (then
+ ;; CHECK-NEXT:      (return
+ ;; CHECK-NEXT:       (i32.const 54)
+ ;; CHECK-NEXT:      )
  ;; CHECK-NEXT:     )
  ;; CHECK-NEXT:    )
  ;; CHECK-NEXT:    (global.set $hangLimit
@@ -308,27 +310,35 @@
  ;; CHECK-NEXT:   (i32.eqz
  ;; CHECK-NEXT:    (if (result i32)
  ;; CHECK-NEXT:     (i32.const 1)
- ;; CHECK-NEXT:     (if (result i32)
- ;; CHECK-NEXT:      (i32.eqz
- ;; CHECK-NEXT:       (block (result i32)
- ;; CHECK-NEXT:        (block $__inlined_func$func_3 (result i32)
- ;; CHECK-NEXT:         (local.set $8
- ;; CHECK-NEXT:          (i32.const 0)
- ;; CHECK-NEXT:         )
- ;; CHECK-NEXT:         (select
- ;; CHECK-NEXT:          (local.get $8)
- ;; CHECK-NEXT:          (local.tee $8
- ;; CHECK-NEXT:           (i32.const -1)
+ ;; CHECK-NEXT:     (then
+ ;; CHECK-NEXT:      (if (result i32)
+ ;; CHECK-NEXT:       (i32.eqz
+ ;; CHECK-NEXT:        (block (result i32)
+ ;; CHECK-NEXT:         (block $__inlined_func$func_3 (result i32)
+ ;; CHECK-NEXT:          (local.set $8
+ ;; CHECK-NEXT:           (i32.const 0)
  ;; CHECK-NEXT:          )
- ;; CHECK-NEXT:          (i32.const 1)
+ ;; CHECK-NEXT:          (select
+ ;; CHECK-NEXT:           (local.get $8)
+ ;; CHECK-NEXT:           (local.tee $8
+ ;; CHECK-NEXT:            (i32.const -1)
+ ;; CHECK-NEXT:           )
+ ;; CHECK-NEXT:           (i32.const 1)
+ ;; CHECK-NEXT:          )
  ;; CHECK-NEXT:         )
  ;; CHECK-NEXT:        )
  ;; CHECK-NEXT:       )
+ ;; CHECK-NEXT:       (then
+ ;; CHECK-NEXT:        (br $label$0)
+ ;; CHECK-NEXT:       )
+ ;; CHECK-NEXT:       (else
+ ;; CHECK-NEXT:        (i32.const 0)
+ ;; CHECK-NEXT:       )
  ;; CHECK-NEXT:      )
- ;; CHECK-NEXT:      (br $label$0)
- ;; CHECK-NEXT:      (i32.const 0)
  ;; CHECK-NEXT:     )
- ;; CHECK-NEXT:     (unreachable)
+ ;; CHECK-NEXT:     (else
+ ;; CHECK-NEXT:      (unreachable)
+ ;; CHECK-NEXT:     )
  ;; CHECK-NEXT:    )
  ;; CHECK-NEXT:   )
  ;; CHECK-NEXT:  )
@@ -346,8 +356,10 @@
      (i32.eqz
       (global.get $hangLimit)
      )
-     (return
-      (i32.const 54)
+     (then
+      (return
+       (i32.const 54)
+      )
      )
     )
     (global.set $hangLimit
@@ -360,14 +372,22 @@
    (i32.eqz
     (if (result i32)
      (i32.const 1)
-     (if (result i32)
-      (i32.eqz
-       (call $func_3)
+     (then
+      (if (result i32)
+       (i32.eqz
+        (call $func_3)
+       )
+       (then
+        (br $label$0)
+       )
+       (else
+        (i32.const 0)
+       )
       )
-      (br $label$0)
-      (i32.const 0)
      )
-     (unreachable)
+     (else
+      (unreachable)
+     )
     )
    )
   )
@@ -384,7 +404,7 @@
  )
 )
 (module
- ;; CHECK:      (type $none_=>_none (func))
+ ;; CHECK:      (type $0 (func))
 
  ;; CHECK:      (type $T (func (param i32)))
  (type $T (func (param i32)))
@@ -394,10 +414,14 @@
  ;; CHECK:      (func $0
  ;; CHECK-NEXT:  (block $__inlined_func$1
  ;; CHECK-NEXT:   (call_indirect (type $T)
- ;; CHECK-NEXT:    (if (result i32)
+ ;; CHECK-NEXT:    (if
  ;; CHECK-NEXT:     (i32.const 0)
- ;; CHECK-NEXT:     (unreachable)
- ;; CHECK-NEXT:     (unreachable)
+ ;; CHECK-NEXT:     (then
+ ;; CHECK-NEXT:      (unreachable)
+ ;; CHECK-NEXT:     )
+ ;; CHECK-NEXT:     (else
+ ;; CHECK-NEXT:      (unreachable)
+ ;; CHECK-NEXT:     )
  ;; CHECK-NEXT:    )
  ;; CHECK-NEXT:    (i32.const 1)
  ;; CHECK-NEXT:   )
@@ -410,8 +434,12 @@
   (call_indirect (type $T)
    (if (result i32) ;; if copy must preserve the forced type
     (i32.const 0)
-    (unreachable)
-    (unreachable)
+    (then
+     (unreachable)
+    )
+    (else
+     (unreachable)
+    )
    )
    (i32.const 1)
   )
@@ -425,7 +453,7 @@
    )
   )
  )
- ;; CHECK:      (type $none_=>_none (func))
+ ;; CHECK:      (type $0 (func))
 
  ;; CHECK:      (func $1
  ;; CHECK-NEXT:  (block $__inlined_func$0
@@ -441,7 +469,7 @@
  )
 )
 (module
- ;; CHECK:      (type $none_=>_i32 (func (result i32)))
+ ;; CHECK:      (type $0 (func (result i32)))
 
  ;; CHECK:      (func $0 (result i32)
  ;; CHECK-NEXT:  (return
@@ -458,7 +486,7 @@
  )
 )
 (module
- ;; CHECK:      (type $none_=>_none (func))
+ ;; CHECK:      (type $0 (func))
 
  ;; CHECK:      (func $0
  ;; CHECK-NEXT:  (local $0 i32)
@@ -486,7 +514,7 @@
  )
 )
 (module
- ;; CHECK:      (type $none_=>_i32 (func (result i32)))
+ ;; CHECK:      (type $0 (func (result i32)))
 
  ;; CHECK:      (func $0 (result i32)
  ;; CHECK-NEXT:  (local $0 i32)
@@ -509,7 +537,7 @@
  )
 )
 (module
- ;; CHECK:      (type $none_=>_none (func))
+ ;; CHECK:      (type $0 (func))
 
  ;; CHECK:      (func $0
  ;; CHECK-NEXT:  (drop
@@ -518,7 +546,7 @@
  ;; CHECK-NEXT:     (block
  ;; CHECK-NEXT:      (br $__inlined_func$1
  ;; CHECK-NEXT:       (block (result i32)
- ;; CHECK-NEXT:        (block $__inlined_func$2 (result i32)
+ ;; CHECK-NEXT:        (block $__inlined_func$2$1 (result i32)
  ;; CHECK-NEXT:         (i32.const 42)
  ;; CHECK-NEXT:        )
  ;; CHECK-NEXT:       )
@@ -541,7 +569,7 @@
  )
 )
 (module
- ;; CHECK:      (type $none_=>_none (func))
+ ;; CHECK:      (type $0 (func))
 
  ;; CHECK:      (func $0
  ;; CHECK-NEXT:  (local $0 i32)
@@ -549,7 +577,7 @@
  ;; CHECK-NEXT:   (block
  ;; CHECK-NEXT:    (block
  ;; CHECK-NEXT:     (block
- ;; CHECK-NEXT:      (block $__inlined_func$2
+ ;; CHECK-NEXT:      (block $__inlined_func$2$1
  ;; CHECK-NEXT:       (local.set $0
  ;; CHECK-NEXT:        (i32.const 42)
  ;; CHECK-NEXT:       )
@@ -561,7 +589,6 @@
  ;; CHECK-NEXT:     (br $__inlined_func$1)
  ;; CHECK-NEXT:    )
  ;; CHECK-NEXT:   )
- ;; CHECK-NEXT:   (br $__inlined_func$1)
  ;; CHECK-NEXT:  )
  ;; CHECK-NEXT: )
  (func $0
@@ -579,7 +606,7 @@
  )
 )
 (module
- ;; CHECK:      (type $none_=>_none (func))
+ ;; CHECK:      (type $0 (func))
 
  ;; CHECK:      (type $T (func (param i32) (result i32)))
  (type $T (func (param i32) (result i32)))
@@ -613,7 +640,7 @@
  )
 )
 (module
- ;; CHECK:      (type $none_=>_none (func))
+ ;; CHECK:      (type $0 (func))
 
  ;; CHECK:      (type $T (func (param i32)))
  (type $T (func (param i32)))
@@ -629,7 +656,6 @@
  ;; CHECK-NEXT:    )
  ;; CHECK-NEXT:    (br $__inlined_func$1)
  ;; CHECK-NEXT:   )
- ;; CHECK-NEXT:   (br $__inlined_func$1)
  ;; CHECK-NEXT:  )
  ;; CHECK-NEXT: )
  (func $0
@@ -655,7 +681,9 @@
  (func $2 (; 2 ;) (type $6)
   (if
    (global.get $global$0)
-   (return)
+   (then
+    (return)
+   )
   )
   (global.set $global$0
    (i32.const 1)
@@ -664,18 +692,22 @@
  (func $13 (; 13 ;) (type $6)
   (if
    (global.get $global$0)
-   (unreachable)
+   (then
+    (unreachable)
+   )
   )
   (return_call $2)
  )
  ;; CHECK:      (func $19
  ;; CHECK-NEXT:  (block
  ;; CHECK-NEXT:   (block
- ;; CHECK-NEXT:    (block $__inlined_func$13
+ ;; CHECK-NEXT:    (block $__inlined_func$13$1
  ;; CHECK-NEXT:     (block
  ;; CHECK-NEXT:      (if
  ;; CHECK-NEXT:       (global.get $global$0)
- ;; CHECK-NEXT:       (unreachable)
+ ;; CHECK-NEXT:       (then
+ ;; CHECK-NEXT:        (unreachable)
+ ;; CHECK-NEXT:       )
  ;; CHECK-NEXT:      )
  ;; CHECK-NEXT:      (block
  ;; CHECK-NEXT:       (block
@@ -683,18 +715,19 @@
  ;; CHECK-NEXT:         (block
  ;; CHECK-NEXT:          (if
  ;; CHECK-NEXT:           (global.get $global$0)
- ;; CHECK-NEXT:           (br $__inlined_func$2)
+ ;; CHECK-NEXT:           (then
+ ;; CHECK-NEXT:            (br $__inlined_func$2)
+ ;; CHECK-NEXT:           )
  ;; CHECK-NEXT:          )
  ;; CHECK-NEXT:          (global.set $global$0
  ;; CHECK-NEXT:           (i32.const 1)
  ;; CHECK-NEXT:          )
  ;; CHECK-NEXT:         )
  ;; CHECK-NEXT:        )
- ;; CHECK-NEXT:        (br $__inlined_func$13)
+ ;; CHECK-NEXT:        (br $__inlined_func$13$1)
  ;; CHECK-NEXT:       )
  ;; CHECK-NEXT:      )
  ;; CHECK-NEXT:     )
- ;; CHECK-NEXT:     (br $__inlined_func$13)
  ;; CHECK-NEXT:    )
  ;; CHECK-NEXT:   )
  ;; CHECK-NEXT:  )
@@ -707,7 +740,7 @@
 )
 
 (module
- ;; CHECK:      (type $i32_=>_i32 (func (param i32) (result i32)))
+ ;; CHECK:      (type $0 (func (param i32) (result i32)))
 
  ;; CHECK:      (export "is_even" (func $is_even))
  (export "is_even" (func $is_even))
@@ -717,24 +750,32 @@
  ;; CHECK-NEXT:   (i32.eqz
  ;; CHECK-NEXT:    (local.get $i)
  ;; CHECK-NEXT:   )
- ;; CHECK-NEXT:   (i32.const 1)
- ;; CHECK-NEXT:   (return
- ;; CHECK-NEXT:    (block $__inlined_func$is_odd (result i32)
- ;; CHECK-NEXT:     (local.set $1
- ;; CHECK-NEXT:      (i32.sub
- ;; CHECK-NEXT:       (local.get $i)
- ;; CHECK-NEXT:       (i32.const 1)
- ;; CHECK-NEXT:      )
- ;; CHECK-NEXT:     )
- ;; CHECK-NEXT:     (if (result i32)
- ;; CHECK-NEXT:      (i32.eqz
- ;; CHECK-NEXT:       (local.get $1)
- ;; CHECK-NEXT:      )
- ;; CHECK-NEXT:      (i32.const 0)
- ;; CHECK-NEXT:      (return_call $is_even
+ ;; CHECK-NEXT:   (then
+ ;; CHECK-NEXT:    (i32.const 1)
+ ;; CHECK-NEXT:   )
+ ;; CHECK-NEXT:   (else
+ ;; CHECK-NEXT:    (return
+ ;; CHECK-NEXT:     (block $__inlined_func$is_odd (result i32)
+ ;; CHECK-NEXT:      (local.set $1
  ;; CHECK-NEXT:       (i32.sub
- ;; CHECK-NEXT:        (local.get $1)
+ ;; CHECK-NEXT:        (local.get $i)
  ;; CHECK-NEXT:        (i32.const 1)
+ ;; CHECK-NEXT:       )
+ ;; CHECK-NEXT:      )
+ ;; CHECK-NEXT:      (if (result i32)
+ ;; CHECK-NEXT:       (i32.eqz
+ ;; CHECK-NEXT:        (local.get $1)
+ ;; CHECK-NEXT:       )
+ ;; CHECK-NEXT:       (then
+ ;; CHECK-NEXT:        (i32.const 0)
+ ;; CHECK-NEXT:       )
+ ;; CHECK-NEXT:       (else
+ ;; CHECK-NEXT:        (return_call $is_even
+ ;; CHECK-NEXT:         (i32.sub
+ ;; CHECK-NEXT:          (local.get $1)
+ ;; CHECK-NEXT:          (i32.const 1)
+ ;; CHECK-NEXT:         )
+ ;; CHECK-NEXT:        )
  ;; CHECK-NEXT:       )
  ;; CHECK-NEXT:      )
  ;; CHECK-NEXT:     )
@@ -745,11 +786,15 @@
  (func $is_even (param $i i32) (result i32)
   (if (result i32)
    (i32.eqz (local.get $i))
-   (i32.const 1)
-   (return_call $is_odd
-    (i32.sub
-     (local.get $i)
-     (i32.const 1)
+   (then
+    (i32.const 1)
+   )
+   (else
+    (return_call $is_odd
+     (i32.sub
+      (local.get $i)
+      (i32.const 1)
+     )
     )
    )
   )
@@ -757,11 +802,15 @@
  (func $is_odd (param $i i32) (result i32)
   (if (result i32)
    (i32.eqz (local.get $i))
-   (i32.const 0)
-   (return_call $is_even
-    (i32.sub
-     (local.get $i)
-     (i32.const 1)
+   (then
+    (i32.const 0)
+   )
+   (else
+    (return_call $is_even
+     (i32.sub
+      (local.get $i)
+      (i32.const 1)
+     )
     )
    )
   )

@@ -8,29 +8,8 @@
 ;; enabled.
 
 (module
- ;; PRIMARY:      (type $i32_=>_i32 (func (param i32) (result i32)))
-
- ;; PRIMARY:      (type $externref_=>_none (func (param externref)))
-
- ;; PRIMARY:      (type $externref_i32_=>_i32 (func (param externref i32) (result i32)))
-
- ;; PRIMARY:      (type $none_=>_none (func))
-
- ;; PRIMARY:      (import "env" "__load_secondary_module" (func $import$__load_secondary_module (param externref)))
-
- ;; PRIMARY:      (import "placeholder" "0" (func $placeholder_0 (param i32) (result i32)))
-
- ;; PRIMARY:      (global $suspender (mut externref) (ref.null noextern))
-
- ;; PRIMARY:      (global $global$1 (mut i32) (i32.const 0))
-
- ;; PRIMARY:      (table $0 1 funcref)
-
- ;; PRIMARY:      (elem (i32.const 0) $placeholder_0)
-
- ;; PRIMARY:      (export "foo" (func $export$foo))
  (export "foo" (func $foo))
- ;; SECONDARY:      (type $i32_=>_i32 (func (param i32) (result i32)))
+ ;; SECONDARY:      (type $0 (func (param i32) (result i32)))
 
  ;; SECONDARY:      (import "primary" "%table" (table $timport$0 1 funcref))
 
@@ -38,7 +17,7 @@
 
  ;; SECONDARY:      (import "primary" "load_secondary_module_status" (global $gimport$1 (mut i32)))
 
- ;; SECONDARY:      (elem (i32.const 0) $foo)
+ ;; SECONDARY:      (elem $0 (i32.const 0) $foo)
 
  ;; SECONDARY:      (func $foo (param $0 i32) (result i32)
  ;; SECONDARY-NEXT:  (i32.const 0)
@@ -47,6 +26,28 @@
   (i32.const 0)
  )
 )
+;; PRIMARY:      (type $0 (func (param i32) (result i32)))
+
+;; PRIMARY:      (type $3 (func (param externref)))
+
+;; PRIMARY:      (type $1 (func (param externref i32) (result i32)))
+
+;; PRIMARY:      (type $2 (func))
+
+;; PRIMARY:      (import "env" "__load_secondary_module" (func $import$__load_secondary_module (param externref)))
+
+;; PRIMARY:      (import "placeholder" "0" (func $placeholder_0 (param i32) (result i32)))
+
+;; PRIMARY:      (global $suspender (mut externref) (ref.null noextern))
+
+;; PRIMARY:      (global $global$1 (mut i32) (i32.const 0))
+
+;; PRIMARY:      (table $0 1 funcref)
+
+;; PRIMARY:      (elem $0 (i32.const 0) $placeholder_0)
+
+;; PRIMARY:      (export "foo" (func $export$foo))
+
 ;; PRIMARY:      (export "load_secondary_module_status" (global $global$1))
 
 ;; PRIMARY:      (export "%table" (table $0))
@@ -61,9 +62,11 @@
 ;; PRIMARY-NEXT:   (i32.eqz
 ;; PRIMARY-NEXT:    (global.get $global$1)
 ;; PRIMARY-NEXT:   )
-;; PRIMARY-NEXT:   (call $__load_secondary_module)
+;; PRIMARY-NEXT:   (then
+;; PRIMARY-NEXT:    (call $__load_secondary_module)
+;; PRIMARY-NEXT:   )
 ;; PRIMARY-NEXT:  )
-;; PRIMARY-NEXT:  (call_indirect (type $i32_=>_i32)
+;; PRIMARY-NEXT:  (call_indirect (type $0)
 ;; PRIMARY-NEXT:   (local.get $0)
 ;; PRIMARY-NEXT:   (i32.const 0)
 ;; PRIMARY-NEXT:  )

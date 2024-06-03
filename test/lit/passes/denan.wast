@@ -4,13 +4,15 @@
 ;; RUN: foreach %s %t wasm-opt --denan -S -o - | filecheck %s
 
 (module
-  ;; CHECK:      (type $f32_=>_f32 (func (param f32) (result f32)))
+  ;; CHECK:      (type $0 (func (param f32) (result f32)))
 
-  ;; CHECK:      (type $f64_=>_f64 (func (param f64) (result f64)))
+  ;; CHECK:      (type $1 (func (param f64) (result f64)))
 
-  ;; CHECK:      (type $i32_f32_i64_f64_=>_none (func (param i32 f32 i64 f64)))
+  ;; CHECK:      (type $2 (func (param i32 f32 i64 f64)))
 
-  ;; CHECK:      (type $f32_f64_=>_none (func (param f32 f64)))
+  ;; CHECK:      (type $3 (func (param f32 f64)))
+
+  ;; CHECK:      (type $4 (func))
 
   ;; CHECK:      (global $global$1 (mut f32) (f32.const 0))
   (global $global$1 (mut f32) (f32.const nan))
@@ -139,6 +141,38 @@
     (drop (local.get $f))
     (drop (local.get $d))
   )
+
+  ;; CHECK:      (func $constants
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (f32.const 12.34000015258789)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (f32.const 0)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (f64.const 12.34)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (f64.const 0)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT: )
+  (func $constants
+    ;; Constants can be fixed up or left alone - we never need to add a call on
+    ;; them.
+    (drop
+      (f32.const 12.34)
+    )
+    (drop
+      (f32.const nan)
+    )
+    (drop
+      (f64.const 12.34)
+    )
+    (drop
+      (f64.const nan)
+    )
+  )
+
   ;; CHECK:      (func $tees (param $x f32) (result f32)
   ;; CHECK-NEXT:  (local.set $x
   ;; CHECK-NEXT:   (call $deNan32
@@ -186,8 +220,12 @@
 ;; CHECK-NEXT:    (local.get $0)
 ;; CHECK-NEXT:    (local.get $0)
 ;; CHECK-NEXT:   )
-;; CHECK-NEXT:   (local.get $0)
-;; CHECK-NEXT:   (f32.const 0)
+;; CHECK-NEXT:   (then
+;; CHECK-NEXT:    (local.get $0)
+;; CHECK-NEXT:   )
+;; CHECK-NEXT:   (else
+;; CHECK-NEXT:    (f32.const 0)
+;; CHECK-NEXT:   )
 ;; CHECK-NEXT:  )
 ;; CHECK-NEXT: )
 
@@ -197,16 +235,20 @@
 ;; CHECK-NEXT:    (local.get $0)
 ;; CHECK-NEXT:    (local.get $0)
 ;; CHECK-NEXT:   )
-;; CHECK-NEXT:   (local.get $0)
-;; CHECK-NEXT:   (f64.const 0)
+;; CHECK-NEXT:   (then
+;; CHECK-NEXT:    (local.get $0)
+;; CHECK-NEXT:   )
+;; CHECK-NEXT:   (else
+;; CHECK-NEXT:    (f64.const 0)
+;; CHECK-NEXT:   )
 ;; CHECK-NEXT:  )
 ;; CHECK-NEXT: )
 (module
-  ;; CHECK:      (type $none_=>_none (func))
+  ;; CHECK:      (type $0 (func))
 
-  ;; CHECK:      (type $f32_=>_f32 (func (param f32) (result f32)))
+  ;; CHECK:      (type $1 (func (param f32) (result f32)))
 
-  ;; CHECK:      (type $f64_=>_f64 (func (param f64) (result f64)))
+  ;; CHECK:      (type $2 (func (param f64) (result f64)))
 
   ;; CHECK:      (func $deNan32
   ;; CHECK-NEXT:  (nop)
@@ -218,11 +260,11 @@
   (func $deNan64)
   ;; CHECK:      (func $foo32 (param $x f32) (result f32)
   ;; CHECK-NEXT:  (local.set $x
-  ;; CHECK-NEXT:   (call $deNan32_0
+  ;; CHECK-NEXT:   (call $deNan32_4
   ;; CHECK-NEXT:    (local.get $x)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (call $deNan32_0
+  ;; CHECK-NEXT:  (call $deNan32_4
   ;; CHECK-NEXT:   (call $foo32
   ;; CHECK-NEXT:    (local.get $x)
   ;; CHECK-NEXT:   )
@@ -233,11 +275,11 @@
   )
   ;; CHECK:      (func $foo64 (param $x f64) (result f64)
   ;; CHECK-NEXT:  (local.set $x
-  ;; CHECK-NEXT:   (call $deNan64_0
+  ;; CHECK-NEXT:   (call $deNan64_4
   ;; CHECK-NEXT:    (local.get $x)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (call $deNan64_0
+  ;; CHECK-NEXT:  (call $deNan64_4
   ;; CHECK-NEXT:   (call $foo64
   ;; CHECK-NEXT:    (local.get $x)
   ;; CHECK-NEXT:   )
@@ -249,24 +291,32 @@
 
 )
 
-;; CHECK:      (func $deNan32_0 (param $0 f32) (result f32)
+;; CHECK:      (func $deNan32_4 (param $0 f32) (result f32)
 ;; CHECK-NEXT:  (if (result f32)
 ;; CHECK-NEXT:   (f32.eq
 ;; CHECK-NEXT:    (local.get $0)
 ;; CHECK-NEXT:    (local.get $0)
 ;; CHECK-NEXT:   )
-;; CHECK-NEXT:   (local.get $0)
-;; CHECK-NEXT:   (f32.const 0)
+;; CHECK-NEXT:   (then
+;; CHECK-NEXT:    (local.get $0)
+;; CHECK-NEXT:   )
+;; CHECK-NEXT:   (else
+;; CHECK-NEXT:    (f32.const 0)
+;; CHECK-NEXT:   )
 ;; CHECK-NEXT:  )
 ;; CHECK-NEXT: )
 
-;; CHECK:      (func $deNan64_0 (param $0 f64) (result f64)
+;; CHECK:      (func $deNan64_4 (param $0 f64) (result f64)
 ;; CHECK-NEXT:  (if (result f64)
 ;; CHECK-NEXT:   (f64.eq
 ;; CHECK-NEXT:    (local.get $0)
 ;; CHECK-NEXT:    (local.get $0)
 ;; CHECK-NEXT:   )
-;; CHECK-NEXT:   (local.get $0)
-;; CHECK-NEXT:   (f64.const 0)
+;; CHECK-NEXT:   (then
+;; CHECK-NEXT:    (local.get $0)
+;; CHECK-NEXT:   )
+;; CHECK-NEXT:   (else
+;; CHECK-NEXT:    (f64.const 0)
+;; CHECK-NEXT:   )
 ;; CHECK-NEXT:  )
 ;; CHECK-NEXT: )

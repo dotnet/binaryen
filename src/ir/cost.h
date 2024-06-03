@@ -263,7 +263,7 @@ struct CostAnalyzer : public OverriddenVisitor<CostAnalyzer, CostType> {
       case DivUInt32:
       case RemSInt32:
       case RemUInt32:
-        ret = curr->right->is<Const>() ? 2 : 3;
+        ret = curr->right->is<Const>() ? 5 : 6;
         break;
       case AndInt32:
       case OrInt32:
@@ -284,7 +284,7 @@ struct CostAnalyzer : public OverriddenVisitor<CostAnalyzer, CostType> {
       case DivUInt64:
       case RemSInt64:
       case RemUInt64:
-        ret = curr->right->is<Const>() ? 3 : 4;
+        ret = curr->right->is<Const>() ? 7 : 8;
         break;
       case AndInt64:
       case OrInt64:
@@ -574,7 +574,17 @@ struct CostAnalyzer : public OverriddenVisitor<CostAnalyzer, CostType> {
   CostType visitTableGrow(TableGrow* curr) {
     return Unacceptable + visit(curr->value) + visit(curr->delta);
   }
+  CostType visitTableFill(TableFill* curr) {
+    return 6 + visit(curr->dest) + visit(curr->value) + visit(curr->size);
+  }
+  CostType visitTableCopy(TableCopy* curr) {
+    return 6 + visit(curr->dest) + visit(curr->source) + visit(curr->size);
+  }
   CostType visitTry(Try* curr) {
+    // We assume no exception will be thrown in most cases
+    return visit(curr->body);
+  }
+  CostType visitTryTable(TryTable* curr) {
     // We assume no exception will be thrown in most cases
     return visit(curr->body);
   }
@@ -586,6 +596,7 @@ struct CostAnalyzer : public OverriddenVisitor<CostAnalyzer, CostType> {
     return ret;
   }
   CostType visitRethrow(Rethrow* curr) { return Unacceptable; }
+  CostType visitThrowRef(ThrowRef* curr) { return Unacceptable; }
   CostType visitTupleMake(TupleMake* curr) {
     CostType ret = 0;
     for (auto* child : curr->operands) {
@@ -598,7 +609,7 @@ struct CostAnalyzer : public OverriddenVisitor<CostAnalyzer, CostType> {
   CostType visitNop(Nop* curr) { return 0; }
   CostType visitUnreachable(Unreachable* curr) { return 0; }
   CostType visitDataDrop(DataDrop* curr) { return 5; }
-  CostType visitI31New(I31New* curr) { return 3 + visit(curr->value); }
+  CostType visitRefI31(RefI31* curr) { return 3 + visit(curr->value); }
   CostType visitI31Get(I31Get* curr) { return 2 + visit(curr->i31); }
   CostType visitRefTest(RefTest* curr) {
     // Casts have a very high cost because in the VM they end up implemented as
@@ -636,10 +647,13 @@ struct CostAnalyzer : public OverriddenVisitor<CostAnalyzer, CostType> {
   CostType visitArrayNew(ArrayNew* curr) {
     return 4 + visit(curr->size) + maybeVisit(curr->init);
   }
-  CostType visitArrayNewSeg(ArrayNewSeg* curr) {
+  CostType visitArrayNewData(ArrayNewData* curr) {
     return 4 + visit(curr->offset) + visit(curr->size);
   }
-  CostType visitArrayInit(ArrayInit* curr) {
+  CostType visitArrayNewElem(ArrayNewElem* curr) {
+    return 4 + visit(curr->offset) + visit(curr->size);
+  }
+  CostType visitArrayNewFixed(ArrayNewFixed* curr) {
     CostType ret = 4;
     for (auto* child : curr->values) {
       ret += visit(child);
@@ -660,6 +674,18 @@ struct CostAnalyzer : public OverriddenVisitor<CostAnalyzer, CostType> {
     // Similar to MemoryCopy.
     return 6 + visit(curr->destRef) + visit(curr->destIndex) +
            visit(curr->srcRef) + visit(curr->srcIndex) + visit(curr->length);
+  }
+  CostType visitArrayFill(ArrayFill* curr) {
+    return 6 + visit(curr->ref) + visit(curr->index) + visit(curr->value) +
+           visit(curr->size);
+  }
+  CostType visitArrayInitData(ArrayInitData* curr) {
+    return 6 + visit(curr->ref) + visit(curr->index) + visit(curr->offset) +
+           visit(curr->size);
+  }
+  CostType visitArrayInitElem(ArrayInitElem* curr) {
+    return 6 + visit(curr->ref) + visit(curr->index) + visit(curr->offset) +
+           visit(curr->size);
   }
   CostType visitRefAs(RefAs* curr) { return 1 + visit(curr->value); }
   CostType visitStringNew(StringNew* curr) {
@@ -698,6 +724,15 @@ struct CostAnalyzer : public OverriddenVisitor<CostAnalyzer, CostType> {
   }
   CostType visitStringSliceIter(StringSliceIter* curr) {
     return 8 + visit(curr->ref) + visit(curr->num);
+  }
+
+  CostType visitContNew(ContNew* curr) {
+    // Some arbitrary "high" value, reflecting that this may allocate a stack
+    return 14 + visit(curr->func);
+  }
+  CostType visitResume(Resume* curr) {
+    // Inspired by indirect calls, but twice the cost.
+    return 12 + visit(curr->cont);
   }
 
 private:

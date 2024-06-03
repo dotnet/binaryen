@@ -113,7 +113,7 @@ struct AbstractTypeRefining : public Pass {
     createdTypesOrSubTypes = createdTypes;
     for (auto type : subTypes.getSubTypesFirstSort()) {
       // If any of our subtypes are created, so are we.
-      for (auto subType : subTypes.getStrictSubTypes(type)) {
+      for (auto subType : subTypes.getImmediateSubTypes(type)) {
         if (createdTypesOrSubTypes.count(subType)) {
           createdTypesOrSubTypes.insert(type);
           break;
@@ -159,7 +159,7 @@ struct AbstractTypeRefining : public Pass {
       }
 
       std::optional<HeapType> refinedType;
-      auto& typeSubTypes = subTypes.getStrictSubTypes(type);
+      auto& typeSubTypes = subTypes.getImmediateSubTypes(type);
       if (typeSubTypes.size() == 1) {
         // There is only a single possibility, so we can definitely use that
         /// one.
@@ -269,14 +269,14 @@ struct AbstractTypeRefining : public Pass {
       AbstractTypeRefiningTypeMapper(Module& wasm, const TypeUpdates& mapping)
         : TypeMapper(wasm, mapping) {}
 
-      std::optional<HeapType> getSuperType(HeapType oldType) override {
-        auto super = oldType.getSuperType();
+      std::optional<HeapType> getDeclaredSuperType(HeapType oldType) override {
+        auto super = oldType.getDeclaredSuperType();
 
         // Go up the chain of supertypes, skipping things we are mapping away,
         // as those things will not appear in the output. This skips B in the
         // example above.
         while (super && mapping.count(*super)) {
-          super = super->getSuperType();
+          super = super->getDeclaredSuperType();
         }
         return super;
       }

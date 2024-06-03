@@ -28,7 +28,10 @@ namespace wasm {
 
 GlobalTypeRewriter::GlobalTypeRewriter(Module& wasm) : wasm(wasm) {}
 
-void GlobalTypeRewriter::update() {
+void GlobalTypeRewriter::update() { mapTypes(rebuildTypes()); }
+
+GlobalTypeRewriter::TypeMap GlobalTypeRewriter::rebuildTypes(
+  const std::vector<HeapType>& additionalPrivateTypes) {
   // Find the heap types that are not publicly observable. Even in a closed
   // world scenario, don't modify public types because we assume that they may
   // be reflected on or used for linking. Figure out where each private type
@@ -37,26 +40,29 @@ void GlobalTypeRewriter::update() {
   Index i = 0;
   auto privateTypes = ModuleUtils::getPrivateHeapTypes(wasm);
 
+  for (auto t : additionalPrivateTypes) {
+    privateTypes.push_back(t);
+  }
+
   // Topological sort to have supertypes first, but we have to account for the
   // fact that we may be replacing the supertypes to get the order correct.
   struct SupertypesFirst
     : HeapTypeOrdering::SupertypesFirstBase<SupertypesFirst> {
     GlobalTypeRewriter& parent;
 
-    SupertypesFirst(GlobalTypeRewriter& parent,
-                    const std::vector<HeapType>& types)
-      : SupertypesFirstBase(types), parent(parent) {}
-    std::optional<HeapType> getSuperType(HeapType type) {
-      return parent.getSuperType(type);
+    SupertypesFirst(GlobalTypeRewriter& parent) : parent(parent) {}
+    std::optional<HeapType> getDeclaredSuperType(HeapType type) {
+      return parent.getDeclaredSuperType(type);
     }
   };
 
-  for (auto type : SupertypesFirst(*this, privateTypes)) {
+  SupertypesFirst sortedTypes(*this);
+  for (auto type : sortedTypes.sort(privateTypes)) {
     typeIndices[type] = i++;
   }
 
   if (typeIndices.size() == 0) {
-    return;
+    return {};
   }
   typeBuilder.grow(typeIndices.size());
 
@@ -70,6 +76,7 @@ void GlobalTypeRewriter::update() {
   // Create the temporary heap types.
   i = 0;
   for (auto [type, _] : typeIndices) {
+    typeBuilder[i].setOpen(type.isOpen());
     if (type.isSignature()) {
       auto sig = type.getSignature();
       TypeList newParams, newResults;
@@ -104,7 +111,7 @@ void GlobalTypeRewriter::update() {
     }
 
     // Apply a super, if there is one
-    if (auto super = getSuperType(type)) {
+    if (auto super = getDeclaredSuperType(type)) {
       if (auto it = typeIndices.find(*super); it != typeIndices.end()) {
         assert(it->second < i);
         typeBuilder[i].subTypeOf(typeBuilder[it->second]);
@@ -112,6 +119,9 @@ void GlobalTypeRewriter::update() {
         typeBuilder[i].subTypeOf(*super);
       }
     }
+
+    modifyTypeBuilderEntry(typeBuilder, i, type);
+
     i++;
   }
 
@@ -138,7 +148,7 @@ void GlobalTypeRewriter::update() {
     }
   }
 
-  mapTypes(oldToNewTypes);
+  return oldToNewTypes;
 }
 
 void GlobalTypeRewriter::mapTypes(const TypeMap& oldToNewTypes) {
@@ -162,7 +172,7 @@ void GlobalTypeRewriter::mapTypes(const TypeMap& oldToNewTypes) {
       }
       if (type.isTuple()) {
         auto tuple = type.getTuple();
-        for (auto& t : tuple.types) {
+        for (auto& t : tuple) {
           t = getNew(t);
         }
         return Type(tuple);
@@ -171,9 +181,6 @@ void GlobalTypeRewriter::mapTypes(const TypeMap& oldToNewTypes) {
     }
 
     HeapType getNew(HeapType type) {
-      if (type.isBasic()) {
-        return type;
-      }
       auto iter = oldToNewTypes.find(type);
       if (iter != oldToNewTypes.end()) {
         return iter->second;
@@ -224,13 +231,10 @@ void GlobalTypeRewriter::mapTypes(const TypeMap& oldToNewTypes) {
 #define DELEGATE_FIELD_CHILD(id, field)
 #define DELEGATE_FIELD_OPTIONAL_CHILD(id, field)
 #define DELEGATE_FIELD_INT(id, field)
-#define DELEGATE_FIELD_INT_ARRAY(id, field)
 #define DELEGATE_FIELD_LITERAL(id, field)
 #define DELEGATE_FIELD_NAME(id, field)
-#define DELEGATE_FIELD_NAME_VECTOR(id, field)
 #define DELEGATE_FIELD_SCOPE_NAME_DEF(id, field)
 #define DELEGATE_FIELD_SCOPE_NAME_USE(id, field)
-#define DELEGATE_FIELD_SCOPE_NAME_USE_VECTOR(id, field)
 #define DELEGATE_FIELD_ADDRESS(id, field)
 
 #include "wasm-delegations-fields.def"
@@ -284,7 +288,7 @@ Type GlobalTypeRewriter::getTempType(Type type) {
   if (type.isTuple()) {
     auto& tuple = type.getTuple();
     auto newTuple = tuple;
-    for (auto& t : newTuple.types) {
+    for (auto& t : newTuple) {
       t = getTempType(t);
     }
     return typeBuilder.getTempTupleType(newTuple);
@@ -299,25 +303,22 @@ Type GlobalTypeRewriter::getTempTupleType(Tuple tuple) {
 namespace TypeUpdating {
 
 bool canHandleAsLocal(Type type) {
-  // Defaultable types are always ok. For non-nullable types, we can handle them
-  // using defaultable ones + ref.as_non_nulls.
-  return type.isDefaultable() || type.isRef();
+  // TODO: Inline this into its callers.
+  return type.isConcrete();
 }
 
 void handleNonDefaultableLocals(Function* func, Module& wasm) {
-  if (wasm.features.hasGCNNLocals()) {
-    // We have nothing to fix up: all locals are allowed.
-    return;
-  }
   if (!wasm.features.hasReferenceTypes()) {
     // No references, so no non-nullable ones at all.
     return;
   }
   bool hasNonNullable = false;
-  for (auto type : func->vars) {
-    if (type.isNonNullable()) {
-      hasNonNullable = true;
-      break;
+  for (auto varType : func->vars) {
+    for (auto type : varType) {
+      if (type.isNonNullable()) {
+        hasNonNullable = true;
+        break;
+      }
     }
   }
   if (!hasNonNullable) {
@@ -337,7 +338,8 @@ void handleNonDefaultableLocals(Function* func, Module& wasm) {
     // LocalStructuralDominance should have only looked at non-nullable indexes
     // since we told it to ignore nullable ones. Also, params always dominate
     // and should not appear here.
-    assert(func->getLocalType(index).isNonNullable());
+    assert(func->getLocalType(index).isNonNullable() ||
+           func->getLocalType(index).isTuple());
     assert(!func->isParam(index));
   }
   if (badIndexes.empty()) {
@@ -368,8 +370,24 @@ void handleNonDefaultableLocals(Function* func, Module& wasm) {
     }
     if (badIndexes.count(set->index)) {
       auto type = func->getLocalType(set->index);
-      set->type = Type(type.getHeapType(), Nullable);
-      *setp = builder.makeRefAs(RefAsNonNull, set);
+      auto validType = getValidLocalType(type, wasm.features);
+      if (type.isRef()) {
+        set->type = validType;
+        *setp = builder.makeRefAs(RefAsNonNull, set);
+      } else {
+        assert(type.isTuple());
+        set->makeSet();
+        std::vector<Expression*> elems(type.size());
+        for (size_t i = 0, size = type.size(); i < size; ++i) {
+          elems[i] = builder.makeTupleExtract(
+            builder.makeLocalGet(set->index, validType), i);
+          if (type[i].isNonNullable()) {
+            elems[i] = builder.makeRefAs(RefAsNonNull, elems[i]);
+          }
+        }
+        *setp =
+          builder.makeSequence(set, builder.makeTupleMake(std::move(elems)));
+      }
     }
   }
 
@@ -382,20 +400,41 @@ void handleNonDefaultableLocals(Function* func, Module& wasm) {
 }
 
 Type getValidLocalType(Type type, FeatureSet features) {
-  // TODO: this should handle tuples with a non-nullable item
-  assert(canHandleAsLocal(type));
-  if (type.isNonNullable() && !features.hasGCNNLocals()) {
-    type = Type(type.getHeapType(), Nullable);
+  assert(type.isConcrete());
+  if (type.isNonNullable()) {
+    return Type(type.getHeapType(), Nullable);
+  }
+  if (type.isTuple()) {
+    std::vector<Type> elems(type.size());
+    for (size_t i = 0, size = type.size(); i < size; ++i) {
+      elems[i] = getValidLocalType(type[i], features);
+    }
+    return Type(std::move(elems));
   }
   return type;
 }
 
 Expression* fixLocalGet(LocalGet* get, Module& wasm) {
-  if (get->type.isNonNullable() && !wasm.features.hasGCNNLocals()) {
+  if (get->type.isNonNullable()) {
     // The get should now return a nullable value, and a ref.as_non_null
     // fixes that up.
     get->type = getValidLocalType(get->type, wasm.features);
     return Builder(wasm).makeRefAs(RefAsNonNull, get);
+  }
+  if (get->type.isTuple()) {
+    auto type = get->type;
+    get->type = getValidLocalType(type, wasm.features);
+    std::vector<Expression*> elems(type.size());
+    Builder builder(wasm);
+    for (Index i = 0, size = type.size(); i < size; ++i) {
+      auto* elemGet =
+        i == 0 ? get : builder.makeLocalGet(get->index, get->type);
+      elems[i] = builder.makeTupleExtract(elemGet, i);
+      if (type[i].isNonNullable()) {
+        elems[i] = builder.makeRefAs(RefAsNonNull, elems[i]);
+      }
+    }
+    return builder.makeTupleMake(std::move(elems));
   }
   return get;
 }

@@ -51,6 +51,12 @@ class FeatureValidationTest(utils.BinaryenTestCase):
         self.check_feature(module, error, '--enable-gc',
                            ['--enable-reference-types'])
 
+    def check_typed_continuations(self, module, error):
+        # Typed continuations implies function references (which is provided by
+        # gc in binaryen, and implies reference types) and exceptions
+        self.check_feature(module, error, '--enable-typed-continuations',
+                           ['--enable-gc', '--enable-reference-types', '--enable-exception-handling'])
+
     def test_v128_signature(self):
         module = '''
         (module
@@ -171,7 +177,7 @@ class FeatureValidationTest(utils.BinaryenTestCase):
         (module
          (import "env" "test1" (func $test1 (param externref) (result externref)))
          (import "env" "test2" (global $test2 externref))
-         (export "test1" (func $test1 (param externref) (result externref)))
+         (export "test1" (func $test1))
          (export "test2" (global $test2))
          (func $externref_test (param $0 externref) (result externref)
           (return
@@ -207,7 +213,7 @@ class FeatureValidationTest(utils.BinaryenTestCase):
         module = '''
         (module
          (func $foo (result i32 i64)
-          (tuple.make
+          (tuple.make 2
            (i32.const 42)
            (i64.const 42)
           )
@@ -229,9 +235,9 @@ class FeatureValidationTest(utils.BinaryenTestCase):
         module = '''
         (module
          (func $foo
-          (drop
+          (tuple.drop 2
            (block (result i32 i64)
-            (tuple.make
+            (tuple.make 2
              (i32.const 42)
              (i64.const 42)
             )
@@ -277,6 +283,28 @@ class FeatureValidationTest(utils.BinaryenTestCase):
         )
         '''
         self.check_gc(module, 'all used types should be allowed')
+
+    def test_tag_results(self):
+        module = '''
+        (module
+         (tag $foo (result i32))
+        )
+        '''
+        self.check_typed_continuations(module,
+                                       'Tags with result types require typed '
+                                       'continuations feature [--enable-typed-continuations]')
+
+    def test_cont_type(self):
+        module = '''
+        (module
+         (type $ft (func (param i32) (result i32)))
+         (type $ct (cont $ft))
+         (func $foo
+          (local $0 (ref $ct))
+         )
+        )
+        '''
+        self.check_typed_continuations(module, 'all used types should be allowed')
 
 
 class TargetFeaturesSectionTest(utils.BinaryenTestCase):
@@ -395,5 +423,6 @@ class TargetFeaturesSectionTest(utils.BinaryenTestCase):
             '--enable-relaxed-simd',
             '--enable-extended-const',
             '--enable-strings',
-            '--enable-multi-memories',
+            '--enable-multimemory',
+            '--enable-typed-continuations',
         ], p2.stdout.splitlines())

@@ -124,13 +124,33 @@ struct Walker : public VisitorType {
     // Copy debug info, if present.
     if (currFunction) {
       auto& debugLocations = currFunction->debugLocations;
-      if (!debugLocations.empty()) {
+      // Early exit if there is no debug info at all. Also, leave if we already
+      // have debug info on the new expression, which we don't want to trample:
+      // if there is no debug info we do want to copy, as a replacement
+      // operation suggests the new code plays the same role (it is an optimized
+      // version of the old), but if the code is already annotated, trust that.
+      if (!debugLocations.empty() && !debugLocations.count(expression)) {
         auto* curr = getCurrent();
         auto iter = debugLocations.find(curr);
         if (iter != debugLocations.end()) {
-          auto location = iter->second;
-          debugLocations.erase(iter);
-          debugLocations[expression] = location;
+          debugLocations[expression] = iter->second;
+          // Note that we do *not* erase the debug info of the expression being
+          // replaced, because it may still exist: we might replace
+          //
+          //  (call
+          //    (block ..
+          //
+          // with
+          //
+          //  (block
+          //    (call ..
+          //
+          // We still want the call here to have its old debug info.
+          //
+          // (In most cases, of course, we do remove the replaced expression,
+          // which means we accumulate unused garbage in debugLocations, but
+          // that's not that bad; we use arena allocation for Expressions, after
+          // all.)
         }
       }
     }
@@ -363,13 +383,10 @@ struct PostWalker : public Walker<SubType, VisitorType> {
   self->maybePushTask(SubType::scan, &cast->field);
 
 #define DELEGATE_FIELD_INT(id, field)
-#define DELEGATE_FIELD_INT_ARRAY(id, field)
 #define DELEGATE_FIELD_LITERAL(id, field)
 #define DELEGATE_FIELD_NAME(id, field)
-#define DELEGATE_FIELD_NAME_VECTOR(id, field)
 #define DELEGATE_FIELD_SCOPE_NAME_DEF(id, field)
 #define DELEGATE_FIELD_SCOPE_NAME_USE(id, field)
-#define DELEGATE_FIELD_SCOPE_NAME_USE_VECTOR(id, field)
 #define DELEGATE_FIELD_TYPE(id, field)
 #define DELEGATE_FIELD_HEAPTYPE(id, field)
 #define DELEGATE_FIELD_ADDRESS(id, field)
@@ -386,9 +403,8 @@ using ExpressionStack = SmallVector<Expression*, 10>;
 
 template<typename SubType, typename VisitorType = Visitor<SubType>>
 struct ControlFlowWalker : public PostWalker<SubType, VisitorType> {
-  ControlFlowWalker() = default;
-
-  ExpressionStack controlFlowStack; // contains blocks, loops, and ifs
+  // contains blocks, loops, ifs, trys, and try_tables
+  ExpressionStack controlFlowStack;
 
   // Uses the control flow stack to find the target of a break to a name
   Expression* findBreakTarget(Name name) {
@@ -405,8 +421,9 @@ struct ControlFlowWalker : public PostWalker<SubType, VisitorType> {
           return curr;
         }
       } else {
-        // an if or try, ignorable
-        assert(curr->template is<If>() || curr->template is<Try>());
+        // an if, try, or try_table, ignorable
+        assert(curr->template is<If>() || curr->template is<Try>() ||
+               curr->template is<TryTable>());
       }
       if (i == 0) {
         return nullptr;
@@ -432,7 +449,8 @@ struct ControlFlowWalker : public PostWalker<SubType, VisitorType> {
       case Expression::Id::BlockId:
       case Expression::Id::IfId:
       case Expression::Id::LoopId:
-      case Expression::Id::TryId: {
+      case Expression::Id::TryId:
+      case Expression::Id::TryTableId: {
         self->pushTask(SubType::doPostVisitControlFlow, currp);
         break;
       }
@@ -446,7 +464,8 @@ struct ControlFlowWalker : public PostWalker<SubType, VisitorType> {
       case Expression::Id::BlockId:
       case Expression::Id::IfId:
       case Expression::Id::LoopId:
-      case Expression::Id::TryId: {
+      case Expression::Id::TryId:
+      case Expression::Id::TryTableId: {
         self->pushTask(SubType::doPreVisitControlFlow, currp);
         break;
       }

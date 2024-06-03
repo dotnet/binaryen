@@ -18,9 +18,9 @@
 // Condensing a module with multiple memories into a module with a single memory
 // for browsers that don’t support multiple memories.
 //
-// This pass also disables multi-memories so that the target features section in
+// This pass also disables multimemory so that the target features section in
 // the emitted module does not report the use of MultiMemories. Disabling the
-// multi-memories feature also prevents later passes from adding additional
+// multimemory feature also prevents later passes from adding additional
 // memories.
 //
 // The offset computation in function maybeMakeBoundsCheck is not precise
@@ -40,6 +40,7 @@
 // the same semantics as v8, which is to bounds check all Atomic instructions
 // the same way and trap for out-of-bounds.
 
+#include "ir/abstract.h"
 #include "ir/module-utils.h"
 #include "ir/names.h"
 #include "wasm-builder.h"
@@ -181,7 +182,7 @@ struct MultiMemoryLowering : public Pass {
     Expression* makeDataSegmentBoundsCheck(MemoryInit* curr,
                                            Index sizeIdx,
                                            Index offsetIdx) {
-      auto& segment = parent.wasm->dataSegments[curr->segment];
+      auto* segment = parent.wasm->getDataSegment(curr->segment);
       Expression* addGtuTrap = makeAddGtuTrap(
         builder.makeLocalGet(offsetIdx, parent.pointerType),
         builder.makeLocalGet(sizeIdx, parent.pointerType),
@@ -377,7 +378,7 @@ struct MultiMemoryLowering : public Pass {
   };
 
   void run(Module* module) override {
-    module->features.disable(FeatureSet::MultiMemories);
+    module->features.disable(FeatureSet::MultiMemory);
 
     // If there are no memories or 1 memory, skip this pass
     if (module->memories.size() <= 1) {
@@ -411,6 +412,14 @@ struct MultiMemoryLowering : public Pass {
     // Since there is no offset global for the first memory, we need to
     // subtract one when indexing into the offsetGlobalName vector
     return offsetGlobalNames[idx - 1];
+  }
+
+  size_t getInitialOffset(Index idx) {
+    if (idx == 0) {
+      return 0;
+    }
+    auto* g = wasm->getGlobal(getOffsetGlobal(idx));
+    return g->init->cast<Const>()->value.getUnsigned();
   }
 
   // Whether the idx represents the last memory. Since there is no offset global
@@ -509,17 +518,11 @@ struct MultiMemoryLowering : public Pass {
     ModuleUtils::iterActiveDataSegments(*wasm, [&](DataSegment* dataSegment) {
       auto idx = memoryIdxMap.at(dataSegment->memory);
       dataSegment->memory = combinedMemory;
-      // No need to update the offset of data segments for the first memory
-      if (idx != 0) {
-        assert(dataSegment->offset->is<Const>() &&
-               "TODO: handle non-const segment offsets");
-        assert(wasm->features.hasExtendedConst());
-        auto offsetGlobalName = getOffsetGlobal(idx);
-        dataSegment->offset = builder.makeBinary(
-          Abstract::getBinary(pointerType, Abstract::Add),
-          builder.makeGlobalGet(offsetGlobalName, pointerType),
-          dataSegment->offset);
-      }
+      auto* offset = dataSegment->offset->dynCast<Const>();
+      assert(offset && "TODO: handle non-const segment offsets");
+      size_t originalOffset = offset->value.getUnsigned();
+      auto memOffset = getInitialOffset(idx);
+      offset->value = Literal(int32_t(originalOffset + memOffset));
     });
   }
 

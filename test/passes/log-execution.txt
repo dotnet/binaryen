@@ -1,7 +1,7 @@
 (module
- (type $none_=>_none (func))
- (type $none_=>_i32 (func (result i32)))
- (type $i32_=>_none (func (param i32)))
+ (type $0 (func))
+ (type $1 (func (result i32)))
+ (type $2 (func (param i32)))
  (import "env" "func" (func $import))
  (import "env" "log_execution" (func $log_execution (param i32)))
  (func $nopp
@@ -23,7 +23,9 @@
   (block
    (if
     (i32.const 0)
-    (nop)
+    (then
+     (nop)
+    )
    )
    (block
     (call $log_execution
@@ -51,11 +53,13 @@
    )
    (if
     (call $intt)
-    (loop $y
-     (call $log_execution
-      (i32.const 5)
+    (then
+     (loop $y
+      (call $log_execution
+       (i32.const 5)
+      )
+      (call $loops)
      )
-     (call $loops)
     )
    )
    (block

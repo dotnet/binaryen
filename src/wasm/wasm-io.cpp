@@ -25,11 +25,11 @@
 //
 
 #include "wasm-io.h"
+#include "parser/wat-parser.h"
 #include "support/debug.h"
+#include "support/path.h"
 #include "wasm-binary.h"
 #include "wasm-s-parser.h"
-#include "wat-parser.h"
-
 
 namespace wasm {
 
@@ -63,13 +63,16 @@ void ModuleReader::readBinaryData(std::vector<char>& input,
   std::unique_ptr<std::ifstream> sourceMapStream;
   // Assume that the wasm has had its initial features applied, and use those
   // while parsing.
-  WasmBinaryBuilder parser(wasm, wasm.features, input);
+  WasmBinaryReader parser(wasm, wasm.features, input);
   parser.setDebugInfo(debugInfo);
   parser.setDWARF(DWARF);
   parser.setSkipFunctionBodies(skipFunctionBodies);
   if (sourceMapFilename.size()) {
-    sourceMapStream = make_unique<std::ifstream>();
-    sourceMapStream->open(sourceMapFilename);
+    sourceMapStream = std::make_unique<std::ifstream>();
+    sourceMapStream->open(wasm::Path::to_path(sourceMapFilename));
+    if (!sourceMapStream->is_open()) {
+      Fatal() << "Failed opening '" << sourceMapFilename << "'";
+    }
     parser.setDebugLocations(sourceMapStream.get());
   }
   parser.read();
@@ -89,7 +92,7 @@ void ModuleReader::readBinary(std::string filename,
 bool ModuleReader::isBinaryFile(std::string filename) {
   std::ifstream infile;
   std::ios_base::openmode flags = std::ifstream::in | std::ifstream::binary;
-  infile.open(filename, flags);
+  infile.open(wasm::Path::to_path(filename), flags);
   char buffer[4] = {1, 2, 3, 4};
   infile.read(buffer, 4);
   infile.close();
@@ -156,8 +159,12 @@ void ModuleWriter::writeBinary(Module& wasm, Output& output) {
   }
   std::unique_ptr<std::ofstream> sourceMapStream;
   if (sourceMapFilename.size()) {
-    sourceMapStream = make_unique<std::ofstream>();
-    sourceMapStream->open(sourceMapFilename);
+    sourceMapStream = std::make_unique<std::ofstream>();
+    sourceMapStream->open(wasm::Path::to_path(sourceMapFilename));
+    if (!sourceMapStream->is_open()) {
+      Fatal() << "Failed opening sourcemap output file '" << sourceMapFilename
+              << "'";
+    }
     writer.setSourceMap(sourceMapStream.get(), sourceMapUrl);
   }
   if (symbolMap.size() > 0) {

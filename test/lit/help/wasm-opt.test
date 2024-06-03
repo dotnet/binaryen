@@ -53,10 +53,6 @@
 ;; CHECK-NEXT:                                                 loads/stores/indirect calls when
 ;; CHECK-NEXT:                                                 fuzzing
 ;; CHECK-NEXT:
-;; CHECK-NEXT:   --emit-js-wrapper,-ejw                        Emit a JavaScript wrapper file
-;; CHECK-NEXT:                                                 that can run the wasm with some
-;; CHECK-NEXT:                                                 test values, useful for fuzzing
-;; CHECK-NEXT:
 ;; CHECK-NEXT:   --emit-spec-wrapper,-esw                      Emit a wasm spec interpreter
 ;; CHECK-NEXT:                                                 wrapper file that can run the
 ;; CHECK-NEXT:                                                 wasm with some test values,
@@ -78,6 +74,15 @@
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --new-wat-parser                              Use the experimental new WAT
 ;; CHECK-NEXT:                                                 parser
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --experimental-new-eh                         After running all requested
+;; CHECK-NEXT:                                                 transformations / optimizations,
+;; CHECK-NEXT:                                                 translate the instruction to use
+;; CHECK-NEXT:                                                 the new EH instructions at the
+;; CHECK-NEXT:                                                 end. Depending on the
+;; CHECK-NEXT:                                                 optimization level specified,
+;; CHECK-NEXT:                                                 this may do some more
+;; CHECK-NEXT:                                                 post-translation optimizations.
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:
 ;; CHECK-NEXT: Optimization passes:
@@ -187,6 +192,9 @@
 ;; CHECK-NEXT:                                                 content can actually appear in
 ;; CHECK-NEXT:                                                 each location
 ;; CHECK-NEXT:
+;; CHECK-NEXT:   --gufa-cast-all                               GUFA plus add casts for all
+;; CHECK-NEXT:                                                 inferences
+;; CHECK-NEXT:
 ;; CHECK-NEXT:   --gufa-optimizing                             GUFA plus local optimizations in
 ;; CHECK-NEXT:                                                 functions we modified
 ;; CHECK-NEXT:
@@ -216,6 +224,9 @@
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --jspi                                        wrap imports and exports for
 ;; CHECK-NEXT:                                                 JavaScript promise integration
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --legalize-and-prune-js-interface             legalizes the import/export
+;; CHECK-NEXT:                                                 boundary and prunes when needed
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --legalize-js-interface                       legalizes i64 types on the
 ;; CHECK-NEXT:                                                 import/export boundary
@@ -294,6 +305,14 @@
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --nm                                          name list
 ;; CHECK-NEXT:
+;; CHECK-NEXT:   --no-full-inline                              mark functions as no-inline (for
+;; CHECK-NEXT:                                                 full inlining only)
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --no-inline                                   mark functions as no-inline
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --no-partial-inline                           mark functions as no-inline (for
+;; CHECK-NEXT:                                                 partial inlining only)
+;; CHECK-NEXT:
 ;; CHECK-NEXT:   --once-reduction                              reduces calls to code that only
 ;; CHECK-NEXT:                                                 runs once
 ;; CHECK-NEXT:
@@ -312,7 +331,12 @@
 ;; CHECK-NEXT:   --optimize-instructions                       optimizes instruction
 ;; CHECK-NEXT:                                                 combinations
 ;; CHECK-NEXT:
+;; CHECK-NEXT:   --optimize-j2cl                               optimizes J2CL specific
+;; CHECK-NEXT:                                                 constructs.
+;; CHECK-NEXT:
 ;; CHECK-NEXT:   --optimize-stack-ir                           optimize Stack IR
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --outlining                                   outline instructions
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --pick-load-signs                             pick load signs based on their
 ;; CHECK-NEXT:                                                 uses
@@ -349,6 +373,9 @@
 ;; CHECK-NEXT:   --print-stack-ir                              print out Stack IR (useful for
 ;; CHECK-NEXT:                                                 internal debugging)
 ;; CHECK-NEXT:
+;; CHECK-NEXT:   --propagate-globals-globally                  propagate global values to other
+;; CHECK-NEXT:                                                 globals (useful for tests)
+;; CHECK-NEXT:
 ;; CHECK-NEXT:   --remove-imports                              removes imports and replaces
 ;; CHECK-NEXT:                                                 them with nops
 ;; CHECK-NEXT:
@@ -373,6 +400,9 @@
 ;; CHECK-NEXT:   --reorder-functions                           sorts functions by access
 ;; CHECK-NEXT:                                                 frequency
 ;; CHECK-NEXT:
+;; CHECK-NEXT:   --reorder-functions-by-name                   sorts functions by name (useful
+;; CHECK-NEXT:                                                 for debugging)
+;; CHECK-NEXT:
 ;; CHECK-NEXT:   --reorder-globals                             sorts globals by access
 ;; CHECK-NEXT:                                                 frequency
 ;; CHECK-NEXT:
@@ -389,6 +419,9 @@
 ;; CHECK-NEXT:   --safe-heap                                   instrument loads and stores to
 ;; CHECK-NEXT:                                                 check for invalid behavior
 ;; CHECK-NEXT:
+;; CHECK-NEXT:   --separate-data-segments                      write data segments to a file
+;; CHECK-NEXT:                                                 and strip them from the module
+;; CHECK-NEXT:
 ;; CHECK-NEXT:   --set-globals                                 sets specified globals to
 ;; CHECK-NEXT:                                                 specified values
 ;; CHECK-NEXT:
@@ -399,7 +432,8 @@
 ;; CHECK-NEXT:                                                 signature types where possible
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --signext-lowering                            lower sign-ext operations to
-;; CHECK-NEXT:                                                 wasm mvp
+;; CHECK-NEXT:                                                 wasm mvp and disable the sign
+;; CHECK-NEXT:                                                 extension feature
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --simplify-globals                            miscellaneous globals-related
 ;; CHECK-NEXT:                                                 optimizations
@@ -444,12 +478,19 @@
 ;; CHECK-NEXT:   --stack-check                                 enforce limits on llvm's
 ;; CHECK-NEXT:                                                 __stack_pointer global
 ;; CHECK-NEXT:
+;; CHECK-NEXT:   --string-gathering                            gathers wasm strings to globals
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --string-lowering                             lowers wasm strings and
+;; CHECK-NEXT:                                                 operations to imports
+;; CHECK-NEXT:
 ;; CHECK-NEXT:   --strip                                       deprecated; same as strip-debug
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --strip-debug                                 strip debug info (including the
 ;; CHECK-NEXT:                                                 names section)
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --strip-dwarf                                 strip dwarf debug info
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --strip-eh                                    strip EH instructions
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --strip-producers                             strip the wasm producers section
 ;; CHECK-NEXT:
@@ -461,11 +502,18 @@
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --symbolmap                                   (alias for print-function-map)
 ;; CHECK-NEXT:
+;; CHECK-NEXT:   --translate-to-new-eh                         translate old EH instructions to
+;; CHECK-NEXT:                                                 new ones
+;; CHECK-NEXT:
 ;; CHECK-NEXT:   --trap-mode-clamp                             replace trapping operations with
 ;; CHECK-NEXT:                                                 clamping semantics
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --trap-mode-js                                replace trapping operations with
 ;; CHECK-NEXT:                                                 js semantics
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --tuple-optimization                          optimize trivial tuples away
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --type-finalizing                             mark all leaf types as final
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --type-merging                                merge types to their supertypes
 ;; CHECK-NEXT:                                                 where possible
@@ -475,6 +523,12 @@
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --type-ssa                                    create new nominal types to help
 ;; CHECK-NEXT:                                                 other optimizations
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --type-unfinalizing                           mark all types as non-final
+;; CHECK-NEXT:                                                 (open)
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --unsubtyping                                 removes unnecessary subtyping
+;; CHECK-NEXT:                                                 relationships
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --untee                                       removes local.tees, replacing
 ;; CHECK-NEXT:                                                 them with sets and gets
@@ -643,10 +697,6 @@
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --disable-memory64                            Disable memory64
 ;; CHECK-NEXT:
-;; CHECK-NEXT:   --enable-gc-nn-locals                         Enable GC non-null locals
-;; CHECK-NEXT:
-;; CHECK-NEXT:   --disable-gc-nn-locals                        Disable GC non-null locals
-;; CHECK-NEXT:
 ;; CHECK-NEXT:   --enable-relaxed-simd                         Enable relaxed SIMD
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --disable-relaxed-simd                        Disable relaxed SIMD
@@ -661,9 +711,13 @@
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --disable-strings                             Disable strings
 ;; CHECK-NEXT:
-;; CHECK-NEXT:   --enable-multi-memories                       Enable multi-memories
+;; CHECK-NEXT:   --enable-multimemory                          Enable multimemory
 ;; CHECK-NEXT:
-;; CHECK-NEXT:   --disable-multi-memories                      Disable multi-memories
+;; CHECK-NEXT:   --disable-multimemory                         Disable multimemory
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --enable-typed-continuations                  Enable typed continuations
+;; CHECK-NEXT:
+;; CHECK-NEXT:   --disable-typed-continuations                 Disable typed continuations
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --enable-typed-function-references            Deprecated compatibility flag
 ;; CHECK-NEXT:
@@ -675,13 +729,6 @@
 ;; CHECK-NEXT:   --pass-arg,-pa                                An argument passed along to
 ;; CHECK-NEXT:                                                 optimization passes being run.
 ;; CHECK-NEXT:                                                 Must be in the form KEY@VALUE
-;; CHECK-NEXT:
-;; CHECK-NEXT:   --nominal                                     Force all GC type definitions to
-;; CHECK-NEXT:                                                 be parsed as nominal.
-;; CHECK-NEXT:
-;; CHECK-NEXT:   --hybrid                                      Force all GC type definitions to
-;; CHECK-NEXT:                                                 be parsed using the isorecursive
-;; CHECK-NEXT:                                                 hybrid type system.
 ;; CHECK-NEXT:
 ;; CHECK-NEXT:   --closed-world,-cw                            Assume code outside of the
 ;; CHECK-NEXT:                                                 module does not inspect or

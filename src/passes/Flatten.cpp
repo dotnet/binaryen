@@ -24,7 +24,7 @@
 //       (func $foo
 //        (drop
 //         (block (result funcref (ref $none))
-//          (tuple.make
+//          (tuple.make 2
 //           (ref.null func)
 //           (ref.func $foo)
 //          )
@@ -33,11 +33,9 @@
 //       )
 //      )
 //
-// The tuple has a non-nullable type, and so it cannot be set to a local. We
-// would need to split up the tuple and reconstruct it later, but that would
-// require allowing tuple operations in more nested places than Flat IR allows
-// today. For now, error on this; eventually changes in the spec regarding
-// null-nullability may make this easier.
+// The tuple has a non-nullable type, and so it cannot currently be set to a
+// local, but in principle there's no reason it couldn't be. For now, error on
+// this.
 
 #include <ir/branch-utils.h>
 #include <ir/effects.h>

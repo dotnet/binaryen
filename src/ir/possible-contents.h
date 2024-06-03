@@ -66,10 +66,15 @@ class PossibleContents {
 
   struct GlobalInfo {
     Name name;
-    // The type of the global in the module. We stash this here so that we do
-    // not need to pass around a module all the time.
-    // TODO: could we save size in this variant if we did pass around the
-    //       module?
+    // The type of contents. Note that this may not match the type of the
+    // global, if we were filtered. For example:
+    //
+    //  (ref.as_non_null
+    //    (global.get $nullable-global)
+    //  )
+    //
+    // The contents flowing out will be a Global, but of a non-nullable type,
+    // unlike the original global.
     Type type;
     bool operator==(const GlobalInfo& other) const {
       return name == other.name && type == other.type;
@@ -171,9 +176,8 @@ public:
   }
 
   // Removes anything not in |other| from this object, so that it ends up with
-  // only their intersection. Currently this only handles an intersection with a
-  // full cone.
-  void intersectWithFullCone(const PossibleContents& other);
+  // only their intersection.
+  void intersect(const PossibleContents& other);
 
   bool isNone() const { return std::get_if<None>(&value); }
   bool isLiteral() const { return std::get_if<Literal>(&value); }
@@ -287,6 +291,9 @@ public:
       return builder.makeConstantExpression(getLiteral());
     } else {
       auto name = getGlobal();
+      // Note that we load the type from the module, rather than use the type
+      // in the GlobalInfo, as that type may not match the global (see comment
+      // in the GlobalInfo declaration above).
       return builder.makeGlobalGet(name, wasm.getGlobal(name)->type);
     }
   }
@@ -321,7 +328,7 @@ public:
         o << " HT: " << h;
       }
     } else if (isGlobal()) {
-      o << "GlobalInfo $" << getGlobal();
+      o << "GlobalInfo $" << getGlobal() << " T: " << getType();
     } else if (auto* coneType = std::get_if<ConeType>(&value)) {
       auto t = coneType->type;
       o << "ConeType " << t;
@@ -369,6 +376,15 @@ struct ParamLocation {
   Function* func;
   Index index;
   bool operator==(const ParamLocation& other) const {
+    return func == other.func && index == other.index;
+  }
+};
+
+// The location of a value in a local.
+struct LocalLocation {
+  Function* func;
+  Index index;
+  bool operator==(const LocalLocation& other) const {
     return func == other.func && index == other.index;
   }
 };
@@ -487,6 +503,7 @@ struct ConeReadLocation {
 // have.
 using Location = std::variant<ExpressionLocation,
                               ParamLocation,
+                              LocalLocation,
                               ResultLocation,
                               BreakTargetLocation,
                               GlobalLocation,
@@ -522,6 +539,13 @@ template<> struct hash<wasm::ExpressionLocation> {
 
 template<> struct hash<wasm::ParamLocation> {
   size_t operator()(const wasm::ParamLocation& loc) const {
+    return std::hash<std::pair<size_t, wasm::Index>>{}(
+      {size_t(loc.func), loc.index});
+  }
+};
+
+template<> struct hash<wasm::LocalLocation> {
+  size_t operator()(const wasm::LocalLocation& loc) const {
     return std::hash<std::pair<size_t, wasm::Index>>{}(
       {size_t(loc.func), loc.index});
   }
@@ -627,11 +651,15 @@ namespace wasm {
 // here.
 class ContentOracle {
   Module& wasm;
+  const PassOptions& options;
 
   void analyze();
 
 public:
-  ContentOracle(Module& wasm) : wasm(wasm) { analyze(); }
+  ContentOracle(Module& wasm, const PassOptions& options)
+    : wasm(wasm), options(options) {
+    analyze();
+  }
 
   // Get the contents possible at a location.
   PossibleContents getContents(Location location) {

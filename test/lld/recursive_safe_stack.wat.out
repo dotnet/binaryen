@@ -2,8 +2,8 @@
  (type $0 (func (param i32 i32) (result i32)))
  (type $1 (func))
  (type $2 (func (result i32)))
- (type $i32_=>_none (func (param i32)))
- (type $i32_i32_=>_none (func (param i32 i32)))
+ (type $3 (func (param i32)))
+ (type $4 (func (param i32 i32)))
  (import "env" "printf" (func $printf (param i32 i32) (result i32)))
  (import "env" "__handle_stack_overflow" (func $__handle_stack_overflow (param i32)))
  (global $global$0 (mut i32) (i32.const 66128))
@@ -12,7 +12,7 @@
  (global $__stack_base (mut i32) (i32.const 0))
  (global $__stack_limit (mut i32) (i32.const 0))
  (memory $0 2)
- (data (i32.const 568) "%d:%d\n\00Result: %d\n\00")
+ (data $0 (i32.const 568) "%d:%d\n\00Result: %d\n\00")
  (table $0 1 1 funcref)
  (export "memory" (memory $0))
  (export "__wasm_call_ctors" (func $__wasm_call_ctors))
@@ -46,8 +46,10 @@
       (global.get $__stack_limit)
      )
     )
-    (call $__handle_stack_overflow
-     (local.get $3)
+    (then
+     (call $__handle_stack_overflow
+      (local.get $3)
+     )
     )
    )
    (global.set $global$0
@@ -85,8 +87,10 @@
       (global.get $__stack_limit)
      )
     )
-    (call $__handle_stack_overflow
-     (local.get $4)
+    (then
+     (call $__handle_stack_overflow
+      (local.get $4)
+     )
     )
    )
    (global.set $global$0
@@ -121,8 +125,10 @@
       (global.get $__stack_limit)
      )
     )
-    (call $__handle_stack_overflow
-     (local.get $1)
+    (then
+     (call $__handle_stack_overflow
+      (local.get $1)
+     )
     )
    )
    (global.set $global$0
@@ -159,8 +165,10 @@
       (global.get $__stack_limit)
      )
     )
-    (call $__handle_stack_overflow
-     (local.get $2)
+    (then
+     (call $__handle_stack_overflow
+      (local.get $2)
+     )
     )
    )
    (global.set $global$0

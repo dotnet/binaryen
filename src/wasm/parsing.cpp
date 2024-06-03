@@ -16,6 +16,7 @@
 
 #include "parsing.h"
 #include "ir/branch-utils.h"
+#include "support/small_set.h"
 
 namespace wasm {
 
@@ -83,10 +84,11 @@ Name UniqueNameMapper::sourceToUnique(Name sName) {
     return DELEGATE_CALLER_TARGET;
   }
   if (labelMappings.find(sName) == labelMappings.end()) {
-    throw ParseException("bad label in sourceToUnique");
+    throw ParseException("bad label in sourceToUnique: " + sName.toString());
   }
   if (labelMappings[sName].empty()) {
-    throw ParseException("use of popped label in sourceToUnique");
+    throw ParseException("use of popped label in sourceToUnique: " +
+                         sName.toString());
   }
   return labelMappings[sName].back();
 }
@@ -104,7 +106,48 @@ void UniqueNameMapper::clear() {
   reverseLabelMapping.clear();
 }
 
+namespace {
+
+struct DuplicateNameScanner
+  : public PostWalker<DuplicateNameScanner,
+                      UnifiedExpressionVisitor<DuplicateNameScanner>> {
+
+  // Whether things are ok. If not, we need to fix things up.
+  bool ok = true;
+
+  // It is rare to have many nested names in general, so track the seen names
+  // as we go in an efficient way.
+  SmallUnorderedSet<Name, 10> seen;
+
+  void visitExpression(Expression* curr) {
+    BranchUtils::operateOnScopeNameDefs(curr, [&](Name& name) {
+      if (!name.is()) {
+        return;
+      }
+      // TODO: This could be done in a single insert operation that checks
+      //       whether we actually inserted, if we improved
+      //       SmallSetBase::insert to return a value like std::set does.
+      if (seen.count(name)) {
+        // A name has been defined more than once; we'll need to fix that.
+        ok = false;
+      } else {
+        seen.insert(name);
+      }
+    });
+  }
+};
+
+} // anonymous namespace
+
 void UniqueNameMapper::uniquify(Expression* curr) {
+  // First, scan the code to see if anything needs to be fixed up, since in the
+  // common case nothing needs fixing, and we can verify that very quickly.
+  DuplicateNameScanner scanner;
+  scanner.walk(curr);
+  if (scanner.ok) {
+    return;
+  }
+
   struct Walker
     : public ControlFlowWalker<Walker, UnifiedExpressionVisitor<Walker>> {
     UniqueNameMapper mapper;
@@ -132,9 +175,8 @@ void UniqueNameMapper::uniquify(Expression* curr) {
         }
       });
     }
-  };
+  } walker;
 
-  Walker walker;
   walker.walk(curr);
 }
 

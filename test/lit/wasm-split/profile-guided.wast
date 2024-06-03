@@ -6,10 +6,10 @@
 
 ;; Create profiles
 
-;; RUN: node --experimental-wasm-threads %S/call_exports.mjs %t.instrumented.wasm %t.foo.prof foo
-;; RUN: node --experimental-wasm-threads %S/call_exports.mjs %t.instrumented.wasm %t.bar.prof bar
-;; RUN: node --experimental-wasm-threads %S/call_exports.mjs %t.instrumented.wasm %t.both.prof foo bar
-;; RUN: node --experimental-wasm-threads %S/call_exports.mjs %t.instrumented.wasm %t.none.prof
+;; RUN: node %S/call_exports.mjs %t.instrumented.wasm %t.foo.prof foo
+;; RUN: node %S/call_exports.mjs %t.instrumented.wasm %t.bar.prof bar
+;; RUN: node %S/call_exports.mjs %t.instrumented.wasm %t.both.prof foo bar
+;; RUN: node %S/call_exports.mjs %t.instrumented.wasm %t.none.prof
 
 ;; Create profile-guided splits
 
@@ -33,10 +33,10 @@
 
 ;; Create profiles
 
-;; RUN: node --experimental-wasm-threads %S/call_exports.mjs %t.instrumented.wasm %t.foo.prof foo
-;; RUN: node --experimental-wasm-threads %S/call_exports.mjs %t.instrumented.wasm %t.bar.prof bar
-;; RUN: node --experimental-wasm-threads %S/call_exports.mjs %t.instrumented.wasm %t.both.prof foo bar
-;; RUN: node --experimental-wasm-threads %S/call_exports.mjs %t.instrumented.wasm %t.none.prof
+;; RUN: node %S/call_exports.mjs %t.instrumented.wasm %t.foo.prof foo
+;; RUN: node %S/call_exports.mjs %t.instrumented.wasm %t.bar.prof bar
+;; RUN: node %S/call_exports.mjs %t.instrumented.wasm %t.both.prof foo bar
+;; RUN: node %S/call_exports.mjs %t.instrumented.wasm %t.none.prof
 
 ;; Create profile-guided splits
 
@@ -69,7 +69,7 @@
 ;; NONE: Splitting out functions: bar, bar_callee, deep_foo_callee, foo, foo_callee, shared_callee, uncalled
 
 (module
-  (memory $mem (shared 1 1))
+  (memory $mem 1 1 shared)
   (export "memory" (memory $mem))
   (export "foo" (func $foo))
   (export "bar" (func $bar))

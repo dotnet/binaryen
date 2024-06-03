@@ -53,14 +53,12 @@ public:
 
   // Walk an expression and all its children.
   void walk(Expression* ast) {
-    pre();
     InternalAnalyzer(*this).walk(ast);
     post();
   }
 
   // Visit an expression, without any children.
   void visit(Expression* ast) {
-    pre();
     InternalAnalyzer(*this).visit(ast);
     post();
   }
@@ -122,10 +120,6 @@ public:
   // *do* mark a potentially infinite number of allocations as trapping, as all
   // VMs would trap eventually, and the same for potentially infinite recursion,
   // etc.
-  //   * We assume that VMs will timeout eventually, so any loop that we cannot
-  //     prove terminates is considered to trap. (Some VMs might not have
-  //     such timeouts, but even they will error before the heat death of the
-  //     universe, which is a kind of trap.)
   bool trap = false;
   // A trap from an instruction like a load or div/rem, which may trap on corner
   // cases. If we do not ignore implicit traps then these are counted as a trap.
@@ -145,6 +139,9 @@ public:
   // If this expression contains 'pop's that are not enclosed in 'catch' body.
   // For example, (drop (pop i32)) should set this to true.
   bool danglingPop = false;
+  // Whether this code may "hang" and not eventually complete. An infinite loop,
+  // or a continuation that is never continued, are examples of that.
+  bool mayNotReturn = false;
 
   // Helper functions to check for various effect types
 
@@ -184,7 +181,7 @@ public:
 
   bool hasNonTrapSideEffects() const {
     return localsWritten.size() > 0 || danglingPop || writesGlobalState() ||
-           throws() || transfersControlFlow();
+           throws() || transfersControlFlow() || mayNotReturn;
   }
 
   bool hasSideEffects() const { return trap || hasNonTrapSideEffects(); }
@@ -220,8 +217,39 @@ public:
   // check if we break to anything external from ourselves
   bool hasExternalBreakTargets() const { return !breakTargets.empty(); }
 
-  // checks if these effects would invalidate another set (e.g., if we write, we
-  // invalidate someone that reads, they can't be moved past us)
+  // Checks if these effects would invalidate another set of effects (e.g., if
+  // we write, we invalidate someone that reads).
+  //
+  // This assumes the things whose effects we are comparing will both execute,
+  // at least if neither of them transfers control flow away. That is, we assume
+  // that there is no transfer of control flow *between* them: we are comparing
+  // things appear after each other, perhaps with some other code in the middle,
+  // but that code does not transfer control flow. It is not valid to call this
+  // method in other situations, like this:
+  //
+  //   A
+  //   (br_if 0 (local.get 0)) ;; this may transfer control flow away
+  //   B
+  //
+  // Calling this method in that situation is invalid because only A may
+  // execute and not B. The following are examples of situations where it is
+  // valid to call this method:
+  //
+  //   A
+  //   ;; nothing in between them at all
+  //   B
+  //
+  //   A
+  //   (local.set 0 (i32.const 0)) ;; something in between without a possible
+  //                               ;; control flow transfer
+  //   B
+  //
+  // That the things being compared both execute only matters in the case of
+  // traps-never-happen: in that mode we can move traps but only if doing so
+  // would not make them start to appear when they did not. In the second
+  // example we can't reorder A and B if B traps, but in the first example we
+  // can reorder them even if B traps (even if A has a global effect like a
+  // global.set, since we assume B does not trap in traps-never-happen).
   bool invalidates(const EffectAnalyzer& other) {
     if ((transfersControlFlow() && other.hasSideEffects()) ||
         (other.transfersControlFlow() && hasSideEffects()) ||
@@ -267,11 +295,6 @@ public:
         return true;
       }
     }
-    // We are ok to reorder implicit traps, but not conditionalize them.
-    if ((trap && other.transfersControlFlow()) ||
-        (other.trap && transfersControlFlow())) {
-      return true;
-    }
     // Note that the above includes disallowing the reordering of a trap with an
     // exception (as an exception can transfer control flow inside the current
     // function, so transfersControlFlow would be true) - while we allow the
@@ -279,10 +302,17 @@ public:
     // anything.
     assert(!((trap && other.throws()) || (throws() && other.trap)));
     // We can't reorder an implicit trap in a way that could alter what global
-    // state is modified.
-    if ((trap && other.writesGlobalState()) ||
-        (other.trap && writesGlobalState())) {
-      return true;
+    // state is modified. However, in trapsNeverHappen mode we assume traps do
+    // not occur in practice, which lets us ignore this, at least in the case
+    // that the code executes. As mentioned above, we assume that there is no
+    // transfer of control flow between the things we are comparing, so all we
+    // need to do is check for such transfers in them.
+    if (!trapsNeverHappen || transfersControlFlow() ||
+        other.transfersControlFlow()) {
+      if ((trap && other.writesGlobalState()) ||
+          (other.trap && writesGlobalState())) {
+        return true;
+      }
     }
     return false;
   }
@@ -419,12 +449,7 @@ private:
     void visitIf(If* curr) {}
     void visitLoop(Loop* curr) {
       if (curr->name.is() && parent.breakTargets.erase(curr->name) > 0) {
-        // Breaks to this loop exist, which we just removed as they do not have
-        // further effect outside of this loop. One additional thing we need to
-        // take into account is infinite looping, which is a noticeable side
-        // effect we can't normally remove - eventually the VM will time out and
-        // error (see more details in the comment on trapping above).
-        parent.implicitTrap = true;
+        parent.mayNotReturn = true;
       }
     }
     void visitBreak(Break* curr) { parent.breakTargets.insert(curr->name); }
@@ -667,9 +692,23 @@ private:
       parent.readsTable = true;
       parent.writesTable = true;
     }
+    void visitTableFill(TableFill* curr) {
+      parent.writesTable = true;
+      parent.implicitTrap = true;
+    }
+    void visitTableCopy(TableCopy* curr) {
+      parent.readsTable = true;
+      parent.writesTable = true;
+      parent.implicitTrap = true;
+    }
     void visitTry(Try* curr) {
       if (curr->delegateTarget.is()) {
         parent.delegateTargets.insert(curr->delegateTarget);
+      }
+    }
+    void visitTryTable(TryTable* curr) {
+      for (auto name : curr->catchDests) {
+        parent.breakTargets.insert(name);
       }
     }
     void visitThrow(Throw* curr) {
@@ -678,6 +717,11 @@ private:
       }
     }
     void visitRethrow(Rethrow* curr) {
+      if (parent.tryDepth == 0) {
+        parent.throws_ = true;
+      }
+    }
+    void visitThrowRef(ThrowRef* curr) {
       if (parent.tryDepth == 0) {
         parent.throws_ = true;
       }
@@ -693,7 +737,7 @@ private:
     }
     void visitTupleMake(TupleMake* curr) {}
     void visitTupleExtract(TupleExtract* curr) {}
-    void visitI31New(I31New* curr) {}
+    void visitRefI31(RefI31* curr) {}
     void visitI31Get(I31Get* curr) {
       // traps when the ref is null
       if (curr->i31->type.isNullable()) {
@@ -755,12 +799,17 @@ private:
       }
     }
     void visitArrayNew(ArrayNew* curr) {}
-    void visitArrayNewSeg(ArrayNewSeg* curr) {
+    void visitArrayNewData(ArrayNewData* curr) {
       // Traps on out of bounds access to segments or access to dropped
       // segments.
       parent.implicitTrap = true;
     }
-    void visitArrayInit(ArrayInit* curr) {}
+    void visitArrayNewElem(ArrayNewElem* curr) {
+      // Traps on out of bounds access to segments or access to dropped
+      // segments.
+      parent.implicitTrap = true;
+    }
+    void visitArrayNewFixed(ArrayNewFixed* curr) {}
     void visitArrayGet(ArrayGet* curr) {
       if (curr->ref->type.isNull()) {
         parent.trap = true;
@@ -799,6 +848,27 @@ private:
       // traps when a ref is null, or when out of bounds.
       parent.implicitTrap = true;
     }
+    void visitArrayFill(ArrayFill* curr) {
+      if (curr->ref->type.isNull()) {
+        parent.trap = true;
+        return;
+      }
+      parent.writesArray = true;
+      // Traps when the destination is null or when out of bounds.
+      parent.implicitTrap = true;
+    }
+    template<typename ArrayInit> void visitArrayInit(ArrayInit* curr) {
+      if (curr->ref->type.isNull()) {
+        parent.trap = true;
+        return;
+      }
+      parent.writesArray = true;
+      // Traps when the destination is null, when out of bounds in source or
+      // destination, or when the source segment has been dropped.
+      parent.implicitTrap = true;
+    }
+    void visitArrayInitData(ArrayInitData* curr) { visitArrayInit(curr); }
+    void visitArrayInitElem(ArrayInitElem* curr) { visitArrayInit(curr); }
     void visitRefAs(RefAs* curr) {
       if (curr->op == ExternInternalize || curr->op == ExternExternalize) {
         // These conversions are infallible.
@@ -821,13 +891,13 @@ private:
       switch (curr->op) {
         case StringNewUTF8:
         case StringNewWTF8:
-        case StringNewReplace:
+        case StringNewLossyUTF8:
         case StringNewWTF16:
           parent.readsMemory = true;
           break;
         case StringNewUTF8Array:
         case StringNewWTF8Array:
-        case StringNewReplaceArray:
+        case StringNewLossyUTF8Array:
         case StringNewWTF16Array:
           parent.readsArray = true;
           break;
@@ -845,11 +915,13 @@ private:
       parent.implicitTrap = true;
       switch (curr->op) {
         case StringEncodeUTF8:
+        case StringEncodeLossyUTF8:
         case StringEncodeWTF8:
         case StringEncodeWTF16:
           parent.writesMemory = true;
           break;
         case StringEncodeUTF8Array:
+        case StringEncodeLossyUTF8Array:
         case StringEncodeWTF8Array:
         case StringEncodeWTF16Array:
           parent.writesArray = true;
@@ -901,11 +973,29 @@ private:
       // traps when ref is null.
       parent.implicitTrap = true;
     }
+
+    void visitContNew(ContNew* curr) {
+      // traps when curr->func is null ref.
+      parent.implicitTrap = true;
+    }
+    void visitResume(Resume* curr) {
+      // This acts as a kitchen sink effect.
+      parent.calls = true;
+
+      // resume instructions accept nullable continuation references and trap
+      // on null.
+      parent.implicitTrap = true;
+
+      if (parent.features.hasExceptionHandling() && parent.tryDepth == 0) {
+        parent.throws_ = true;
+      }
+    }
   };
 
 public:
   // Helpers
 
+  // See comment on invalidate() for the assumptions on the inputs here.
   static bool canReorder(const PassOptions& passOptions,
                          Module& module,
                          Expression* a,
@@ -1002,11 +1092,6 @@ public:
   }
 
 private:
-  void pre() {
-    breakTargets.clear();
-    delegateTargets.clear();
-  }
-
   void post() {
     assert(tryDepth == 0);
 

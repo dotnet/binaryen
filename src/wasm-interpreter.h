@@ -36,6 +36,10 @@
 #include "wasm-traversal.h"
 #include "wasm.h"
 
+#if __has_feature(leak_sanitizer) || __has_feature(address_sanitizer)
+#include <sanitizer/lsan_interface.h>
+#endif
+
 namespace wasm {
 
 struct WasmException {
@@ -76,7 +80,7 @@ public:
     return builder.makeConstantExpression(values);
   }
 
-  bool breaking() { return breakTo.is(); }
+  bool breaking() const { return breakTo.is(); }
 
   void clearIf(Name target) {
     if (breakTo == target) {
@@ -175,6 +179,23 @@ protected:
       arguments.push_back(flow.getSingleValue());
     }
     return Flow();
+  }
+
+  // This small function is mainly useful to put all GCData allocations in a
+  // single place. We need that because LSan reports leaks on cycles in this
+  // data, as we don't have a cycle collector. Those leaks are not a serious
+  // problem as Binaryen is not really used in long-running tasks, so we ignore
+  // this function in LSan.
+  Literal makeGCData(const Literals& data, Type type) {
+    auto allocation = std::make_shared<GCData>(type.getHeapType(), data);
+#if __has_feature(leak_sanitizer) || __has_feature(address_sanitizer)
+    // GC data with cycles will leak, since shared_ptrs do not handle cycles.
+    // Binaryen is generally not used in long-running programs so we just ignore
+    // such leaks for now.
+    // TODO: Add a cycle collector?
+    __lsan_ignore_object(allocation.get());
+#endif
+    return Literal(allocation, type.getHeapType());
   }
 
 public:
@@ -1370,7 +1391,10 @@ public:
   Flow visitTableSet(TableSet* curr) { WASM_UNREACHABLE("unimp"); }
   Flow visitTableSize(TableSize* curr) { WASM_UNREACHABLE("unimp"); }
   Flow visitTableGrow(TableGrow* curr) { WASM_UNREACHABLE("unimp"); }
+  Flow visitTableFill(TableFill* curr) { WASM_UNREACHABLE("unimp"); }
+  Flow visitTableCopy(TableCopy* curr) { WASM_UNREACHABLE("unimp"); }
   Flow visitTry(Try* curr) { WASM_UNREACHABLE("unimp"); }
+  Flow visitTryTable(TryTable* curr) { WASM_UNREACHABLE("unimp"); }
   Flow visitThrow(Throw* curr) {
     NOTE_ENTER("Throw");
     Literals arguments;
@@ -1388,8 +1412,9 @@ public:
     WASM_UNREACHABLE("throw");
   }
   Flow visitRethrow(Rethrow* curr) { WASM_UNREACHABLE("unimp"); }
-  Flow visitI31New(I31New* curr) {
-    NOTE_ENTER("I31New");
+  Flow visitThrowRef(ThrowRef* curr) { WASM_UNREACHABLE("unimp"); }
+  Flow visitRefI31(RefI31* curr) {
+    NOTE_ENTER("RefI31");
     Flow flow = visit(curr->value);
     if (flow.breaking()) {
       return flow;
@@ -1541,18 +1566,18 @@ public:
     const auto& fields = heapType.getStruct().fields;
     Literals data(fields.size());
     for (Index i = 0; i < fields.size(); i++) {
+      auto& field = fields[i];
       if (curr->isWithDefault()) {
-        data[i] = Literal::makeZero(fields[i].type);
+        data[i] = Literal::makeZero(field.type);
       } else {
         auto value = self()->visit(curr->operands[i]);
         if (value.breaking()) {
           return value;
         }
-        data[i] = value.getSingleValue();
+        data[i] = truncateForPacking(value.getSingleValue(), field);
       }
     }
-    return Literal(std::make_shared<GCData>(curr->type.getHeapType(), data),
-                   curr->type.getHeapType());
+    return makeGCData(data, curr->type);
   }
   Flow visitStructGet(StructGet* curr) {
     NOTE_ENTER("StructGet");
@@ -1595,6 +1620,13 @@ public:
 
   Flow visitArrayNew(ArrayNew* curr) {
     NOTE_ENTER("ArrayNew");
+    Flow init;
+    if (!curr->isWithDefault()) {
+      init = self()->visit(curr->init);
+      if (init.breaking()) {
+        return init;
+      }
+    }
     auto size = self()->visit(curr->size);
     if (size.breaking()) {
       return size;
@@ -1614,26 +1646,23 @@ public:
     }
     Literals data(num);
     if (curr->isWithDefault()) {
+      auto zero = Literal::makeZero(element.type);
       for (Index i = 0; i < num; i++) {
-        data[i] = Literal::makeZero(element.type);
+        data[i] = zero;
       }
     } else {
-      auto init = self()->visit(curr->init);
-      if (init.breaking()) {
-        return init;
-      }
       auto field = curr->type.getHeapType().getArray().element;
       auto value = truncateForPacking(init.getSingleValue(), field);
       for (Index i = 0; i < num; i++) {
         data[i] = value;
       }
     }
-    return Literal(std::make_shared<GCData>(curr->type.getHeapType(), data),
-                   curr->type.getHeapType());
+    return makeGCData(data, curr->type);
   }
-  Flow visitArrayNewSeg(ArrayNewSeg* curr) { WASM_UNREACHABLE("unimp"); }
-  Flow visitArrayInit(ArrayInit* curr) {
-    NOTE_ENTER("ArrayInit");
+  Flow visitArrayNewData(ArrayNewData* curr) { WASM_UNREACHABLE("unimp"); }
+  Flow visitArrayNewElem(ArrayNewElem* curr) { WASM_UNREACHABLE("unimp"); }
+  Flow visitArrayNewFixed(ArrayNewFixed* curr) {
+    NOTE_ENTER("ArrayNewFixed");
     Index num = curr->values.size();
     if (num >= ArrayLimit) {
       hostLimit("allocation failure");
@@ -1659,8 +1688,7 @@ public:
       }
       data[i] = truncateForPacking(value.getSingleValue(), field);
     }
-    return Literal(std::make_shared<GCData>(curr->type.getHeapType(), data),
-                   curr->type.getHeapType());
+    return makeGCData(data, curr->type);
   }
   Flow visitArrayGet(ArrayGet* curr) {
     NOTE_ENTER("ArrayGet");
@@ -1754,25 +1782,63 @@ public:
     size_t destVal = destIndex.getSingleValue().getUnsigned();
     size_t srcVal = srcIndex.getSingleValue().getUnsigned();
     size_t lengthVal = length.getSingleValue().getUnsigned();
-    if (lengthVal >= ArrayLimit) {
-      hostLimit("allocation failure");
+    if (destVal + lengthVal > destData->values.size()) {
+      trap("oob");
+    }
+    if (srcVal + lengthVal > srcData->values.size()) {
+      trap("oob");
     }
     std::vector<Literal> copied;
     copied.resize(lengthVal);
     for (size_t i = 0; i < lengthVal; i++) {
-      if (srcVal + i >= srcData->values.size()) {
-        trap("oob");
-      }
       copied[i] = srcData->values[srcVal + i];
     }
     for (size_t i = 0; i < lengthVal; i++) {
-      if (destVal + i >= destData->values.size()) {
-        trap("oob");
-      }
       destData->values[destVal + i] = copied[i];
     }
     return Flow();
   }
+  Flow visitArrayFill(ArrayFill* curr) {
+    NOTE_ENTER("ArrayFill");
+    Flow ref = self()->visit(curr->ref);
+    if (ref.breaking()) {
+      return ref;
+    }
+    Flow index = self()->visit(curr->index);
+    if (index.breaking()) {
+      return index;
+    }
+    Flow value = self()->visit(curr->value);
+    if (value.breaking()) {
+      return value;
+    }
+    Flow size = self()->visit(curr->size);
+    if (size.breaking()) {
+      return size;
+    }
+    auto data = ref.getSingleValue().getGCData();
+    if (!data) {
+      trap("null ref");
+    }
+    size_t indexVal = index.getSingleValue().getUnsigned();
+    Literal fillVal = value.getSingleValue();
+    size_t sizeVal = size.getSingleValue().getUnsigned();
+
+    auto field = curr->ref->type.getHeapType().getArray().element;
+    fillVal = truncateForPacking(fillVal, field);
+
+    size_t arraySize = data->values.size();
+    if (indexVal > arraySize || sizeVal > arraySize ||
+        indexVal + sizeVal > arraySize || indexVal + sizeVal < indexVal) {
+      trap("out of bounds array access in array.fill");
+    }
+    for (size_t i = 0; i < sizeVal; ++i) {
+      data->values[indexVal + i] = fillVal;
+    }
+    return {};
+  }
+  Flow visitArrayInitData(ArrayInitData* curr) { WASM_UNREACHABLE("unimp"); }
+  Flow visitArrayInitElem(ArrayInitElem* curr) { WASM_UNREACHABLE("unimp"); }
   Flow visitRefAs(RefAs* curr) {
     NOTE_ENTER("RefAs");
     Flow flow = visit(curr->value);
@@ -1781,30 +1847,187 @@ public:
     }
     const auto& value = flow.getSingleValue();
     NOTE_EVAL1(value);
-    if (value.isNull()) {
-      trap("null ref");
-    }
     switch (curr->op) {
       case RefAsNonNull:
-        // We've already checked for a null.
+        if (value.isNull()) {
+          trap("null ref");
+        }
         return value;
       case ExternInternalize:
+        return value.internalize();
       case ExternExternalize:
-        WASM_UNREACHABLE("unimplemented extern conversion");
+        return value.externalize();
     }
     WASM_UNREACHABLE("unimplemented ref.as_*");
   }
-  Flow visitStringNew(StringNew* curr) { WASM_UNREACHABLE("unimp"); }
-  Flow visitStringConst(StringConst* curr) { WASM_UNREACHABLE("unimp"); }
-  Flow visitStringMeasure(StringMeasure* curr) { WASM_UNREACHABLE("unimp"); }
+  Flow visitStringNew(StringNew* curr) {
+    Flow ptr = visit(curr->ptr);
+    if (ptr.breaking()) {
+      return ptr;
+    }
+    switch (curr->op) {
+      case StringNewWTF16Array: {
+        Flow start = visit(curr->start);
+        if (start.breaking()) {
+          return start;
+        }
+        Flow end = visit(curr->end);
+        if (end.breaking()) {
+          return end;
+        }
+        auto ptrData = ptr.getSingleValue().getGCData();
+        if (!ptrData) {
+          trap("null ref");
+        }
+        const auto& ptrDataValues = ptrData->values;
+        size_t startVal = start.getSingleValue().getUnsigned();
+        size_t endVal = end.getSingleValue().getUnsigned();
+        if (endVal > ptrDataValues.size()) {
+          trap("array oob");
+        }
+        Literals contents;
+        if (endVal > startVal) {
+          contents.reserve(endVal - startVal);
+          for (size_t i = startVal; i < endVal; i++) {
+            contents.push_back(ptrDataValues[i]);
+          }
+        }
+        return makeGCData(contents, curr->type);
+      }
+      default:
+        // TODO: others
+        return Flow(NONCONSTANT_FLOW);
+    }
+  }
+  Flow visitStringConst(StringConst* curr) {
+    return Literal(curr->string.toString());
+  }
+  Flow visitStringMeasure(StringMeasure* curr) {
+    // For now we only support JS-style strings.
+    assert(curr->op == StringMeasureWTF16View);
+
+    Flow flow = visit(curr->ref);
+    if (flow.breaking()) {
+      return flow;
+    }
+    auto value = flow.getSingleValue();
+    auto data = value.getGCData();
+    if (!data) {
+      trap("null ref");
+    }
+    return Literal(int32_t(data->values.size()));
+  }
   Flow visitStringEncode(StringEncode* curr) { WASM_UNREACHABLE("unimp"); }
   Flow visitStringConcat(StringConcat* curr) { WASM_UNREACHABLE("unimp"); }
-  Flow visitStringEq(StringEq* curr) { WASM_UNREACHABLE("unimp"); }
-  Flow visitStringAs(StringAs* curr) { WASM_UNREACHABLE("unimp"); }
+  Flow visitStringEq(StringEq* curr) {
+    NOTE_ENTER("StringEq");
+    Flow flow = visit(curr->left);
+    if (flow.breaking()) {
+      return flow;
+    }
+    auto left = flow.getSingleValue();
+    flow = visit(curr->right);
+    if (flow.breaking()) {
+      return flow;
+    }
+    auto right = flow.getSingleValue();
+    NOTE_EVAL2(left, right);
+    auto leftData = left.getGCData();
+    auto rightData = right.getGCData();
+    int32_t result;
+    switch (curr->op) {
+      case StringEqEqual: {
+        // They are equal if both are null, or both are non-null and equal.
+        result =
+          (!leftData && !rightData) ||
+          (leftData && rightData && leftData->values == rightData->values);
+        break;
+      }
+      case StringEqCompare: {
+        if (!leftData || !rightData) {
+          trap("null ref");
+        }
+        auto& leftValues = leftData->values;
+        auto& rightValues = rightData->values;
+        Index i = 0;
+        while (1) {
+          if (i == leftValues.size() && i == rightValues.size()) {
+            // We reached the end, and they are equal.
+            result = 0;
+            break;
+          } else if (i == leftValues.size()) {
+            // The left string is short.
+            result = -1;
+            break;
+          } else if (i == rightValues.size()) {
+            result = 1;
+            break;
+          }
+          auto left = leftValues[i].getInteger();
+          auto right = rightValues[i].getInteger();
+          if (left < right) {
+            // The left character is lower.
+            result = -1;
+            break;
+          } else if (left > right) {
+            result = 1;
+            break;
+          } else {
+            // Look further.
+            i++;
+          }
+        }
+        break;
+      }
+      default: {
+        WASM_UNREACHABLE("bad op");
+      }
+    }
+    return Literal(result);
+  }
+  Flow visitStringAs(StringAs* curr) {
+    // For now we only support JS-style strings.
+    assert(curr->op == StringAsWTF16);
+
+    Flow flow = visit(curr->ref);
+    if (flow.breaking()) {
+      return flow;
+    }
+    auto value = flow.getSingleValue();
+    auto data = value.getGCData();
+    if (!data) {
+      trap("null ref");
+    }
+
+    // A JS-style string can be viewed simply as the underlying data. All we
+    // need to do is fix up the type.
+    return Literal(data, curr->type.getHeapType());
+  }
   Flow visitStringWTF8Advance(StringWTF8Advance* curr) {
     WASM_UNREACHABLE("unimp");
   }
-  Flow visitStringWTF16Get(StringWTF16Get* curr) { WASM_UNREACHABLE("unimp"); }
+  Flow visitStringWTF16Get(StringWTF16Get* curr) {
+    NOTE_ENTER("StringEq");
+    Flow ref = visit(curr->ref);
+    if (ref.breaking()) {
+      return ref;
+    }
+    Flow pos = visit(curr->pos);
+    if (pos.breaking()) {
+      return pos;
+    }
+    auto refValue = ref.getSingleValue();
+    auto data = refValue.getGCData();
+    if (!data) {
+      trap("null ref");
+    }
+    auto& values = data->values;
+    Index i = pos.getSingleValue().geti32();
+    if (i >= values.size()) {
+      trap("string oob");
+    }
+    return Literal(values[i].geti32());
+  }
   Flow visitStringIterNext(StringIterNext* curr) { WASM_UNREACHABLE("unimp"); }
   Flow visitStringIterMove(StringIterMove* curr) { WASM_UNREACHABLE("unimp"); }
   Flow visitStringSliceWTF(StringSliceWTF* curr) { WASM_UNREACHABLE("unimp"); }
@@ -2038,6 +2261,14 @@ public:
     NOTE_ENTER("TableGrow");
     return Flow(NONCONSTANT_FLOW);
   }
+  Flow visitTableFill(TableFill* curr) {
+    NOTE_ENTER("TableFill");
+    return Flow(NONCONSTANT_FLOW);
+  }
+  Flow visitTableCopy(TableCopy* curr) {
+    NOTE_ENTER("TableCopy");
+    return Flow(NONCONSTANT_FLOW);
+  }
   Flow visitLoad(Load* curr) {
     NOTE_ENTER("Load");
     return Flow(NONCONSTANT_FLOW);
@@ -2102,8 +2333,28 @@ public:
     NOTE_ENTER("SIMDLoadStoreLane");
     return Flow(NONCONSTANT_FLOW);
   }
-  Flow visitArrayNewSeg(ArrayNewSeg* curr) {
-    NOTE_ENTER("ArrayNewSeg");
+  Flow visitArrayNewData(ArrayNewData* curr) {
+    NOTE_ENTER("ArrayNewData");
+    return Flow(NONCONSTANT_FLOW);
+  }
+  Flow visitArrayNewElem(ArrayNewElem* curr) {
+    NOTE_ENTER("ArrayNewElem");
+    return Flow(NONCONSTANT_FLOW);
+  }
+  Flow visitArrayCopy(ArrayCopy* curr) {
+    NOTE_ENTER("ArrayCopy");
+    return Flow(NONCONSTANT_FLOW);
+  }
+  Flow visitArrayFill(ArrayFill* curr) {
+    NOTE_ENTER("ArrayFill");
+    return Flow(NONCONSTANT_FLOW);
+  }
+  Flow visitArrayInitData(ArrayInitData* curr) {
+    NOTE_ENTER("ArrayInitData");
+    return Flow(NONCONSTANT_FLOW);
+  }
+  Flow visitArrayInitElem(ArrayInitElem* curr) {
+    NOTE_ENTER("ArrayInitElem");
     return Flow(NONCONSTANT_FLOW);
   }
   Flow visitPop(Pop* curr) {
@@ -2118,8 +2369,6 @@ public:
     NOTE_ENTER("Rethrow");
     return Flow(NONCONSTANT_FLOW);
   }
-  Flow visitStringNew(StringNew* curr) { return Flow(NONCONSTANT_FLOW); }
-  Flow visitStringConst(StringConst* curr) { return Flow(NONCONSTANT_FLOW); }
   Flow visitStringMeasure(StringMeasure* curr) {
     return Flow(NONCONSTANT_FLOW);
   }
@@ -2152,6 +2401,8 @@ public:
     }
     return ExpressionRunner<SubType>::visitRefAs(curr);
   }
+  Flow visitContNew(ContNew* curr) { WASM_UNREACHABLE("unimplemented"); }
+  Flow visitResume(Resume* curr) { WASM_UNREACHABLE("unimplemented"); }
 
   void trap(const char* why) override { throw NonconstantException(); }
 
@@ -2192,7 +2443,8 @@ public:
     virtual ~ExternalInterface() = default;
     virtual void init(Module& wasm, SubType& instance) {}
     virtual void importGlobals(GlobalValueSet& globals, Module& wasm) = 0;
-    virtual Literals callImport(Function* import, Literals& arguments) = 0;
+    virtual Literals callImport(Function* import,
+                                const Literals& arguments) = 0;
     virtual Literals callTable(Name tableName,
                                Index index,
                                HeapType sig,
@@ -2444,7 +2696,8 @@ private:
   // stack traces.
   std::vector<Name> functionStack;
 
-  std::unordered_set<size_t> droppedSegments;
+  std::unordered_set<Name> droppedDataSegments;
+  std::unordered_set<Name> droppedElementSegments;
 
   struct TableInterfaceInfo {
     // The external interface in which the table is defined.
@@ -2494,6 +2747,8 @@ private:
         Flow ret = self()->visit(segment->data[i]);
         extInterface->tableStore(tableName, offset + i, ret.getSingleValue());
       }
+
+      droppedElementSegments.insert(segment->name);
     });
   }
 
@@ -2534,14 +2789,14 @@ private:
 
       MemoryInit init;
       init.memory = segment->memory;
-      init.segment = i;
+      init.segment = segment->name;
       init.dest = segment->offset;
       init.offset = &offset;
       init.size = &size;
       init.finalize();
 
       DataDrop drop;
-      drop.segment = i;
+      drop.segment = segment->name;
       drop.finalize();
 
       self()->visit(&init);
@@ -2802,6 +3057,89 @@ public:
       return fail;
     }
     return ret;
+  }
+
+  Flow visitTableFill(TableFill* curr) {
+    NOTE_ENTER("TableFill");
+    Flow destFlow = self()->visit(curr->dest);
+    if (destFlow.breaking()) {
+      return destFlow;
+    }
+    Flow valueFlow = self()->visit(curr->value);
+    if (valueFlow.breaking()) {
+      return valueFlow;
+    }
+    Flow sizeFlow = self()->visit(curr->size);
+    if (sizeFlow.breaking()) {
+      return sizeFlow;
+    }
+    Name tableName = curr->table;
+    auto info = getTableInterfaceInfo(tableName);
+
+    Index dest = destFlow.getSingleValue().geti32();
+    Literal value = valueFlow.getSingleValue();
+    Index size = sizeFlow.getSingleValue().geti32();
+
+    Index tableSize = info.interface->tableSize(tableName);
+    if (dest + size > tableSize) {
+      trap("out of bounds table access");
+    }
+
+    for (Index i = 0; i < size; ++i) {
+      info.interface->tableStore(info.name, dest + i, value);
+    }
+    return Flow();
+  }
+
+  Flow visitTableCopy(TableCopy* curr) {
+    NOTE_ENTER("TableCopy");
+    Flow dest = self()->visit(curr->dest);
+    if (dest.breaking()) {
+      return dest;
+    }
+    Flow source = self()->visit(curr->source);
+    if (source.breaking()) {
+      return source;
+    }
+    Flow size = self()->visit(curr->size);
+    if (size.breaking()) {
+      return size;
+    }
+    NOTE_EVAL1(dest);
+    NOTE_EVAL1(source);
+    NOTE_EVAL1(size);
+    Address destVal(dest.getSingleValue().getUnsigned());
+    Address sourceVal(source.getSingleValue().getUnsigned());
+    Address sizeVal(size.getSingleValue().getUnsigned());
+
+    auto destInfo = getTableInterfaceInfo(curr->destTable);
+    auto sourceInfo = getTableInterfaceInfo(curr->sourceTable);
+    auto destTableSize = destInfo.interface->tableSize(destInfo.name);
+    auto sourceTableSize = sourceInfo.interface->tableSize(sourceInfo.name);
+    if (sourceVal + sizeVal > sourceTableSize ||
+        destVal + sizeVal > destTableSize ||
+        // FIXME: better/cheaper way to detect wrapping?
+        sourceVal + sizeVal < sourceVal || sourceVal + sizeVal < sizeVal ||
+        destVal + sizeVal < destVal || destVal + sizeVal < sizeVal) {
+      trap("out of bounds segment access in table.copy");
+    }
+
+    int64_t start = 0;
+    int64_t end = sizeVal;
+    int step = 1;
+    // Reverse direction if source is below dest
+    if (sourceVal < destVal) {
+      start = int64_t(sizeVal) - 1;
+      end = -1;
+      step = -1;
+    }
+    for (int64_t i = start; i != end; i += step) {
+      destInfo.interface->tableStore(
+        destInfo.name,
+        destVal + i,
+        sourceInfo.interface->tableLoad(sourceInfo.name, sourceVal + i));
+    }
+    return {};
   }
 
   Flow visitLocalGet(LocalGet* curr) {
@@ -3289,14 +3627,13 @@ public:
     NOTE_EVAL1(offset);
     NOTE_EVAL1(size);
 
-    assert(curr->segment < wasm.dataSegments.size());
-    auto& segment = wasm.dataSegments[curr->segment];
+    auto* segment = wasm.getDataSegment(curr->segment);
 
     Address destVal(dest.getSingleValue().getUnsigned());
     Address offsetVal(uint32_t(offset.getSingleValue().geti32()));
     Address sizeVal(uint32_t(size.getSingleValue().geti32()));
 
-    if (offsetVal + sizeVal > 0 && droppedSegments.count(curr->segment)) {
+    if (offsetVal + sizeVal > 0 && droppedDataSegments.count(curr->segment)) {
       trap("out of bounds segment access in memory.init");
     }
     if ((uint64_t)offsetVal + sizeVal > segment->data.size()) {
@@ -3318,7 +3655,7 @@ public:
   }
   Flow visitDataDrop(DataDrop* curr) {
     NOTE_ENTER("DataDrop");
-    droppedSegments.insert(curr->segment);
+    droppedDataSegments.insert(curr->segment);
     return {};
   }
   Flow visitMemoryCopy(MemoryCopy* curr) {
@@ -3413,8 +3750,8 @@ public:
     }
     return {};
   }
-  Flow visitArrayNewSeg(ArrayNewSeg* curr) {
-    NOTE_ENTER("ArrayNewSeg");
+  Flow visitArrayNewData(ArrayNewData* curr) {
+    NOTE_ENTER("ArrayNewData");
     auto offsetFlow = self()->visit(curr->offset);
     if (offsetFlow.breaking()) {
       return offsetFlow;
@@ -3429,47 +3766,151 @@ public:
 
     auto heapType = curr->type.getHeapType();
     const auto& element = heapType.getArray().element;
-    [[maybe_unused]] auto elemType = heapType.getArray().element.type;
+    Literals contents;
+
+    const auto& seg = *wasm.getDataSegment(curr->segment);
+    auto elemBytes = element.getByteSize();
+    auto end = offset + size * elemBytes;
+    if ((size != 0ull && droppedDataSegments.count(curr->segment)) ||
+        end > seg.data.size()) {
+      trap("out of bounds segment access in array.new_data");
+    }
+    contents.reserve(size);
+    for (Index i = offset; i < end; i += elemBytes) {
+      auto addr = (void*)&seg.data[i];
+      contents.push_back(Literal::makeFromMemory(addr, element));
+    }
+    return self()->makeGCData(contents, curr->type);
+  }
+  Flow visitArrayNewElem(ArrayNewElem* curr) {
+    NOTE_ENTER("ArrayNewElem");
+    auto offsetFlow = self()->visit(curr->offset);
+    if (offsetFlow.breaking()) {
+      return offsetFlow;
+    }
+    auto sizeFlow = self()->visit(curr->size);
+    if (sizeFlow.breaking()) {
+      return sizeFlow;
+    }
+
+    uint64_t offset = offsetFlow.getSingleValue().getUnsigned();
+    uint64_t size = sizeFlow.getSingleValue().getUnsigned();
 
     Literals contents;
 
-    switch (curr->op) {
-      case NewData: {
-        assert(curr->segment < wasm.dataSegments.size());
-        assert(elemType.isNumber());
-        const auto& seg = *wasm.dataSegments[curr->segment];
-        auto elemBytes = element.getByteSize();
-        auto end = offset + size * elemBytes;
-        if ((size != 0ull && droppedSegments.count(curr->segment)) ||
-            end > seg.data.size()) {
-          trap("out of bounds segment access in array.new_data");
-        }
-        contents.reserve(size);
-        for (Index i = offset; i < end; i += elemBytes) {
-          auto addr = (void*)&seg.data[i];
-          contents.push_back(Literal::makeFromMemory(addr, element));
-        }
-        break;
-      }
-      case NewElem: {
-        assert(curr->segment < wasm.elementSegments.size());
-        const auto& seg = *wasm.elementSegments[curr->segment];
-        auto end = offset + size;
-        // TODO: Handle dropped element segments once we support those.
-        if (end > seg.data.size()) {
-          trap("out of bounds segment access in array.new_elem");
-        }
-        contents.reserve(size);
-        for (Index i = offset; i < end; ++i) {
-          auto val = self()->visit(seg.data[i]).getSingleValue();
-          contents.push_back(val);
-        }
-        break;
-      }
-      default:
-        WASM_UNREACHABLE("unexpected op");
+    const auto& seg = *wasm.getElementSegment(curr->segment);
+    auto end = offset + size;
+    if (end > seg.data.size()) {
+      trap("out of bounds segment access in array.new_elem");
     }
-    return Literal(std::make_shared<GCData>(heapType, contents), heapType);
+    if (end > 0 && droppedElementSegments.count(curr->segment)) {
+      trap("out of bounds segment access in array.new_elem");
+    }
+    contents.reserve(size);
+    for (Index i = offset; i < end; ++i) {
+      auto val = self()->visit(seg.data[i]).getSingleValue();
+      contents.push_back(val);
+    }
+    return self()->makeGCData(contents, curr->type);
+  }
+  Flow visitArrayInitData(ArrayInitData* curr) {
+    NOTE_ENTER("ArrayInit");
+    Flow ref = self()->visit(curr->ref);
+    if (ref.breaking()) {
+      return ref;
+    }
+    Flow index = self()->visit(curr->index);
+    if (index.breaking()) {
+      return index;
+    }
+    Flow offset = self()->visit(curr->offset);
+    if (offset.breaking()) {
+      return offset;
+    }
+    Flow size = self()->visit(curr->size);
+    if (size.breaking()) {
+      return size;
+    }
+    auto data = ref.getSingleValue().getGCData();
+    if (!data) {
+      trap("null ref");
+    }
+    size_t indexVal = index.getSingleValue().getUnsigned();
+    size_t offsetVal = offset.getSingleValue().getUnsigned();
+    size_t sizeVal = size.getSingleValue().getUnsigned();
+
+    size_t arraySize = data->values.size();
+    if ((uint64_t)indexVal + sizeVal > arraySize) {
+      trap("out of bounds array access in array.init");
+    }
+
+    Module& wasm = *self()->getModule();
+
+    auto* seg = wasm.getDataSegment(curr->segment);
+    auto elem = curr->ref->type.getHeapType().getArray().element;
+    size_t elemSize = elem.getByteSize();
+    uint64_t readSize = (uint64_t)sizeVal * elemSize;
+    if (offsetVal + readSize > seg->data.size()) {
+      trap("out of bounds segment access in array.init_data");
+    }
+    if (offsetVal + sizeVal > 0 && droppedDataSegments.count(curr->segment)) {
+      trap("out of bounds segment access in array.init_data");
+    }
+    for (size_t i = 0; i < sizeVal; i++) {
+      void* addr = (void*)&seg->data[offsetVal + i * elemSize];
+      data->values[indexVal + i] = Literal::makeFromMemory(addr, elem);
+    }
+    return {};
+  }
+  Flow visitArrayInitElem(ArrayInitElem* curr) {
+    NOTE_ENTER("ArrayInit");
+    Flow ref = self()->visit(curr->ref);
+    if (ref.breaking()) {
+      return ref;
+    }
+    Flow index = self()->visit(curr->index);
+    if (index.breaking()) {
+      return index;
+    }
+    Flow offset = self()->visit(curr->offset);
+    if (offset.breaking()) {
+      return offset;
+    }
+    Flow size = self()->visit(curr->size);
+    if (size.breaking()) {
+      return size;
+    }
+    auto data = ref.getSingleValue().getGCData();
+    if (!data) {
+      trap("null ref");
+    }
+    size_t indexVal = index.getSingleValue().getUnsigned();
+    size_t offsetVal = offset.getSingleValue().getUnsigned();
+    size_t sizeVal = size.getSingleValue().getUnsigned();
+
+    size_t arraySize = data->values.size();
+    if ((uint64_t)indexVal + sizeVal > arraySize) {
+      trap("out of bounds array access in array.init");
+    }
+
+    Module& wasm = *self()->getModule();
+
+    auto* seg = wasm.getElementSegment(curr->segment);
+    auto max = (uint64_t)offsetVal + sizeVal;
+    if (max > seg->data.size()) {
+      trap("out of bounds segment access in array.init_elem");
+    }
+    if (max > 0 && droppedElementSegments.count(curr->segment)) {
+      trap("out of bounds segment access in array.init_elem");
+    }
+    for (size_t i = 0; i < sizeVal; i++) {
+      // TODO: This is not correct because it does not preserve the identity
+      // of references in the table! ArrayNew suffers the same problem.
+      // Fixing it will require changing how we represent segments, at least
+      // in the interpreter.
+      data->values[indexVal + i] = self()->visit(seg->data[i]).getSingleValue();
+    }
+    return {};
   }
   Flow visitTry(Try* curr) {
     NOTE_ENTER("Try");
@@ -3531,10 +3972,12 @@ public:
     NOTE_ENTER("Pop");
     assert(!multiValues.empty());
     auto ret = multiValues.back();
-    assert(curr->type == ret.getType());
+    assert(Type::isSubType(ret.getType(), curr->type));
     multiValues.pop_back();
     return ret;
   }
+  Flow visitContNew(ContNew* curr) { return Flow(NONCONSTANT_FLOW); }
+  Flow visitResume(Resume* curr) { return Flow(NONCONSTANT_FLOW); }
 
   void trap(const char* why) override { externalInterface->trap(why); }
 
@@ -3586,6 +4029,11 @@ public:
 
   // Call a function, starting an invocation.
   Literals callFunction(Name name, const Literals& arguments) {
+    auto* func = wasm.getFunction(name);
+    if (func->imported()) {
+      return externalInterface->callImport(func, arguments);
+    }
+
     // if the last call ended in a jump up the stack, it might have left stuff
     // for us to clean up here
     callDepth = 0;

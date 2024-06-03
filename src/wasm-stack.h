@@ -60,20 +60,22 @@ public:
   StackInst(MixedArena&) {}
 
   enum Op {
-    Basic,      // an instruction directly corresponding to a non-control-flow
-                // Binaryen IR node
-    BlockBegin, // the beginning of a block
-    BlockEnd,   // the ending of a block
-    IfBegin,    // the beginning of a if
-    IfElse,     // the else of a if
-    IfEnd,      // the ending of a if
-    LoopBegin,  // the beginning of a loop
-    LoopEnd,    // the ending of a loop
-    TryBegin,   // the beginning of a try
-    Catch,      // the catch within a try
-    CatchAll,   // the catch_all within a try
-    Delegate,   // the delegate within a try
-    TryEnd      // the ending of a try
+    Basic,         // an instruction directly corresponding to a
+                   // non-control-flow Binaryen IR node
+    BlockBegin,    // the beginning of a block
+    BlockEnd,      // the ending of a block
+    IfBegin,       // the beginning of a if
+    IfElse,        // the else of a if
+    IfEnd,         // the ending of a if
+    LoopBegin,     // the beginning of a loop
+    LoopEnd,       // the ending of a loop
+    TryBegin,      // the beginning of a try
+    Catch,         // the catch within a try
+    CatchAll,      // the catch_all within a try
+    Delegate,      // the delegate within a try
+    TryEnd,        // the ending of a try
+    TryTableBegin, // the beginning of a try_table
+    TryTableEnd    // the ending of a try_table
   } op;
 
   Expression* origin; // the expression this originates from
@@ -148,6 +150,11 @@ private:
   InsertOrderedMap<Type, Index> scratchLocals;
   void countScratchLocals();
   void setScratchLocals();
+
+  // local.get, local.tee, and glboal.get expressions that will be followed by
+  // tuple.extracts. We can optimize these by getting only the local for the
+  // extracted index.
+  std::unordered_map<Expression*, Index> extractedGets;
 };
 
 // Takes binaryen IR and converts it to something else (binary or stack IR)
@@ -165,6 +172,7 @@ public:
   void visitIf(If* curr);
   void visitLoop(Loop* curr);
   void visitTry(Try* curr);
+  void visitTryTable(TryTable* curr);
 
 protected:
   Function* func = nullptr;
@@ -232,7 +240,6 @@ void BinaryenIRWriter<SubType>::visitPossibleBlockContents(Expression* curr) {
 
 template<typename SubType>
 void BinaryenIRWriter<SubType>::visit(Expression* curr) {
-  emitDebugLocation(curr);
   // We emit unreachable instructions that create unreachability, but not
   // unreachable instructions that just inherit unreachability from their
   // children, since the latter won't be reached. This (together with logic in
@@ -252,6 +259,7 @@ void BinaryenIRWriter<SubType>::visit(Expression* curr) {
     // `curr` is not reachable, so don't emit it.
     return;
   }
+  emitDebugLocation(curr);
   // Control flow requires special handling, but most instructions can be
   // emitted directly after their children.
   if (Properties::isControlFlowStructure(curr)) {
@@ -399,6 +407,16 @@ template<typename SubType> void BinaryenIRWriter<SubType>::visitTry(Try* curr) {
   }
 }
 
+template<typename SubType>
+void BinaryenIRWriter<SubType>::visitTryTable(TryTable* curr) {
+  emit(curr);
+  visitPossibleBlockContents(curr->body);
+  emitScopeEnd(curr);
+  if (curr->type == Type::unreachable) {
+    emitUnreachable();
+  }
+}
+
 // Binaryen IR to binary writer
 class BinaryenIRToBinaryWriter
   : public BinaryenIRWriter<BinaryenIRToBinaryWriter> {
@@ -410,10 +428,6 @@ public:
                            bool DWARF = false)
     : BinaryenIRWriter<BinaryenIRToBinaryWriter>(func), parent(parent),
       writer(parent, o, func, sourceMap, DWARF), sourceMap(sourceMap) {}
-
-  void visit(Expression* curr) {
-    BinaryenIRWriter<BinaryenIRToBinaryWriter>::visit(curr);
-  }
 
   void emit(Expression* curr) { writer.visit(curr); }
   void emitHeader() {

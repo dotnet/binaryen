@@ -70,9 +70,21 @@ Literal::Literal(const uint8_t init[16]) : type(Type::v128) {
 }
 
 Literal::Literal(std::shared_ptr<GCData> gcData, HeapType type)
-  : gcData(gcData), type(type, NonNullable) {
-  // The type must be a proper type for GC data.
-  assert((isData() && gcData) || (type.isBottom() && !gcData));
+  : gcData(gcData), type(type, gcData ? NonNullable : Nullable) {
+  // The type must be a proper type for GC data: either a struct, array, or
+  // string; or an externalized version of the same; or a null.
+  assert((isData() && gcData) || (type == HeapType::ext && gcData) ||
+         (type.isBottom() && !gcData));
+}
+
+Literal::Literal(std::string string)
+  : gcData(nullptr), type(Type(HeapType::string, NonNullable)) {
+  // TODO: we could in theory internalize strings
+  Literals contents;
+  for (auto c : string) {
+    contents.push_back(Literal(int32_t(c)));
+  }
+  gcData = std::make_shared<GCData>(HeapType::string, contents);
 }
 
 Literal::Literal(const Literal& other) : type(other.type) {
@@ -99,7 +111,7 @@ Literal::Literal(const Literal& other) : type(other.type) {
     new (&gcData) std::shared_ptr<GCData>();
     return;
   }
-  if (other.isData()) {
+  if (other.isData() || other.type.getHeapType() == HeapType::ext) {
     new (&gcData) std::shared_ptr<GCData>(other.gcData);
     return;
   }
@@ -115,18 +127,20 @@ Literal::Literal(const Literal& other) : type(other.type) {
         case HeapType::i31:
           i32 = other.i32;
           return;
+        case HeapType::ext:
+          gcData = other.gcData;
+          return;
         case HeapType::none:
         case HeapType::noext:
         case HeapType::nofunc:
-          // Null
-          return;
-        case HeapType::ext:
+        case HeapType::noexn:
+          WASM_UNREACHABLE("null literals should already have been handled");
         case HeapType::any:
-          WASM_UNREACHABLE("TODO: extern literals");
         case HeapType::eq:
         case HeapType::func:
         case HeapType::struct_:
         case HeapType::array:
+        case HeapType::exn:
           WASM_UNREACHABLE("invalid type");
         case HeapType::string:
         case HeapType::stringview_wtf8:
@@ -143,7 +157,7 @@ Literal::~Literal() {
   if (type.isBasic()) {
     return;
   }
-  if (isNull() || isData()) {
+  if (isNull() || isData() || type.getHeapType() == HeapType::ext) {
     gcData.~shared_ptr();
   }
 }
@@ -421,6 +435,9 @@ bool Literal::operator==(const Literal& other) const {
       assert(func.is() && other.func.is());
       return func == other.func;
     }
+    if (type.isString()) {
+      return gcData->values == other.gcData->values;
+    }
     if (type.isData()) {
       return gcData == other.gcData;
     }
@@ -525,7 +542,36 @@ void Literal::printVec128(std::ostream& o, const std::array<uint8_t, 16>& v) {
   o << std::dec;
 }
 
+// Printing literals is mainly for debugging purposes, and they can be of
+// massive size or even infinitely recursive, so abbreviate past some point.
+// We do so by tracking how much we've printed so far, and whether we are the
+// "toplevel" call (the entry point from somewhere else), and we reset the
+// count when we leave the toplevel call.
+namespace {
+struct PrintLimiter {
+  static const size_t PRINT_LIMIT = 100;
+  static thread_local size_t printed;
+
+  bool isTopLevel;
+
+  PrintLimiter() : isTopLevel(printed == 0) { printed++; }
+
+  ~PrintLimiter() {
+    if (isTopLevel) {
+      printed = 0;
+    }
+  }
+
+  bool stop() { return printed >= PRINT_LIMIT; }
+};
+
+thread_local size_t PrintLimiter::printed = 0;
+
+} // namespace
+
 std::ostream& operator<<(std::ostream& o, Literal literal) {
+  PrintLimiter limiter;
+
   prepareMinorColor(o);
   assert(literal.type.isSingle());
   if (literal.type.isBasic()) {
@@ -569,15 +615,35 @@ std::ostream& operator<<(std::ostream& o, Literal literal) {
         case HeapType::nofunc:
           o << "nullfuncref";
           break;
+        case HeapType::noexn:
+          o << "nullexnref";
+          break;
         case HeapType::ext:
+          o << "externref";
+          break;
+        case HeapType::exn:
+          o << "exnref";
+          break;
         case HeapType::any:
-          WASM_UNREACHABLE("TODO: extern literals");
         case HeapType::eq:
         case HeapType::func:
         case HeapType::struct_:
         case HeapType::array:
           WASM_UNREACHABLE("invalid type");
-        case HeapType::string:
+        case HeapType::string: {
+          auto data = literal.getGCData();
+          if (!data) {
+            o << "nullstring";
+          } else {
+            o << "string(\"";
+            for (auto c : data->values) {
+              // TODO: more than ascii
+              o << char(c.getInteger());
+            }
+            o << "\")";
+          }
+          break;
+        }
         case HeapType::stringview_wtf8:
         case HeapType::stringview_wtf16:
         case HeapType::stringview_iter:
@@ -597,18 +663,31 @@ std::ostream& operator<<(std::ostream& o, Literal literal) {
 }
 
 std::ostream& operator<<(std::ostream& o, wasm::Literals literals) {
+  PrintLimiter limiter;
+
+  if (limiter.stop()) {
+    return o << "[..]";
+  }
+
   if (literals.size() == 1) {
     return o << literals[0];
-  } else {
-    o << '(';
-    if (literals.size() > 0) {
-      o << literals[0];
-    }
-    for (size_t i = 1; i < literals.size(); ++i) {
-      o << ", " << literals[i];
-    }
-    return o << ')';
   }
+
+  o << '(';
+  bool first = true;
+  for (auto& literal : literals) {
+    if (limiter.stop()) {
+      o << "[..]";
+      break;
+    }
+    if (first) {
+      first = false;
+    } else {
+      o << ", ";
+    }
+    o << literal;
+  }
+  return o << ')';
 }
 
 Literal Literal::countLeadingZeroes() const {
@@ -1455,8 +1534,12 @@ Literal Literal::min(const Literal& other) const {
       if (std::isnan(r)) {
         return standardizeNaN(Literal(r));
       }
+      // This code is written in a form that avoids a gcc 13 bug, see
+      // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=111694
       if (l == r && l == 0) {
-        return Literal(std::signbit(l) ? l : r);
+        auto lSigned = std::signbit(l);
+        auto rSigned = std::signbit(r);
+        return Literal(lSigned || rSigned ? -0.0f : 0.0f);
       }
       return Literal(std::min(l, r));
     }
@@ -1469,7 +1552,9 @@ Literal Literal::min(const Literal& other) const {
         return standardizeNaN(Literal(r));
       }
       if (l == r && l == 0) {
-        return Literal(std::signbit(l) ? l : r);
+        auto lSigned = std::signbit(l);
+        auto rSigned = std::signbit(r);
+        return Literal(lSigned || rSigned ? -0.0 : 0.0);
       }
       return Literal(std::min(l, r));
     }
@@ -1489,7 +1574,9 @@ Literal Literal::max(const Literal& other) const {
         return standardizeNaN(Literal(r));
       }
       if (l == r && l == 0) {
-        return Literal(std::signbit(l) ? r : l);
+        auto lSigned = std::signbit(l);
+        auto rSigned = std::signbit(r);
+        return Literal(lSigned && rSigned ? -0.0f : 0.0f);
       }
       return Literal(std::max(l, r));
     }
@@ -1502,7 +1589,9 @@ Literal Literal::max(const Literal& other) const {
         return standardizeNaN(Literal(r));
       }
       if (l == r && l == 0) {
-        return Literal(std::signbit(l) ? r : l);
+        auto lSigned = std::signbit(l);
+        auto rSigned = std::signbit(r);
+        return Literal(lSigned && rSigned ? -0.0 : 0.0);
       }
       return Literal(std::max(l, r));
     }
@@ -2561,6 +2650,44 @@ Literal Literal::relaxedFmaF64x2(const Literal& left,
 Literal Literal::relaxedFmsF64x2(const Literal& left,
                                  const Literal& right) const {
   return ternary<2, &Literal::getLanesF64x2, &Literal::fms>(*this, left, right);
+}
+
+Literal Literal::externalize() const {
+  assert(Type::isSubType(type, Type(HeapType::any, Nullable)) &&
+         "can only externalize internal references");
+  if (isNull()) {
+    return Literal(std::shared_ptr<GCData>{}, HeapType::noext);
+  }
+  auto heapType = type.getHeapType();
+  if (heapType.isBasic()) {
+    switch (heapType.getBasic()) {
+      case HeapType::i31: {
+        return Literal(std::make_shared<GCData>(HeapType::i31, Literals{*this}),
+                       HeapType::ext);
+      }
+      case HeapType::string:
+      case HeapType::stringview_wtf8:
+      case HeapType::stringview_wtf16:
+      case HeapType::stringview_iter:
+        WASM_UNREACHABLE("TODO: string literals");
+      default:
+        WASM_UNREACHABLE("unexpected type");
+    }
+  }
+  return Literal(gcData, HeapType::ext);
+}
+
+Literal Literal::internalize() const {
+  assert(Type::isSubType(type, Type(HeapType::ext, Nullable)) &&
+         "can only internalize external references");
+  if (isNull()) {
+    return Literal(std::shared_ptr<GCData>{}, HeapType::none);
+  }
+  if (gcData->type == HeapType::i31) {
+    assert(gcData->values[0].type.getHeapType() == HeapType::i31);
+    return gcData->values[0];
+  }
+  return Literal(gcData, gcData->type);
 }
 
 } // namespace wasm

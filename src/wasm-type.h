@@ -40,17 +40,6 @@
 
 namespace wasm {
 
-enum class TypeSystem {
-  Isorecursive,
-  Nominal,
-};
-
-// This should only ever be called before any Types or HeapTypes have been
-// created. The default system is equirecursive.
-void setTypeSystem(TypeSystem system);
-
-TypeSystem getTypeSystem();
-
 // Dangerous! Frees all types and heap types that have ever been created and
 // resets the type system's internal state. This is only really meant to be used
 // for tests.
@@ -62,11 +51,14 @@ void destroyAllTypesForTestingPurposesOnly();
 class Type;
 class HeapType;
 class RecGroup;
-struct Tuple;
 struct Signature;
+struct Continuation;
 struct Field;
 struct Struct;
 struct Array;
+
+using TypeList = std::vector<Type>;
+using Tuple = TypeList;
 
 enum Nullability { NonNullable, Nullable };
 enum Mutability { Immutable, Mutable };
@@ -145,6 +137,9 @@ public:
   // │ eqref       ║ x │   │ x │ x │    n  │ │  n_ullable
   // │ i31ref      ║ x │   │ x │ x │    n  │ │
   // │ structref   ║ x │   │ x │ x │    n  │ │
+  // │ arrayref    ║ x │   │ x │ x │    n  │ │
+  // │ exnref      ║ x │   │ x │ x │    n  │ │
+  // │ stringref   ║ x │   │ x │ x │    n  │ │
   // ├─ Compound ──╫───┼───┼───┼───┤───────┤ │
   // │ Ref         ║   │ x │ x │ x │ f? n? │◄┘
   // │ Tuple       ║   │ x │   │ x │       │
@@ -159,6 +154,7 @@ public:
   bool isSingle() const { return isConcrete() && !isTuple(); }
   bool isRef() const;
   bool isFunction() const;
+  // See literal.h.
   bool isData() const;
   // Checks whether a type is a reference and is nullable. This returns false
   // for a value that is not a reference, that is, for which nullability is
@@ -171,8 +167,11 @@ public:
   bool isNonNullable() const;
   // Whether this type is only inhabited by null values.
   bool isNull() const;
+  bool isSignature() const;
   bool isStruct() const;
   bool isArray() const;
+  bool isException() const;
+  bool isString() const;
   bool isDefaultable() const;
 
   Nullability getNullability() const;
@@ -271,6 +270,8 @@ public:
     return lub;
   }
 
+  static Type getGreatestLowerBound(Type a, Type b);
+
   // Helper allowing the value of `print(...)` to be sent to an ostream. Stores
   // a `TypeID` because `Type` is incomplete at this point and using a reference
   // makes it less convenient to use.
@@ -325,6 +326,7 @@ public:
     i31,
     struct_,
     array,
+    exn,
     string,
     stringview_wtf8,
     stringview_wtf16,
@@ -332,8 +334,9 @@ public:
     none,
     noext,
     nofunc,
+    noexn,
   };
-  static constexpr BasicHeapType _last_basic_type = nofunc;
+  static constexpr BasicHeapType _last_basic_type = noexn;
 
   // BasicHeapType can be implicitly upgraded to HeapType
   constexpr HeapType(BasicHeapType id) : id(id) {}
@@ -349,6 +352,8 @@ public:
   // this signature.
   HeapType(Signature signature);
 
+  HeapType(Continuation cont);
+
   // Create a HeapType with the given structure. In equirecursive mode, this may
   // be the same as a previous HeapType created with the same contents. In
   // nominal mode, this will be a fresh type distinct from all previously
@@ -362,16 +367,27 @@ public:
   bool isFunction() const;
   bool isData() const;
   bool isSignature() const;
+  bool isContinuation() const;
   bool isStruct() const;
   bool isArray() const;
+  bool isException() const;
+  bool isString() const;
   bool isBottom() const;
+  bool isOpen() const;
 
   Signature getSignature() const;
+  Continuation getContinuation() const;
+
   const Struct& getStruct() const;
   Array getArray() const;
 
-  // If there is a nontrivial (i.e. non-basic) nominal supertype, return it,
-  // else an empty optional.
+  // If there is a nontrivial (i.e. non-basic, one that was declared by the
+  // module) nominal supertype, return it, else an empty optional.
+  std::optional<HeapType> getDeclaredSuperType() const;
+
+  // As |getDeclaredSuperType|, but also handles basic types, that is, if the
+  // super is a basic type, then we return it here. Declared types are returned
+  // as well, just like |getDeclaredSuperType|.
   std::optional<HeapType> getSuperType() const;
 
   // Return the depth of this heap type in the nominal type hierarchy, i.e. the
@@ -380,6 +396,9 @@ public:
 
   // Get the bottom heap type for this heap type's hierarchy.
   BasicHeapType getBottom() const;
+
+  // Get the top heap type for this heap type's hierarchy.
+  BasicHeapType getTop() const;
 
   // Get the recursion group for this non-basic type.
   RecGroup getRecGroup() const;
@@ -401,6 +420,8 @@ public:
 
   // Returns true if left is a subtype of right. Subtype includes itself.
   static bool isSubType(HeapType left, HeapType right);
+
+  std::vector<Type> getTypeChildren() const;
 
   // Return the ordered HeapType children, looking through child Types.
   std::vector<HeapType> getHeapTypeChildren() const;
@@ -459,31 +480,6 @@ public:
   HeapType operator[](size_t i) const { return *Iterator{{this, i}}; }
 };
 
-using TypeList = std::vector<Type>;
-
-// Passed by reference rather than by value because it can own an unbounded
-// amount of data.
-struct Tuple {
-  TypeList types;
-  Tuple() : types() {}
-  Tuple(std::initializer_list<Type> types) : types(types) { validate(); }
-  Tuple(const TypeList& types) : types(types) { validate(); }
-  Tuple(TypeList&& types) : types(std::move(types)) { validate(); }
-
-  bool operator==(const Tuple& other) const { return types == other.types; }
-  bool operator!=(const Tuple& other) const { return !(*this == other); }
-  std::string toString() const;
-
-private:
-  void validate() {
-#ifndef NDEBUG
-    for (auto type : types) {
-      assert(type.isSingle());
-    }
-#endif
-  }
-};
-
 struct Signature {
   Type params;
   Type results;
@@ -493,6 +489,16 @@ struct Signature {
     return params == other.params && results == other.results;
   }
   bool operator!=(const Signature& other) const { return !(*this == other); }
+  std::string toString() const;
+};
+
+struct Continuation {
+  HeapType type;
+  Continuation(HeapType type) : type(type) {}
+  bool operator==(const Continuation& other) const {
+    return type == other.type;
+  }
+  bool operator!=(const Continuation& other) const { return !(*this == other); }
   std::string toString() const;
 };
 
@@ -546,6 +552,7 @@ struct Struct {
 
   // Prevent accidental copies
   Struct& operator=(const Struct&) = delete;
+  Struct& operator=(Struct&&) = default;
 };
 
 struct Array {
@@ -556,6 +563,8 @@ struct Array {
   bool operator==(const Array& other) const { return element == other.element; }
   bool operator!=(const Array& other) const { return !(*this == other); }
   std::string toString() const;
+
+  Array& operator=(const Array& other) = default;
 };
 
 // TypeBuilder - allows for the construction of recursive types. Contains a
@@ -585,20 +594,12 @@ struct TypeBuilder {
   // The number of HeapType slots in the TypeBuilder.
   size_t size();
 
-  // Sets the heap type at index `i`. May only be called before `build`. The
-  // BasicHeapType overload may not be used in nominal mode.
-  void setHeapType(size_t i, HeapType::BasicHeapType basic);
+  // Sets the heap type at index `i`. May only be called before `build`.
   void setHeapType(size_t i, Signature signature);
+  void setHeapType(size_t i, Continuation continuation);
   void setHeapType(size_t i, const Struct& struct_);
   void setHeapType(size_t i, Struct&& struct_);
   void setHeapType(size_t i, Array array);
-
-  // This is an ugly hack around the fact that temp heap types initialized with
-  // BasicHeapTypes are not themselves considered basic, so `HeapType::isBasic`
-  // and `HeapType::getBasic` do not work as expected with them. Call these
-  // methods instead.
-  bool isBasic(size_t i);
-  HeapType::BasicHeapType getBasic(size_t i);
 
   // Gets the temporary HeapType at index `i`. This HeapType should only be used
   // to construct temporary Types using the methods below.
@@ -618,6 +619,8 @@ struct TypeBuilder {
   // Create a new recursion group covering slots [i, i + length). Groups must
   // not overlap or go out of bounds.
   void createRecGroup(size_t i, size_t length);
+
+  void setOpen(size_t i, bool open = true);
 
   enum class ErrorReason {
     // There is a cycle in the supertype relation.
@@ -643,6 +646,7 @@ struct TypeBuilder {
     const std::vector<HeapType>& operator*() const {
       return std::get<std::vector<HeapType>>(*this);
     }
+    const std::vector<HeapType>* operator->() const { return &*(*this); }
     const Error* getError() const { return std::get_if<Error>(this); }
   };
 
@@ -659,12 +663,12 @@ struct TypeBuilder {
     TypeBuilder& builder;
     size_t index;
     operator HeapType() const { return builder.getTempHeapType(index); }
-    Entry& operator=(HeapType::BasicHeapType basic) {
-      builder.setHeapType(index, basic);
-      return *this;
-    }
     Entry& operator=(Signature signature) {
       builder.setHeapType(index, signature);
+      return *this;
+    }
+    Entry& operator=(Continuation continuation) {
+      builder.setHeapType(index, continuation);
       return *this;
     }
     Entry& operator=(const Struct& struct_) {
@@ -683,10 +687,30 @@ struct TypeBuilder {
       builder.setSubType(index, other);
       return *this;
     }
+    Entry& setOpen(bool open = true) {
+      builder.setOpen(index, open);
+      return *this;
+    }
   };
 
   Entry operator[](size_t i) { return Entry{*this, i}; }
+
+  void dump();
 };
+
+// We consider certain specific types to always be public, to allow closed-
+// world to operate even if they escape. Specifically, "plain old data" types
+// like array of i8 and i16, which are used to represent strings, may cross
+// the boundary in Web environments.
+//
+// These are "ignorable as public", because we do not error on them being
+// public. That is, we
+//
+//  1. Consider them public, so that passes that do not operate on public types
+//     do not in fact operate on them, and
+//  2. Are ok with them being public in the validator.
+//
+std::unordered_set<HeapType> getIgnorablePublicTypes();
 
 std::ostream& operator<<(std::ostream&, Type);
 std::ostream& operator<<(std::ostream&, Type::Printed);
@@ -694,6 +718,7 @@ std::ostream& operator<<(std::ostream&, HeapType);
 std::ostream& operator<<(std::ostream&, HeapType::Printed);
 std::ostream& operator<<(std::ostream&, Tuple);
 std::ostream& operator<<(std::ostream&, Signature);
+std::ostream& operator<<(std::ostream&, Continuation);
 std::ostream& operator<<(std::ostream&, Field);
 std::ostream& operator<<(std::ostream&, Struct);
 std::ostream& operator<<(std::ostream&, Array);
@@ -707,13 +732,13 @@ template<> class hash<wasm::Type> {
 public:
   size_t operator()(const wasm::Type&) const;
 };
-template<> class hash<wasm::Tuple> {
-public:
-  size_t operator()(const wasm::Tuple&) const;
-};
 template<> class hash<wasm::Signature> {
 public:
   size_t operator()(const wasm::Signature&) const;
+};
+template<> class hash<wasm::Continuation> {
+public:
+  size_t operator()(const wasm::Continuation&) const;
 };
 template<> class hash<wasm::Field> {
 public:

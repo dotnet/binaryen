@@ -73,7 +73,10 @@ public:
 
   // string methods
   IString str() const;
+  // convert a string to a string
   std::string toString() const;
+  // convert anything to a string
+  std::string forceString() const;
   Element* setString(IString str__, bool dollared__, bool quoted__);
   Element* setMetadata(size_t line_, size_t col_, SourceLocation* startLoc_);
 
@@ -83,7 +86,7 @@ public:
   template<typename T> bool operator!=(T t) { return !(*this == t); }
 
   // printing
-  friend std::ostream& operator<<(std::ostream& o, Element& e);
+  friend std::ostream& operator<<(std::ostream& o, const Element& e);
   void dump();
 };
 
@@ -124,7 +127,9 @@ class SExpressionWasmBuilder {
 
   std::vector<Name> functionNames;
   std::vector<Name> tableNames;
+  std::vector<Name> elemSegmentNames;
   std::vector<Name> memoryNames;
+  std::vector<Name> dataSegmentNames;
   std::vector<Name> globalNames;
   std::vector<Name> tagNames;
   int functionCounter = 0;
@@ -170,7 +175,9 @@ private:
 
   Name getFunctionName(Element& s);
   Name getTableName(Element& s);
+  Name getElemSegmentName(Element& s);
   Name getMemoryName(Element& s);
+  Name getDataSegmentName(Element& s);
   Name getGlobalName(Element& s);
   Name getTagName(Element& s);
   void parseStart(Element& s) { wasm.addStart(getFunctionName(*s[1])); }
@@ -263,7 +270,7 @@ private:
   }
   enum class LabelType { Break, Exception };
   Name getLabel(Element& s, LabelType labelType = LabelType::Break);
-  Expression* makeBreak(Element& s);
+  Expression* makeBreak(Element& s, bool isConditional);
   Expression* makeBreakTable(Element& s);
   Expression* makeReturn(Element& s);
   Expression* makeRefNull(Element& s);
@@ -274,34 +281,38 @@ private:
   Expression* makeTableSet(Element& s);
   Expression* makeTableSize(Element& s);
   Expression* makeTableGrow(Element& s);
+  Expression* makeTableFill(Element& s);
+  Expression* makeTableCopy(Element& s);
   Expression* makeTry(Element& s);
-  Expression* makeTryOrCatchBody(Element& s, Type type, bool isTry);
+  Expression* makeTryTable(Element& s);
   Expression* makeThrow(Element& s);
   Expression* makeRethrow(Element& s);
+  Expression* makeThrowRef(Element& s);
   Expression* makeTupleMake(Element& s);
   Expression* makeTupleExtract(Element& s);
+  Expression* makeTupleDrop(Element& s);
   Expression* makeCallRef(Element& s, bool isReturn);
-  Expression* makeI31New(Element& s);
+  Expression* makeRefI31(Element& s);
   Expression* makeI31Get(Element& s, bool signed_);
-  Expression* makeRefTest(Element& s,
-                          std::optional<Type> castType = std::nullopt);
-  Expression* makeRefCast(Element& s,
-                          std::optional<Type> castType = std::nullopt);
-  Expression* makeRefCastNop(Element& s);
+  Expression* makeRefTest(Element& s);
+  Expression* makeRefCast(Element& s);
   Expression* makeBrOnNull(Element& s, bool onFail = false);
-  Expression*
-  makeBrOnCast(Element& s, std::optional<Type> castType, bool onFail = false);
+  Expression* makeBrOnCast(Element& s, bool onFail = false);
   Expression* makeStructNew(Element& s, bool default_);
   Index getStructIndex(Element& type, Element& field);
   Expression* makeStructGet(Element& s, bool signed_ = false);
   Expression* makeStructSet(Element& s);
   Expression* makeArrayNew(Element& s, bool default_);
-  Expression* makeArrayNewSeg(Element& s, ArrayNewSegOp op);
-  Expression* makeArrayInitStatic(Element& s);
+  Expression* makeArrayNewData(Element& s);
+  Expression* makeArrayNewElem(Element& s);
+  Expression* makeArrayNewFixed(Element& s);
   Expression* makeArrayGet(Element& s, bool signed_ = false);
   Expression* makeArraySet(Element& s);
   Expression* makeArrayLen(Element& s);
   Expression* makeArrayCopy(Element& s);
+  Expression* makeArrayFill(Element& s);
+  Expression* makeArrayInitData(Element& s);
+  Expression* makeArrayInitElem(Element& s);
   Expression* makeRefAs(Element& s, RefAsOp op);
   Expression* makeRefAsNonNull(Element& s);
   Expression* makeStringNew(Element& s, StringNewOp op, bool try_);
@@ -317,9 +328,11 @@ private:
   Expression* makeStringIterMove(Element& s, StringIterMoveOp op);
   Expression* makeStringSliceWTF(Element& s, StringSliceWTFOp op);
   Expression* makeStringSliceIter(Element& s);
+  Expression* makeContNew(Element& s);
+  Expression* makeResume(Element& s);
 
   // Helper functions
-  Type parseOptionalResultType(Element& s, Index& i);
+  Type parseBlockType(Element& s, Index& i);
   Index parseMemoryLimits(Element& s, Index i, std::unique_ptr<Memory>& memory);
   Index parseMemoryIndex(Element& s, Index i, std::unique_ptr<Memory>& memory);
   Index parseMemoryForInstruction(const std::string& instrName,
