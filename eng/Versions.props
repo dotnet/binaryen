@@ -6,7 +6,7 @@
     <PreReleaseVersionIteration>1</PreReleaseVersionIteration>
   </PropertyGroup>
   <PropertyGroup>
-    <MicrosoftDotNetBuildTasksPackagingVersion>9.0.0-beta.24423.2</MicrosoftDotNetBuildTasksPackagingVersion>
+    <MicrosoftDotNetBuildTasksPackagingVersion>10.0.0-beta.24430.1</MicrosoftDotNetBuildTasksPackagingVersion>
     <!-- Mono LLVM -->
     <runtimelinuxarm64MicrosoftNETCoreRuntimeMonoLLVMSdkVersion>19.0.0-alpha.1.24420.1</runtimelinuxarm64MicrosoftNETCoreRuntimeMonoLLVMSdkVersion>
     <runtimelinuxarm64MicrosoftNETCoreRuntimeMonoLLVMToolsVersion>19.0.0-alpha.1.24420.1</runtimelinuxarm64MicrosoftNETCoreRuntimeMonoLLVMToolsVersion>
