@@ -258,7 +258,7 @@ if(MSVC)
   endif()
 else()
 
-  option(ENABLE_WERROR "Enable -Werror" ON)
+  option(ENABLE_WERROR "Enable -Werror" OFF)
 
   set(THREADS_PREFER_PTHREAD_FLAG ON)
   set(CMAKE_THREAD_PREFER_PTHREAD ON)
