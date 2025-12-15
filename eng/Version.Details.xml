@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Dependencies>
   <ToolsetDependencies>
-    <Dependency Name="Microsoft.DotNet.Arcade.Sdk" Version="10.0.0-beta.25479.4">
+    <Dependency Name="Microsoft.DotNet.Arcade.Sdk" Version="10.0.0-beta.25612.5">
       <Uri>https://github.com/dotnet/arcade</Uri>
-      <Sha>e6f510cb87812d56ad781d93ff0513cdcccd0eb4</Sha>
+      <Sha>55631983c8583162122687fddeac13424c1e40a8</Sha>
     </Dependency>
-    <Dependency Name="Microsoft.DotNet.Build.Tasks.Packaging" Version="10.0.0-beta.25479.4">
+    <Dependency Name="Microsoft.DotNet.Build.Tasks.Packaging" Version="10.0.0-beta.25612.5">
       <Uri>https://github.com/dotnet/arcade</Uri>
-      <Sha>e6f510cb87812d56ad781d93ff0513cdcccd0eb4</Sha>
+      <Sha>55631983c8583162122687fddeac13424c1e40a8</Sha>
     </Dependency>
     <Dependency Name="runtime.linux-arm64.Microsoft.NETCore.Runtime.Mono.LLVM.Sdk" Version="19.1.0-alpha.1.25522.2">
       <Uri>https://github.com/dotnet/llvm-project</Uri>
