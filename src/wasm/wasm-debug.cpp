@@ -355,14 +355,45 @@ private:
   }
 };
 
+// A sorted vector of (key, value) pairs with binary search lookup.
+// Uses ~16 bytes per entry vs ~64 for std::unordered_map.
+template<typename K, typename V>
+struct SortedMap {
+  std::vector<std::pair<K, V>> data;
+
+  void reserve(size_t n) { data.reserve(n); }
+
+  void add(K key, V value) {
+    data.push_back({key, value});
+  }
+
+  // Call after all add() calls to enable lookup.
+  void sort() {
+    std::sort(data.begin(), data.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+  }
+
+  const V* find(K key) const {
+    auto it = std::lower_bound(
+      data.begin(), data.end(), key,
+      [](const auto& pair, K k) { return pair.first < k; });
+    if (it != data.end() && it->first == key) {
+      return &it->second;
+    }
+    return nullptr;
+  }
+
+  size_t count(K key) const { return find(key) ? 1 : 0; }
+};
+
 // Represents a mapping of addresses to expressions. We track beginnings and
 // endings of expressions separately, since the end of one (which is one past
 // the end in DWARF notation) overlaps with the beginning of the next, and also
 // to let us use contextual information (we may know we are looking up the end
 // of an instruction).
 struct AddrExprMap {
-  std::unordered_map<BinaryLocation, Expression*> startMap;
-  std::unordered_map<BinaryLocation, Expression*> endMap;
+  SortedMap<BinaryLocation, Expression*> startMap;
+  SortedMap<BinaryLocation, Expression*> endMap;
 
   // Some instructions have delimiter binary locations, like the else and end in
   // and if. Track those separately, including their expression and their id
@@ -372,10 +403,20 @@ struct AddrExprMap {
     Expression* expr;
     size_t id;
   };
-  std::unordered_map<BinaryLocation, DelimiterInfo> delimiterMap;
+  SortedMap<BinaryLocation, DelimiterInfo> delimiterMap;
 
   // Construct the map from the binaryLocations loaded from the wasm.
   AddrExprMap(const Module& wasm) {
+    // Count entries for reservation.
+    size_t exprCount = 0, delimCount = 0;
+    for (auto& func : wasm.functions) {
+      exprCount += func->expressionLocations.size();
+      delimCount += func->delimiterLocations.size();
+    }
+    startMap.reserve(exprCount);
+    endMap.reserve(exprCount);
+    delimiterMap.reserve(delimCount);
+
     for (auto& func : wasm.functions) {
       for (auto& [expr, span] : func->expressionLocations) {
         add(expr, span);
@@ -384,38 +425,32 @@ struct AddrExprMap {
         add(expr, delim);
       }
     }
+    startMap.sort();
+    endMap.sort();
+    delimiterMap.sort();
   }
 
   Expression* getStart(BinaryLocation addr) const {
-    auto iter = startMap.find(addr);
-    if (iter != startMap.end()) {
-      return iter->second;
-    }
-    return nullptr;
+    auto* result = startMap.find(addr);
+    return result ? *result : nullptr;
   }
 
   Expression* getEnd(BinaryLocation addr) const {
-    auto iter = endMap.find(addr);
-    if (iter != endMap.end()) {
-      return iter->second;
-    }
-    return nullptr;
+    auto* result = endMap.find(addr);
+    return result ? *result : nullptr;
   }
 
   DelimiterInfo getDelimiter(BinaryLocation addr) const {
-    auto iter = delimiterMap.find(addr);
-    if (iter != delimiterMap.end()) {
-      return iter->second;
-    }
-    return DelimiterInfo{nullptr, BinaryLocations::Invalid};
+    auto* result = delimiterMap.find(addr);
+    return result ? *result : DelimiterInfo{nullptr, BinaryLocations::Invalid};
   }
 
 private:
   void add(Expression* expr, const BinaryLocations::Span span) {
     assert(startMap.count(span.start) == 0);
-    startMap[span.start] = expr;
+    startMap.add(span.start, expr);
     assert(endMap.count(span.end) == 0);
-    endMap[span.end] = expr;
+    endMap.add(span.end, expr);
   }
 
   void add(Expression* expr,
@@ -423,7 +458,7 @@ private:
     for (Index i = 0; i < delimiter.size(); i++) {
       if (delimiter[i] != 0) {
         assert(delimiterMap.count(delimiter[i]) == 0);
-        delimiterMap[delimiter[i]] = DelimiterInfo{expr, i};
+        delimiterMap.add(delimiter[i], DelimiterInfo{expr, i});
       }
     }
   }
@@ -435,32 +470,30 @@ private:
 // of one past the end, and one before it which is the "end" opcode that is
 // emitted.
 struct FuncAddrMap {
-  std::unordered_map<BinaryLocation, Function*> startMap, endMap;
+  SortedMap<BinaryLocation, Function*> startMap, endMap;
 
   // Construct the map from the binaryLocations loaded from the wasm.
   FuncAddrMap(const Module& wasm) {
+    startMap.reserve(wasm.functions.size() * 2);
+    endMap.reserve(wasm.functions.size() * 2);
     for (auto& func : wasm.functions) {
-      startMap[func->funcLocation.start] = func.get();
-      startMap[func->funcLocation.declarations] = func.get();
-      endMap[func->funcLocation.end - 1] = func.get();
-      endMap[func->funcLocation.end] = func.get();
+      startMap.add(func->funcLocation.start, func.get());
+      startMap.add(func->funcLocation.declarations, func.get());
+      endMap.add(func->funcLocation.end - 1, func.get());
+      endMap.add(func->funcLocation.end, func.get());
     }
+    startMap.sort();
+    endMap.sort();
   }
 
   Function* getStart(BinaryLocation addr) const {
-    auto iter = startMap.find(addr);
-    if (iter != startMap.end()) {
-      return iter->second;
-    }
-    return nullptr;
+    auto* result = startMap.find(addr);
+    return result ? *result : nullptr;
   }
 
   Function* getEnd(BinaryLocation addr) const {
-    auto iter = endMap.find(addr);
-    if (iter != endMap.end()) {
-      return iter->second;
-    }
-    return nullptr;
+    auto* result = endMap.find(addr);
+    return result ? *result : nullptr;
   }
 };
 
