@@ -954,109 +954,8 @@ static void updateCompileUnits(const BinaryenDWARFInfo& info,
 // would indicate an end or a base in .debug_loc).
 static const BinaryLocation IGNOREABLE_LOCATION = 1;
 
-static bool isNewBaseLoc(const llvm::DWARFYAML::Loc& loc) {
-  return loc.Start == BinaryLocation(-1);
-}
-
-static bool isEndMarkerLoc(const llvm::DWARFYAML::Loc& loc) {
-  return isTombstone(loc.Start) && isTombstone(loc.End);
-}
-
-// Update the .debug_loc section.
-static void updateLoc(llvm::DWARFYAML::Data& yaml,
-                      const LocationUpdater& locationUpdater) {
-  // Similar to ranges, try to update the start and end. Note that here we
-  // can't skip since the location description is a variable number of bytes,
-  // so we mark no longer valid addresses as empty.
-  bool atStart = true;
-  // We need to keep positions in the .debug_loc section identical to before
-  // (or else we'd need to update their positions too) and so we need to keep
-  // base entries around (a base entry is added to every entry after it in the
-  // list). However, we may change the base's value as after moving instructions
-  // around the old base may not be smaller than all the values relative to it.
-  BinaryLocation oldBase, newBase;
-  auto& locs = yaml.Locs;
-  for (size_t i = 0; i < locs.size(); i++) {
-    auto& loc = locs[i];
-    if (atStart) {
-      std::tie(oldBase, newBase) =
-        locationUpdater.getCompileUnitBasesForLoc(loc.CompileUnitOffset);
-      atStart = false;
-    }
-    // By default we copy values over, unless we modify them below.
-    BinaryLocation newStart = loc.Start, newEnd = loc.End;
-    if (isNewBaseLoc(loc)) {
-      // This is a new base.
-      // Note that the base is not the address of an instruction, necessarily -
-      // it's just a number (seems like it could always be an instruction, but
-      // that's not what LLVM emits).
-      // We must look forward at everything relative to this base, so that we
-      // can emit a new proper base (as mentioned earlier, the original base may
-      // not be valid if instructions moved to a position before it - they must
-      // be positive offsets from it).
-      oldBase = newBase = newEnd;
-      BinaryLocation smallest = -1;
-      for (size_t j = i + 1; j < locs.size(); j++) {
-        auto& futureLoc = locs[j];
-        if (isNewBaseLoc(futureLoc) || isEndMarkerLoc(futureLoc)) {
-          break;
-        }
-        auto updatedStart =
-          locationUpdater.getNewStart(futureLoc.Start + oldBase);
-        // If we found a valid mapping, this is a relevant value for us. If the
-        // optimizer removed it, it's a 0, and we can ignore it here - we will
-        // emit IGNOREABLE_LOCATION for it later anyhow.
-        if (updatedStart != 0) {
-          smallest = std::min(smallest, updatedStart);
-        }
-      }
-      // If we found no valid values that will be relativized here, just use 0
-      // as the new (never-to-be-used) base, which is less confusing (otherwise
-      // the value looks like it means something).
-      if (smallest == BinaryLocation(-1)) {
-        smallest = 0;
-      }
-      newBase = newEnd = smallest;
-    } else if (isEndMarkerLoc(loc)) {
-      // This is an end marker, this list is done; reset the base.
-      atStart = true;
-    } else {
-      // This is a normal entry, try to find what it should be updated to. First
-      // de-relativize it to the base to get the absolute address, then look for
-      // a new address for it.
-      newStart = locationUpdater.getNewStart(loc.Start + oldBase);
-      newEnd = locationUpdater.getNewEnd(loc.End + oldBase);
-      if (newStart == 0 || newEnd == 0 || newStart > newEnd) {
-        // This part of the loc no longer has a mapping, or after the mapping
-        // it is no longer a proper span, so we must ignore it.
-        newStart = newEnd = IGNOREABLE_LOCATION;
-      } else {
-        // We picked a new base that ensures it is smaller than the values we
-        // will relativize to it.
-        assert(newStart >= newBase && newEnd >= newBase);
-        newStart -= newBase;
-        newEnd -= newBase;
-        if (newStart == 0 && newEnd == 0) {
-          // After mapping to the new positions, and after relativizing to the
-          // base, if we end up with (0, 0) then we must emit something else, as
-          // that would be interpreted as the end of a list. As it is an empty
-          // span, the actual value doesn't matter, it just has to be != 0.
-          // This can happen if the very first span in a compile unit is an
-          // empty span, in which case relative to the base of the compile unit
-          // we would have (0, 0).
-          newStart = newEnd = IGNOREABLE_LOCATION;
-        }
-      }
-      // The loc start and end markers have been preserved. However, TODO
-      // instructions in the middle may have moved around, making the loc no
-      // longer contiguous, we should check that, and possibly split/merge
-      // the loc. Or, we may need to have tracking in the IR for this.
-    }
-    loc.Start = newStart;
-    loc.End = newEnd;
-    // Note how the ".Location" field is unchanged.
-  }
-}
+// Note: updateLoc (YAML-based), isNewBaseLoc, and isEndMarkerLoc have been
+// replaced by patchDebugLocBinary which patches the binary section directly.
 
 // Patch .debug_ranges section in-place on the binary data, bypassing YAML.
 // The section is a flat array of (uint32_t start, uint32_t end) pairs,
@@ -1094,6 +993,105 @@ static void patchDebugRangesBinary(Module& wasm,
   }
 }
 
+// Patch .debug_loc section in-place on the binary data, bypassing YAML.
+// Format: sequences of location list entries, each being:
+//   - Base address entry: start=0xFFFFFFFF, end=new_base (8 bytes)
+//   - Normal entry: start(4), end(4), length(2), expr(length bytes)
+//   - End marker: start=0, end=0 (8 bytes)
+// Location expressions are NOT modified — only the address pairs.
+static void patchDebugLocBinary(Module& wasm,
+                                LocationUpdater& locationUpdater) {
+  for (auto& section : wasm.customSections) {
+    if (section.name != ".debug_loc") {
+      continue;
+    }
+    auto* data = reinterpret_cast<uint8_t*>(section.data.data());
+    size_t size = section.data.size();
+
+    // Collect entry offsets so we can forward-scan for base recomputation.
+    struct LocEntry {
+      size_t offset;
+      uint32_t start, end;
+      bool isBase, isEnd;
+    };
+    std::vector<LocEntry> entries;
+
+    size_t pos = 0;
+    while (pos + 8 <= size) {
+      LocEntry entry;
+      entry.offset = pos;
+      memcpy(&entry.start, data + pos, 4);
+      memcpy(&entry.end, data + pos + 4, 4);
+      entry.isBase = (entry.start == uint32_t(-1));
+      entry.isEnd = (entry.start == 0 && entry.end == 0);
+      pos += 8;
+      if (!entry.isBase && !entry.isEnd) {
+        // Normal entry: skip past the expression.
+        if (pos + 2 > size) break;
+        uint16_t exprLen;
+        memcpy(&exprLen, data + pos, 2);
+        pos += 2 + exprLen;
+      }
+      entries.push_back(entry);
+    }
+
+    // Patch addresses using the same logic as the former updateLoc.
+    bool atStart = true;
+    BinaryLocation oldBase = 0, newBase = 0;
+
+    for (size_t i = 0; i < entries.size(); i++) {
+      auto& entry = entries[i];
+      if (atStart) {
+        std::tie(oldBase, newBase) =
+          locationUpdater.getCompileUnitBasesForLoc(entry.offset);
+        atStart = false;
+      }
+
+      uint32_t newStart = entry.start, newEnd = entry.end;
+
+      if (entry.isBase) {
+        // Base address entry — recompute by forward scanning.
+        oldBase = newBase = entry.end;
+        BinaryLocation smallest = BinaryLocation(-1);
+        for (size_t j = i + 1; j < entries.size(); j++) {
+          if (entries[j].isBase || entries[j].isEnd) break;
+          auto updatedStart =
+            locationUpdater.getNewStart(entries[j].start + oldBase);
+          if (updatedStart != 0) {
+            smallest = std::min(smallest, updatedStart);
+          }
+        }
+        if (smallest == BinaryLocation(-1)) {
+          smallest = 0;
+        }
+        newBase = newEnd = smallest;
+        newStart = uint32_t(-1); // keep as base marker
+      } else if (entry.isEnd) {
+        atStart = true;
+      } else {
+        // Normal entry — de-relativize, map, re-relativize.
+        newStart = locationUpdater.getNewStart(entry.start + oldBase);
+        newEnd = locationUpdater.getNewEnd(entry.end + oldBase);
+        if (newStart == 0 || newEnd == 0 || newStart > newEnd) {
+          newStart = newEnd = IGNOREABLE_LOCATION;
+        } else {
+          assert(newStart >= newBase && newEnd >= newBase);
+          newStart -= newBase;
+          newEnd -= newBase;
+          if (newStart == 0 && newEnd == 0) {
+            newStart = newEnd = IGNOREABLE_LOCATION;
+          }
+        }
+      }
+
+      // Write back patched addresses.
+      memcpy(data + entry.offset, &newStart, 4);
+      memcpy(data + entry.offset + 4, &newEnd, 4);
+    }
+    break;
+  }
+}
+
 void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
   BinaryenDWARFInfo info(wasm);
 
@@ -1110,24 +1108,25 @@ void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
   bool is64 = wasm.memories.size() > 0 ? wasm.memories[0]->is64() : false;
   updateCompileUnits(info, data, locationUpdater, is64);
 
-  // Patch .debug_ranges directly on the binary section instead of going
-  // through the YAML round-trip. This saves memory by not materializing
-  // DWARFYAML::Range objects. Clear the YAML ranges so EmitDebugSections
-  // doesn't overwrite our binary patch.
+  // Patch .debug_ranges and .debug_loc directly on the binary sections
+  // instead of going through the YAML round-trip. Clear the YAML data so
+  // EmitDebugSections doesn't overwrite our binary patches.
   patchDebugRangesBinary(wasm, locationUpdater);
   data.Ranges.clear();
 
-  updateLoc(data, locationUpdater);
+  patchDebugLocBinary(wasm, locationUpdater);
+  data.Locs.clear();
 
   // Convert remaining sections to binary.
   auto newSections =
     EmitDebugSections(data, false /* EmitFixups for debug_info */);
 
-  // Update the custom sections in the wasm (skip debug_ranges since we
-  // already patched it in-place).
+  // Update the custom sections in the wasm (skip debug_ranges and debug_loc
+  // since we already patched them in-place).
   for (auto& section : wasm.customSections) {
     if (Name(section.name).startsWith(".debug_") &&
-        section.name != ".debug_ranges") {
+        section.name != ".debug_ranges" &&
+        section.name != ".debug_loc") {
       auto llvmName = section.name.substr(1);
       if (newSections.count(llvmName)) {
         auto llvmData = newSections[llvmName]->getBuffer();
