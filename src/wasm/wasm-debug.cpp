@@ -821,131 +821,9 @@ static void iterContextAndYAML(const T& contextList, U& yamlList, W func) {
   assert(yamlValue == yamlList.end());
 }
 
-// Updates a YAML entry from a DWARF DIE. Also updates LocationUpdater
-// associating each .debug_loc entry with the base address of its corresponding
-// compilation unit.
-static void updateDIE(const llvm::DWARFDebugInfoEntry& DIE,
-                      llvm::DWARFYAML::Entry& yamlEntry,
-                      const llvm::DWARFAbbreviationDeclaration* abbrevDecl,
-                      LocationUpdater& locationUpdater,
-                      size_t compileUnitIndex) {
-  auto tag = DIE.getTag();
-  // Pairs of low/high_pc require some special handling, as the high
-  // may be an offset relative to the low. First, process everything but
-  // the high pcs, so we see the low pcs first.
-  BinaryLocation oldLowPC = 0, newLowPC = 0;
-  iterContextAndYAML(
-    abbrevDecl->attributes(),
-    yamlEntry.Values,
-    [&](const llvm::DWARFAbbreviationDeclaration::AttributeSpec& attrSpec,
-        llvm::DWARFYAML::FormValue& yamlValue) {
-      auto attr = attrSpec.Attr;
-      if (attr == llvm::dwarf::DW_AT_low_pc) {
-        // This is an address.
-        BinaryLocation oldValue = yamlValue.Value, newValue = 0;
-        if (tag == llvm::dwarf::DW_TAG_GNU_call_site ||
-            tag == llvm::dwarf::DW_TAG_inlined_subroutine ||
-            tag == llvm::dwarf::DW_TAG_lexical_block ||
-            tag == llvm::dwarf::DW_TAG_label) {
-          newValue = locationUpdater.getNewStart(oldValue);
-        } else if (tag == llvm::dwarf::DW_TAG_compile_unit) {
-          newValue = locationUpdater.getNewFuncStart(oldValue);
-          // Per the DWARF spec, "The base address of a compile unit is
-          // defined as the value of the DW_AT_low_pc attribute, if present."
-          locationUpdater.compileUnitBases[compileUnitIndex] =
-            LocationUpdater::OldToNew{oldValue, newValue};
-        } else if (tag == llvm::dwarf::DW_TAG_subprogram) {
-          newValue = locationUpdater.getNewFuncStart(oldValue);
-        } else {
-          Fatal() << "unknown tag with low_pc "
-                  << llvm::dwarf::TagString(tag).str();
-        }
-        oldLowPC = oldValue;
-        newLowPC = newValue;
-        yamlValue.Value = newValue;
-      } else if (attr == llvm::dwarf::DW_AT_stmt_list) {
-        // This is an offset into the debug line section.
-        yamlValue.Value =
-          locationUpdater.getNewDebugLineLocation(yamlValue.Value);
-      } else if (attr == llvm::dwarf::DW_AT_location &&
-                 attrSpec.Form == llvm::dwarf::DW_FORM_sec_offset) {
-        BinaryLocation locOffset = yamlValue.Value;
-        locationUpdater.locToUnitMap[locOffset] = compileUnitIndex;
-      }
-    });
-  // Next, process the high_pcs.
-  // TODO: do this more efficiently, without a second traversal (but that's a
-  //       little tricky given the special double-traversal we have).
-  iterContextAndYAML(
-    abbrevDecl->attributes(),
-    yamlEntry.Values,
-    [&](const llvm::DWARFAbbreviationDeclaration::AttributeSpec& attrSpec,
-        llvm::DWARFYAML::FormValue& yamlValue) {
-      auto attr = attrSpec.Attr;
-      if (attr != llvm::dwarf::DW_AT_high_pc) {
-        return;
-      }
-      BinaryLocation oldValue = yamlValue.Value, newValue = 0;
-      bool isRelative = attrSpec.Form == llvm::dwarf::DW_FORM_data4;
-      if (isRelative) {
-        oldValue += oldLowPC;
-      }
-      if (tag == llvm::dwarf::DW_TAG_GNU_call_site ||
-          tag == llvm::dwarf::DW_TAG_inlined_subroutine ||
-          tag == llvm::dwarf::DW_TAG_lexical_block ||
-          tag == llvm::dwarf::DW_TAG_label) {
-        newValue = locationUpdater.getNewExprEnd(oldValue);
-      } else if (tag == llvm::dwarf::DW_TAG_compile_unit ||
-                 tag == llvm::dwarf::DW_TAG_subprogram) {
-        newValue = locationUpdater.getNewFuncEnd(oldValue);
-      } else {
-        Fatal() << "unknown tag with low_pc "
-                << llvm::dwarf::TagString(tag).str();
-      }
-      if (isRelative) {
-        newValue -= newLowPC;
-      }
-      yamlValue.Value = newValue;
-    });
-}
-
-static void updateCompileUnits(const BinaryenDWARFInfo& info,
-                               llvm::DWARFYAML::Data& yaml,
-                               LocationUpdater& locationUpdater,
-                               bool is64) {
-  // The context has the high-level information we need, and the YAML is where
-  // we write changes. First, iterate over the compile units.
-  size_t compileUnitIndex = 0;
-  iterContextAndYAML(
-    info.context->compile_units(),
-    yaml.CompileUnits,
-    [&](const std::unique_ptr<llvm::DWARFUnit>& CU,
-        llvm::DWARFYAML::Unit& yamlUnit) {
-      // Our Memory64Lowering pass may change the "architecture" of the DWARF
-      // data. AddrSize will cause all DW_AT_low_pc to be written as 32/64-bit.
-      auto NewAddrSize = is64 ? 8 : 4;
-      if (NewAddrSize != yamlUnit.AddrSize) {
-        yamlUnit.AddrSize = NewAddrSize;
-        yamlUnit.AddrSizeChanged = true;
-      }
-      // Process the DIEs in each compile unit.
-      iterContextAndYAML(
-        CU->dies(),
-        yamlUnit.Entries,
-        [&](const llvm::DWARFDebugInfoEntry& DIE,
-            llvm::DWARFYAML::Entry& yamlEntry) {
-          // Process the entries in each relevant DIE, looking for attributes to
-          // change.
-          auto abbrevDecl = DIE.getAbbreviationDeclarationPtr();
-          if (abbrevDecl) {
-            // This is relevant; look for things to update.
-            updateDIE(
-              DIE, yamlEntry, abbrevDecl, locationUpdater, compileUnitIndex);
-          }
-        });
-      compileUnitIndex++;
-    });
-}
+// Note: updateDIE and updateCompileUnits (YAML-based) have been replaced by
+// patchDebugInfoBinary which patches the binary section directly using
+// DWARFContext attribute offsets.
 
 // Note: updateRanges (YAML-based) has been replaced by patchDebugRangesBinary
 // which patches the binary section directly, avoiding YAML materialization.
@@ -1092,10 +970,142 @@ static void patchDebugLocBinary(Module& wasm,
   }
 }
 
+// Patch .debug_info section in-place using the DWARFContext to locate
+// attributes, bypassing YAML Entry/FormValue materialization.
+// Also populates locationUpdater.locToUnitMap and compileUnitBases
+// (needed by patchDebugLocBinary).
+static void patchDebugInfoBinary(Module& wasm,
+                                 const BinaryenDWARFInfo& info,
+                                 LocationUpdater& locationUpdater,
+                                 bool is64) {
+  // Find the debug_info section data.
+  uint8_t* sectionData = nullptr;
+  size_t sectionSize = 0;
+  for (auto& section : wasm.customSections) {
+    if (section.name == ".debug_info") {
+      sectionData = reinterpret_cast<uint8_t*>(section.data.data());
+      sectionSize = section.data.size();
+      break;
+    }
+  }
+  if (!sectionData) return;
+
+  size_t compileUnitIndex = 0;
+  for (const auto& CU : info.context->compile_units()) {
+    for (auto DIE : CU->dies()) {
+      llvm::DWARFDie dieWrapper(CU.get(), &DIE);
+      auto abbrevDecl = DIE.getAbbreviationDeclarationPtr();
+      if (!abbrevDecl) continue;
+
+      auto tag = DIE.getTag();
+      // First pass: find low_pc, stmt_list, location (sec_offset).
+      BinaryLocation oldLowPC = 0, newLowPC = 0;
+
+      for (auto& attr : dieWrapper.attributes()) {
+        if (attr.Offset >= sectionSize) continue;
+
+        if (attr.Attr == llvm::dwarf::DW_AT_low_pc) {
+          auto val = attr.Value.getAsAddress();
+          if (!val) continue;
+          BinaryLocation oldValue = val.getValue();
+          BinaryLocation newValue = 0;
+          if (tag == llvm::dwarf::DW_TAG_GNU_call_site ||
+              tag == llvm::dwarf::DW_TAG_inlined_subroutine ||
+              tag == llvm::dwarf::DW_TAG_lexical_block ||
+              tag == llvm::dwarf::DW_TAG_label) {
+            newValue = locationUpdater.getNewStart(oldValue);
+          } else if (tag == llvm::dwarf::DW_TAG_compile_unit) {
+            newValue = locationUpdater.getNewFuncStart(oldValue);
+            locationUpdater.compileUnitBases[compileUnitIndex] =
+              LocationUpdater::OldToNew{oldValue, newValue};
+          } else if (tag == llvm::dwarf::DW_TAG_subprogram) {
+            newValue = locationUpdater.getNewFuncStart(oldValue);
+          }
+          oldLowPC = oldValue;
+          newLowPC = newValue;
+          // Write the new value. AddrSize is 4 for wasm32, 8 for wasm64.
+          uint32_t addrSize = is64 ? 8 : 4;
+          if (addrSize == 4) {
+            uint32_t v32 = static_cast<uint32_t>(newValue);
+            memcpy(sectionData + attr.Offset, &v32, 4);
+          } else {
+            uint64_t v64 = newValue;
+            memcpy(sectionData + attr.Offset, &v64, 8);
+          }
+        } else if (attr.Attr == llvm::dwarf::DW_AT_stmt_list) {
+          auto val = attr.Value.getAsCStringOffset();
+          if (!val) continue;
+          BinaryLocation oldVal = val.getValue();
+          BinaryLocation newVal = locationUpdater.getNewDebugLineLocation(oldVal);
+          uint32_t v32 = static_cast<uint32_t>(newVal);
+          memcpy(sectionData + attr.Offset, &v32, 4);
+        } else if (attr.Attr == llvm::dwarf::DW_AT_location &&
+                   attr.Value.getForm() == llvm::dwarf::DW_FORM_sec_offset) {
+          auto val = attr.Value.getAsCStringOffset();
+          if (!val) continue;
+          locationUpdater.locToUnitMap[val.getValue()] = compileUnitIndex;
+        }
+      }
+
+      // Second pass: patch high_pc (needs oldLowPC/newLowPC from above).
+      {
+        for (auto& attr : dieWrapper.attributes()) {
+          if (attr.Attr != llvm::dwarf::DW_AT_high_pc) continue;
+          if (attr.Offset >= sectionSize) continue;
+
+          bool isRelative = (attr.Value.getForm() == llvm::dwarf::DW_FORM_data4);
+          BinaryLocation oldValue = 0;
+          if (isRelative) {
+            auto val = attr.Value.getAsUnsignedConstant();
+            if (!val) continue;
+            oldValue = val.getValue() + oldLowPC;
+          } else {
+            auto val = attr.Value.getAsAddress();
+            if (!val) continue;
+            oldValue = val.getValue();
+          }
+
+          BinaryLocation newValue = 0;
+          if (tag == llvm::dwarf::DW_TAG_GNU_call_site ||
+              tag == llvm::dwarf::DW_TAG_inlined_subroutine ||
+              tag == llvm::dwarf::DW_TAG_lexical_block ||
+              tag == llvm::dwarf::DW_TAG_label) {
+            newValue = locationUpdater.getNewExprEnd(oldValue);
+          } else if (tag == llvm::dwarf::DW_TAG_compile_unit ||
+                     tag == llvm::dwarf::DW_TAG_subprogram) {
+            newValue = locationUpdater.getNewFuncEnd(oldValue);
+          }
+          if (isRelative) {
+            newValue -= newLowPC;
+          }
+
+          if (isRelative) {
+            uint32_t v32 = static_cast<uint32_t>(newValue);
+            memcpy(sectionData + attr.Offset, &v32, 4);
+          } else {
+            uint32_t addrSize = is64 ? 8 : 4;
+            if (addrSize == 4) {
+              uint32_t v32 = static_cast<uint32_t>(newValue);
+              memcpy(sectionData + attr.Offset, &v32, 4);
+            } else {
+              uint64_t v64 = newValue;
+              memcpy(sectionData + attr.Offset, &v64, 8);
+            }
+          }
+        }
+      }
+    }
+    compileUnitIndex++;
+  }
+}
+
 void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
   BinaryenDWARFInfo info(wasm);
 
   // Convert to Data representation, which YAML can use to write.
+  // After this change, only debug_line and debug_str/debug_abbrev go
+  // through YAML. debug_info, debug_ranges, and debug_loc are patched
+  // directly on the binary sections.
   llvm::DWARFYAML::Data data;
   if (dwarf2yaml(*info.context, data)) {
     Fatal() << "Failed to parse DWARF to YAML";
@@ -1106,27 +1116,29 @@ void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
   updateDebugLines(data, locationUpdater);
 
   bool is64 = wasm.memories.size() > 0 ? wasm.memories[0]->is64() : false;
-  updateCompileUnits(info, data, locationUpdater, is64);
 
-  // Patch .debug_ranges and .debug_loc directly on the binary sections
-  // instead of going through the YAML round-trip. Clear the YAML data so
-  // EmitDebugSections doesn't overwrite our binary patches.
+  // Patch debug_info in-place using DWARFContext attributes.
+  // This also populates locToUnitMap/compileUnitBases for debug_loc.
+  patchDebugInfoBinary(wasm, info, locationUpdater, is64);
+  data.CompileUnits.clear();
+
+  // Patch debug_ranges and debug_loc directly on the binary sections.
   patchDebugRangesBinary(wasm, locationUpdater);
   data.Ranges.clear();
 
   patchDebugLocBinary(wasm, locationUpdater);
   data.Locs.clear();
 
-  // Convert remaining sections to binary.
+  // Convert remaining sections (debug_line, debug_str, debug_abbrev) to binary.
   auto newSections =
     EmitDebugSections(data, false /* EmitFixups for debug_info */);
 
-  // Update the custom sections in the wasm (skip debug_ranges and debug_loc
-  // since we already patched them in-place).
+  // Update the custom sections in the wasm (skip sections patched in-place).
   for (auto& section : wasm.customSections) {
     if (Name(section.name).startsWith(".debug_") &&
         section.name != ".debug_ranges" &&
-        section.name != ".debug_loc") {
+        section.name != ".debug_loc" &&
+        section.name != ".debug_info") {
       auto llvmName = section.name.substr(1);
       if (newSections.count(llvmName)) {
         auto llvmData = newSections[llvmName]->getBuffer();
