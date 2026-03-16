@@ -22,7 +22,8 @@
 #include "llvm/ObjectYAML/DWARFYAML.h"
 #include "llvm/include/llvm/DebugInfo/DWARFContext.h"
 
-std::error_code dwarf2yaml(llvm::DWARFContext& DCtx, llvm::DWARFYAML::Data& Y);
+std::error_code dwarf2yaml(llvm::DWARFContext& DCtx, llvm::DWARFYAML::Data& Y,
+                          bool skipCompileUnits = false);
 #endif
 
 #include "wasm-binary.h"
@@ -1103,11 +1104,11 @@ void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
   BinaryenDWARFInfo info(wasm);
 
   // Convert to Data representation, which YAML can use to write.
-  // After this change, only debug_line and debug_str/debug_abbrev go
-  // through YAML. debug_info, debug_ranges, and debug_loc are patched
-  // directly on the binary sections.
+  // Only debug_line goes through YAML. debug_info, debug_ranges, and
+  // debug_loc are patched directly on the binary sections, so skip
+  // materializing CompileUnits/Ranges/Locs to save memory.
   llvm::DWARFYAML::Data data;
-  if (dwarf2yaml(*info.context, data)) {
+  if (dwarf2yaml(*info.context, data, /*skipCompileUnits=*/true)) {
     Fatal() << "Failed to parse DWARF to YAML";
   }
 
@@ -1120,14 +1121,10 @@ void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
   // Patch debug_info in-place using DWARFContext attributes.
   // This also populates locToUnitMap/compileUnitBases for debug_loc.
   patchDebugInfoBinary(wasm, info, locationUpdater, is64);
-  data.CompileUnits.clear();
 
   // Patch debug_ranges and debug_loc directly on the binary sections.
   patchDebugRangesBinary(wasm, locationUpdater);
-  data.Ranges.clear();
-
   patchDebugLocBinary(wasm, locationUpdater);
-  data.Locs.clear();
 
   // Convert remaining sections (debug_line, debug_str, debug_abbrev) to binary.
   auto newSections =
