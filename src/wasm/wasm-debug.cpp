@@ -947,42 +947,8 @@ static void updateCompileUnits(const BinaryenDWARFInfo& info,
     });
 }
 
-static void updateRanges(llvm::DWARFYAML::Data& yaml,
-                         const LocationUpdater& locationUpdater) {
-  // In each range section, try to update the start and end. If we no longer
-  // have something to map them to, we must skip that part.
-  size_t skip = 0;
-  for (size_t i = 0; i < yaml.Ranges.size(); i++) {
-    auto& range = yaml.Ranges[i];
-    BinaryLocation oldStart = range.Start, oldEnd = range.End, newStart = 0,
-                   newEnd = 0;
-    // If this is an end marker (0, 0), or an invalid range (0, x) or (x, 0)
-    // then just emit it as it is - either to mark the end, or to mark an
-    // invalid entry.
-    if (isTombstone(oldStart) || isTombstone(oldEnd)) {
-      newStart = oldStart;
-      newEnd = oldEnd;
-    } else {
-      // This was a valid entry; update it.
-      newStart = locationUpdater.getNewStart(oldStart);
-      newEnd = locationUpdater.getNewEnd(oldEnd);
-      if (isTombstone(newStart) || isTombstone(newEnd)) {
-        // This part of the range no longer has a mapping, so we must skip it.
-        // Don't use (0, 0) as that would be an end marker; emit something
-        // invalid for the debugger to ignore.
-        newStart = 0;
-        newEnd = 1;
-      }
-      // TODO even if range start and end markers have been preserved,
-      // instructions in the middle may have moved around, making the range no
-      // longer contiguous. We should check that, and possibly split/merge
-      // the range. Or, we may need to have tracking in the IR for this.
-    }
-    auto& writtenRange = yaml.Ranges[i - skip];
-    writtenRange.Start = newStart;
-    writtenRange.End = newEnd;
-  }
-}
+// Note: updateRanges (YAML-based) has been replaced by patchDebugRangesBinary
+// which patches the binary section directly, avoiding YAML materialization.
 
 // A location that is ignoreable, i.e., not a special value like 0 or -1 (which
 // would indicate an end or a base in .debug_loc).
@@ -1092,6 +1058,42 @@ static void updateLoc(llvm::DWARFYAML::Data& yaml,
   }
 }
 
+// Patch .debug_ranges section in-place on the binary data, bypassing YAML.
+// The section is a flat array of (uint32_t start, uint32_t end) pairs,
+// terminated by (0, 0). This avoids materializing DWARFYAML::Range objects.
+static void patchDebugRangesBinary(Module& wasm,
+                                   const LocationUpdater& locationUpdater) {
+  for (auto& section : wasm.customSections) {
+    if (section.name != ".debug_ranges") {
+      continue;
+    }
+    auto* data = reinterpret_cast<uint8_t*>(section.data.data());
+    size_t size = section.data.size();
+    // Each entry is two uint32_t values (start, end).
+    for (size_t offset = 0; offset + 8 <= size; offset += 8) {
+      uint32_t oldStart, oldEnd;
+      memcpy(&oldStart, data + offset, 4);
+      memcpy(&oldEnd, data + offset + 4, 4);
+      uint32_t newStart = oldStart, newEnd = oldEnd;
+      if (oldStart == 0 && oldEnd == 0) {
+        // End marker, leave as-is.
+      } else if (isTombstone(oldStart) || isTombstone(oldEnd)) {
+        // Tombstone or invalid, leave as-is.
+      } else {
+        newStart = locationUpdater.getNewStart(oldStart);
+        newEnd = locationUpdater.getNewEnd(oldEnd);
+        if (isTombstone(newStart) || isTombstone(newEnd)) {
+          newStart = 0;
+          newEnd = 1;
+        }
+      }
+      memcpy(data + offset, &newStart, 4);
+      memcpy(data + offset + 4, &newEnd, 4);
+    }
+    break;
+  }
+}
+
 void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
   BinaryenDWARFInfo info(wasm);
 
@@ -1108,18 +1110,24 @@ void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
   bool is64 = wasm.memories.size() > 0 ? wasm.memories[0]->is64() : false;
   updateCompileUnits(info, data, locationUpdater, is64);
 
-  updateRanges(data, locationUpdater);
+  // Patch .debug_ranges directly on the binary section instead of going
+  // through the YAML round-trip. This saves memory by not materializing
+  // DWARFYAML::Range objects. Clear the YAML ranges so EmitDebugSections
+  // doesn't overwrite our binary patch.
+  patchDebugRangesBinary(wasm, locationUpdater);
+  data.Ranges.clear();
 
   updateLoc(data, locationUpdater);
 
-  // Convert to binary sections.
+  // Convert remaining sections to binary.
   auto newSections =
     EmitDebugSections(data, false /* EmitFixups for debug_info */);
 
-  // Update the custom sections in the wasm.
-  // TODO: efficiency
+  // Update the custom sections in the wasm (skip debug_ranges since we
+  // already patched it in-place).
   for (auto& section : wasm.customSections) {
-    if (Name(section.name).startsWith(".debug_")) {
+    if (Name(section.name).startsWith(".debug_") &&
+        section.name != ".debug_ranges") {
       auto llvmName = section.name.substr(1);
       if (newSections.count(llvmName)) {
         auto llvmData = newSections[llvmName]->getBuffer();
