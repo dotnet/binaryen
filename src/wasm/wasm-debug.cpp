@@ -370,7 +370,9 @@ struct SortedMap {
   }
 
   // Call after all add() calls to enable lookup.
-  // De-duplicates adjacent entries with the same key (keeps first).
+  // De-duplicates entries with the same key. When duplicates exist
+  // (e.g. FuncAddrMap where start == declarations), they map to the
+  // same value, so which one is kept doesn't matter.
   void sort() {
     std::sort(data.begin(), data.end(),
               [](const auto& a, const auto& b) { return a.first < b.first; });
@@ -390,8 +392,6 @@ struct SortedMap {
     }
     return nullptr;
   }
-
-  size_t count(K key) const { return find(key) ? 1 : 0; }
 };
 
 // Represents a mapping of addresses to expressions. We track beginnings and
