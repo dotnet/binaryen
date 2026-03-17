@@ -370,12 +370,22 @@ struct SortedMap {
   }
 
   // Call after all add() calls to enable lookup.
-  // De-duplicates entries with the same key. When duplicates exist
-  // (e.g. FuncAddrMap where start == declarations), they map to the
-  // same value, so which one is kept doesn't matter.
-  void sort() {
+  // De-duplicates entries with the same key. When assertUniqueValues
+  // is true (default), asserts in debug builds that duplicate keys
+  // map to the same value.
+  void sort(bool assertUniqueValues = true) {
     std::sort(data.begin(), data.end(),
               [](const auto& a, const auto& b) { return a.first < b.first; });
+#ifndef NDEBUG
+    if (assertUniqueValues) {
+      for (size_t i = 1; i < data.size(); i++) {
+        if (data[i].first == data[i - 1].first) {
+          assert(data[i].second == data[i - 1].second &&
+                 "duplicate keys with different values in SortedMap");
+        }
+      }
+    }
+#endif
     auto newEnd = std::unique(data.begin(), data.end(),
       [](const auto& a, const auto& b) { return a.first == b.first; });
     data.erase(newEnd, data.end());
@@ -410,6 +420,9 @@ struct AddrExprMap {
   struct DelimiterInfo {
     Expression* expr;
     size_t id;
+    bool operator==(const DelimiterInfo& o) const {
+      return expr == o.expr && id == o.id;
+    }
   };
   SortedMap<BinaryLocation, DelimiterInfo> delimiterMap;
 
@@ -492,8 +505,11 @@ struct FuncAddrMap {
       endMap.add(func->funcLocation.end - 1, func.get());
       endMap.add(func->funcLocation.end, func.get());
     }
-    startMap.sort();
-    endMap.sort();
+    // FuncAddrMap allows duplicate keys with different values because
+    // contiguous functions share boundary addresses (e.g. func1.end ==
+    // func2.start). Callers disambiguate using context.
+    startMap.sort(/*assertUniqueValues=*/false);
+    endMap.sort(/*assertUniqueValues=*/false);
   }
 
   Function* getStart(BinaryLocation addr) const {
