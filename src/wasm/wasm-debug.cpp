@@ -20,9 +20,11 @@
 #ifdef BUILD_LLVM_DWARF
 #include "llvm/ObjectYAML/DWARFEmitter.h"
 #include "llvm/ObjectYAML/DWARFYAML.h"
+#include "llvm/Support/LEB128.h"
 #include "llvm/include/llvm/DebugInfo/DWARFContext.h"
 
-std::error_code dwarf2yaml(llvm::DWARFContext& DCtx, llvm::DWARFYAML::Data& Y);
+std::error_code dwarf2yaml(llvm::DWARFContext& DCtx, llvm::DWARFYAML::Data& Y,
+                          bool skipCompileUnits = false);
 #endif
 
 #include "wasm-binary.h"
@@ -335,6 +337,72 @@ struct LineState {
 
   // Some flags are automatically reset after each debug line.
   void resetAfterLine() { prologueEnd = false; }
+
+  // Write the diff from old state to this state directly as binary opcodes.
+  void emitDiffBinary(const LineState& old,
+                      llvm::raw_ostream& OS,
+                      uint32_t addrSize,
+                      bool isLittleEndian,
+                      bool endSequence) const {
+    if (addr != old.addr) {
+      // DW_LNE_set_address: extended opcode
+      OS.write(0);
+      llvm::encodeULEB128(1 + addrSize, OS); // length
+      OS.write(llvm::dwarf::DW_LNE_set_address);
+      if (addrSize == 4) {
+        uint32_t v = addr;
+        OS.write(reinterpret_cast<const char*>(&v), 4);
+      } else {
+        uint64_t v = addr;
+        OS.write(reinterpret_cast<const char*>(&v), 8);
+      }
+    }
+    if (line != old.line) {
+      OS.write(llvm::dwarf::DW_LNS_advance_line);
+      llvm::encodeSLEB128(int32_t(line - old.line), OS);
+    }
+    if (col != old.col) {
+      OS.write(llvm::dwarf::DW_LNS_set_column);
+      llvm::encodeULEB128(col, OS);
+    }
+    if (file != old.file) {
+      OS.write(llvm::dwarf::DW_LNS_set_file);
+      llvm::encodeULEB128(file, OS);
+    }
+    if (isa != old.isa) {
+      OS.write(llvm::dwarf::DW_LNS_set_isa);
+      llvm::encodeULEB128(isa, OS);
+    }
+    if (discriminator != old.discriminator) {
+      OS.write(0);
+      // discriminator uses ULEB128, compute its size
+      uint8_t discBuf[16];
+      unsigned discSize = llvm::encodeULEB128(discriminator, discBuf);
+      llvm::encodeULEB128(1 + discSize, OS); // length
+      OS.write(llvm::dwarf::DW_LNE_set_discriminator);
+      OS.write(reinterpret_cast<const char*>(discBuf), discSize);
+    }
+    if (isStmt != old.isStmt) {
+      OS.write(llvm::dwarf::DW_LNS_negate_stmt);
+    }
+    if (basicBlock != old.basicBlock) {
+      assert(basicBlock);
+      OS.write(llvm::dwarf::DW_LNS_set_basic_block);
+    }
+    if (prologueEnd) {
+      OS.write(llvm::dwarf::DW_LNS_set_prologue_end);
+    }
+    if (epilogueBegin != old.epilogueBegin) {
+      Fatal() << "eb";
+    }
+    if (endSequence) {
+      OS.write(0);
+      llvm::encodeULEB128(1, OS);
+      OS.write(llvm::dwarf::DW_LNE_end_sequence);
+    } else {
+      OS.write(llvm::dwarf::DW_LNS_copy);
+    }
+  }
 
 private:
   llvm::DWARFYAML::LineTableOpcode
@@ -821,131 +889,9 @@ static void iterContextAndYAML(const T& contextList, U& yamlList, W func) {
   assert(yamlValue == yamlList.end());
 }
 
-// Updates a YAML entry from a DWARF DIE. Also updates LocationUpdater
-// associating each .debug_loc entry with the base address of its corresponding
-// compilation unit.
-static void updateDIE(const llvm::DWARFDebugInfoEntry& DIE,
-                      llvm::DWARFYAML::Entry& yamlEntry,
-                      const llvm::DWARFAbbreviationDeclaration* abbrevDecl,
-                      LocationUpdater& locationUpdater,
-                      size_t compileUnitIndex) {
-  auto tag = DIE.getTag();
-  // Pairs of low/high_pc require some special handling, as the high
-  // may be an offset relative to the low. First, process everything but
-  // the high pcs, so we see the low pcs first.
-  BinaryLocation oldLowPC = 0, newLowPC = 0;
-  iterContextAndYAML(
-    abbrevDecl->attributes(),
-    yamlEntry.Values,
-    [&](const llvm::DWARFAbbreviationDeclaration::AttributeSpec& attrSpec,
-        llvm::DWARFYAML::FormValue& yamlValue) {
-      auto attr = attrSpec.Attr;
-      if (attr == llvm::dwarf::DW_AT_low_pc) {
-        // This is an address.
-        BinaryLocation oldValue = yamlValue.Value, newValue = 0;
-        if (tag == llvm::dwarf::DW_TAG_GNU_call_site ||
-            tag == llvm::dwarf::DW_TAG_inlined_subroutine ||
-            tag == llvm::dwarf::DW_TAG_lexical_block ||
-            tag == llvm::dwarf::DW_TAG_label) {
-          newValue = locationUpdater.getNewStart(oldValue);
-        } else if (tag == llvm::dwarf::DW_TAG_compile_unit) {
-          newValue = locationUpdater.getNewFuncStart(oldValue);
-          // Per the DWARF spec, "The base address of a compile unit is
-          // defined as the value of the DW_AT_low_pc attribute, if present."
-          locationUpdater.compileUnitBases[compileUnitIndex] =
-            LocationUpdater::OldToNew{oldValue, newValue};
-        } else if (tag == llvm::dwarf::DW_TAG_subprogram) {
-          newValue = locationUpdater.getNewFuncStart(oldValue);
-        } else {
-          Fatal() << "unknown tag with low_pc "
-                  << llvm::dwarf::TagString(tag).str();
-        }
-        oldLowPC = oldValue;
-        newLowPC = newValue;
-        yamlValue.Value = newValue;
-      } else if (attr == llvm::dwarf::DW_AT_stmt_list) {
-        // This is an offset into the debug line section.
-        yamlValue.Value =
-          locationUpdater.getNewDebugLineLocation(yamlValue.Value);
-      } else if (attr == llvm::dwarf::DW_AT_location &&
-                 attrSpec.Form == llvm::dwarf::DW_FORM_sec_offset) {
-        BinaryLocation locOffset = yamlValue.Value;
-        locationUpdater.locToUnitMap[locOffset] = compileUnitIndex;
-      }
-    });
-  // Next, process the high_pcs.
-  // TODO: do this more efficiently, without a second traversal (but that's a
-  //       little tricky given the special double-traversal we have).
-  iterContextAndYAML(
-    abbrevDecl->attributes(),
-    yamlEntry.Values,
-    [&](const llvm::DWARFAbbreviationDeclaration::AttributeSpec& attrSpec,
-        llvm::DWARFYAML::FormValue& yamlValue) {
-      auto attr = attrSpec.Attr;
-      if (attr != llvm::dwarf::DW_AT_high_pc) {
-        return;
-      }
-      BinaryLocation oldValue = yamlValue.Value, newValue = 0;
-      bool isRelative = attrSpec.Form == llvm::dwarf::DW_FORM_data4;
-      if (isRelative) {
-        oldValue += oldLowPC;
-      }
-      if (tag == llvm::dwarf::DW_TAG_GNU_call_site ||
-          tag == llvm::dwarf::DW_TAG_inlined_subroutine ||
-          tag == llvm::dwarf::DW_TAG_lexical_block ||
-          tag == llvm::dwarf::DW_TAG_label) {
-        newValue = locationUpdater.getNewExprEnd(oldValue);
-      } else if (tag == llvm::dwarf::DW_TAG_compile_unit ||
-                 tag == llvm::dwarf::DW_TAG_subprogram) {
-        newValue = locationUpdater.getNewFuncEnd(oldValue);
-      } else {
-        Fatal() << "unknown tag with low_pc "
-                << llvm::dwarf::TagString(tag).str();
-      }
-      if (isRelative) {
-        newValue -= newLowPC;
-      }
-      yamlValue.Value = newValue;
-    });
-}
-
-static void updateCompileUnits(const BinaryenDWARFInfo& info,
-                               llvm::DWARFYAML::Data& yaml,
-                               LocationUpdater& locationUpdater,
-                               bool is64) {
-  // The context has the high-level information we need, and the YAML is where
-  // we write changes. First, iterate over the compile units.
-  size_t compileUnitIndex = 0;
-  iterContextAndYAML(
-    info.context->compile_units(),
-    yaml.CompileUnits,
-    [&](const std::unique_ptr<llvm::DWARFUnit>& CU,
-        llvm::DWARFYAML::Unit& yamlUnit) {
-      // Our Memory64Lowering pass may change the "architecture" of the DWARF
-      // data. AddrSize will cause all DW_AT_low_pc to be written as 32/64-bit.
-      auto NewAddrSize = is64 ? 8 : 4;
-      if (NewAddrSize != yamlUnit.AddrSize) {
-        yamlUnit.AddrSize = NewAddrSize;
-        yamlUnit.AddrSizeChanged = true;
-      }
-      // Process the DIEs in each compile unit.
-      iterContextAndYAML(
-        CU->dies(),
-        yamlUnit.Entries,
-        [&](const llvm::DWARFDebugInfoEntry& DIE,
-            llvm::DWARFYAML::Entry& yamlEntry) {
-          // Process the entries in each relevant DIE, looking for attributes to
-          // change.
-          auto abbrevDecl = DIE.getAbbreviationDeclarationPtr();
-          if (abbrevDecl) {
-            // This is relevant; look for things to update.
-            updateDIE(
-              DIE, yamlEntry, abbrevDecl, locationUpdater, compileUnitIndex);
-          }
-        });
-      compileUnitIndex++;
-    });
-}
+// Note: updateDIE and updateCompileUnits (YAML-based) have been replaced by
+// patchDebugInfoBinary which patches the binary section directly using
+// DWARFContext attribute offsets.
 
 // Note: updateRanges (YAML-based) has been replaced by patchDebugRangesBinary
 // which patches the binary section directly, avoiding YAML materialization.
@@ -1092,49 +1038,453 @@ static void patchDebugLocBinary(Module& wasm,
   }
 }
 
+// Patch .debug_info section in-place using the DWARFContext to locate
+// attributes, bypassing YAML Entry/FormValue materialization.
+// Also populates locationUpdater.locToUnitMap and compileUnitBases
+// (needed by patchDebugLocBinary).
+static void patchDebugInfoBinary(Module& wasm,
+                                 const BinaryenDWARFInfo& info,
+                                 LocationUpdater& locationUpdater,
+                                 bool is64) {
+  // Find the debug_info section data.
+  uint8_t* sectionData = nullptr;
+  size_t sectionSize = 0;
+  for (auto& section : wasm.customSections) {
+    if (section.name == ".debug_info") {
+      sectionData = reinterpret_cast<uint8_t*>(section.data.data());
+      sectionSize = section.data.size();
+      break;
+    }
+  }
+  if (!sectionData) return;
+
+  size_t compileUnitIndex = 0;
+  for (const auto& CU : info.context->compile_units()) {
+    for (auto DIE : CU->dies()) {
+      llvm::DWARFDie dieWrapper(CU.get(), &DIE);
+      auto abbrevDecl = DIE.getAbbreviationDeclarationPtr();
+      if (!abbrevDecl) continue;
+
+      auto tag = DIE.getTag();
+      // First pass: find low_pc, stmt_list, location (sec_offset).
+      BinaryLocation oldLowPC = 0, newLowPC = 0;
+
+      for (auto& attr : dieWrapper.attributes()) {
+        if (attr.Offset >= sectionSize) continue;
+
+        if (attr.Attr == llvm::dwarf::DW_AT_low_pc) {
+          auto val = attr.Value.getAsAddress();
+          if (!val) continue;
+          BinaryLocation oldValue = val.getValue();
+          BinaryLocation newValue = 0;
+          if (tag == llvm::dwarf::DW_TAG_GNU_call_site ||
+              tag == llvm::dwarf::DW_TAG_inlined_subroutine ||
+              tag == llvm::dwarf::DW_TAG_lexical_block ||
+              tag == llvm::dwarf::DW_TAG_label) {
+            newValue = locationUpdater.getNewStart(oldValue);
+          } else if (tag == llvm::dwarf::DW_TAG_compile_unit) {
+            newValue = locationUpdater.getNewFuncStart(oldValue);
+            locationUpdater.compileUnitBases[compileUnitIndex] =
+              LocationUpdater::OldToNew{oldValue, newValue};
+          } else if (tag == llvm::dwarf::DW_TAG_subprogram) {
+            newValue = locationUpdater.getNewFuncStart(oldValue);
+          }
+          oldLowPC = oldValue;
+          newLowPC = newValue;
+          // Write the new value. AddrSize is 4 for wasm32, 8 for wasm64.
+          uint32_t addrSize = is64 ? 8 : 4;
+          if (addrSize == 4) {
+            uint32_t v32 = static_cast<uint32_t>(newValue);
+            memcpy(sectionData + attr.Offset, &v32, 4);
+          } else {
+            uint64_t v64 = newValue;
+            memcpy(sectionData + attr.Offset, &v64, 8);
+          }
+        } else if (attr.Attr == llvm::dwarf::DW_AT_stmt_list) {
+          auto val = attr.Value.getAsCStringOffset();
+          if (!val) continue;
+          BinaryLocation oldVal = val.getValue();
+          BinaryLocation newVal = locationUpdater.getNewDebugLineLocation(oldVal);
+          uint32_t v32 = static_cast<uint32_t>(newVal);
+          memcpy(sectionData + attr.Offset, &v32, 4);
+        } else if (attr.Attr == llvm::dwarf::DW_AT_location &&
+                   attr.Value.getForm() == llvm::dwarf::DW_FORM_sec_offset) {
+          auto val = attr.Value.getAsCStringOffset();
+          if (!val) continue;
+          locationUpdater.locToUnitMap[val.getValue()] = compileUnitIndex;
+        }
+      }
+
+      // Second pass: patch high_pc (needs oldLowPC/newLowPC from above).
+      {
+        for (auto& attr : dieWrapper.attributes()) {
+          if (attr.Attr != llvm::dwarf::DW_AT_high_pc) continue;
+          if (attr.Offset >= sectionSize) continue;
+
+          bool isRelative = (attr.Value.getForm() == llvm::dwarf::DW_FORM_data4);
+          BinaryLocation oldValue = 0;
+          if (isRelative) {
+            auto val = attr.Value.getAsUnsignedConstant();
+            if (!val) continue;
+            oldValue = val.getValue() + oldLowPC;
+          } else {
+            auto val = attr.Value.getAsAddress();
+            if (!val) continue;
+            oldValue = val.getValue();
+          }
+
+          BinaryLocation newValue = 0;
+          if (tag == llvm::dwarf::DW_TAG_GNU_call_site ||
+              tag == llvm::dwarf::DW_TAG_inlined_subroutine ||
+              tag == llvm::dwarf::DW_TAG_lexical_block ||
+              tag == llvm::dwarf::DW_TAG_label) {
+            newValue = locationUpdater.getNewExprEnd(oldValue);
+          } else if (tag == llvm::dwarf::DW_TAG_compile_unit ||
+                     tag == llvm::dwarf::DW_TAG_subprogram) {
+            newValue = locationUpdater.getNewFuncEnd(oldValue);
+          }
+          if (isRelative) {
+            newValue -= newLowPC;
+          }
+
+          if (isRelative) {
+            uint32_t v32 = static_cast<uint32_t>(newValue);
+            memcpy(sectionData + attr.Offset, &v32, 4);
+          } else {
+            uint32_t addrSize = is64 ? 8 : 4;
+            if (addrSize == 4) {
+              uint32_t v32 = static_cast<uint32_t>(newValue);
+              memcpy(sectionData + attr.Offset, &v32, 4);
+            } else {
+              uint64_t v64 = newValue;
+              memcpy(sectionData + attr.Offset, &v64, 8);
+            }
+          }
+        }
+      }
+    }
+    compileUnitIndex++;
+  }
+}
+
+// Lightweight prologue info for binary line table processing.
+struct LineTableHeader {
+  uint32_t position;      // offset in .debug_line section
+  uint32_t totalLength;   // total length field value
+  uint16_t version;
+  uint32_t prologueLength;
+  uint8_t minInstLength;
+  uint8_t maxOpsPerInst;
+  uint8_t defaultIsStmt;
+  int8_t lineBase;
+  uint8_t lineRange;
+  uint8_t opcodeBase;
+  std::vector<uint8_t> standardOpcodeLengths;
+  uint64_t opcodeStart;   // byte offset where opcode stream starts
+  uint64_t tableEnd;      // byte offset where this table ends
+  uint64_t prologueStart; // byte offset after the 4-byte length field
+};
+
+// Construct a LineState from a LineTableHeader (binary version).
+static LineState makeLineState(const LineTableHeader& header,
+                               uint32_t sequenceId) {
+  llvm::DWARFYAML::LineTable fakeTable;
+  fakeTable.DefaultIsStmt = header.defaultIsStmt;
+  fakeTable.MinInstLength = header.minInstLength;
+  fakeTable.LineBase = header.lineBase;
+  fakeTable.LineRange = header.lineRange;
+  fakeTable.OpcodeBase = header.opcodeBase;
+  return LineState(fakeTable, sequenceId);
+}
+
+// Read one opcode from binary debug_line data, update LineState.
+// Returns true when a new row is ready.
+static bool readAndUpdateLineState(
+    LineState& state,
+    llvm::DataExtractor& data,
+    uint64_t& offset,
+    const LineTableHeader& header,
+    bool& isEndSequence,
+    bool& isSetAddress) {
+  isEndSequence = false;
+  isSetAddress = false;
+
+  uint8_t opcode = data.getU8(&offset);
+  if (opcode == 0) {
+    uint64_t extLen = data.getULEB128(&offset);
+    uint64_t extEnd = offset + extLen;
+    uint8_t subOpcode = data.getU8(&offset);
+    switch (subOpcode) {
+      case llvm::dwarf::DW_LNE_set_address:
+        state.addr = data.getAddress(&offset);
+        isSetAddress = true;
+        break;
+      case llvm::dwarf::DW_LNE_end_sequence:
+        isEndSequence = true;
+        return true;
+      case llvm::dwarf::DW_LNE_set_discriminator:
+        state.discriminator = data.getAddress(&offset);
+        break;
+      case llvm::dwarf::DW_LNE_define_file:
+        Fatal() << "TODO: DW_LNE_define_file";
+        break;
+      default:
+        offset = extEnd;
+        break;
+    }
+  } else if (opcode < header.opcodeBase) {
+    switch (opcode) {
+      case llvm::dwarf::DW_LNS_copy:
+        return true;
+      case llvm::dwarf::DW_LNS_advance_pc:
+        state.addr += data.getULEB128(&offset);
+        break;
+      case llvm::dwarf::DW_LNS_advance_line:
+        state.line += data.getSLEB128(&offset);
+        break;
+      case llvm::dwarf::DW_LNS_set_file:
+        state.file = data.getULEB128(&offset);
+        break;
+      case llvm::dwarf::DW_LNS_set_column:
+        state.col = data.getULEB128(&offset);
+        break;
+      case llvm::dwarf::DW_LNS_negate_stmt:
+        state.isStmt = !state.isStmt;
+        break;
+      case llvm::dwarf::DW_LNS_set_basic_block:
+        state.basicBlock = true;
+        break;
+      case llvm::dwarf::DW_LNS_const_add_pc: {
+        uint8_t adjustOpcode = 255 - header.opcodeBase;
+        uint64_t addrOffset =
+          (adjustOpcode / header.lineRange) * header.minInstLength;
+        state.addr += addrOffset;
+        break;
+      }
+      case llvm::dwarf::DW_LNS_fixed_advance_pc:
+        state.addr += data.getU16(&offset);
+        break;
+      case llvm::dwarf::DW_LNS_set_prologue_end:
+        state.prologueEnd = true;
+        break;
+      case llvm::dwarf::DW_LNS_set_epilogue_begin:
+        state.epilogueBegin = true;
+        break;
+      case llvm::dwarf::DW_LNS_set_isa:
+        state.isa = data.getULEB128(&offset);
+        break;
+      default:
+        if (opcode - 1 < header.standardOpcodeLengths.size()) {
+          for (uint8_t i = 0; i < header.standardOpcodeLengths[opcode - 1]; i++)
+            data.getULEB128(&offset);
+        }
+        break;
+    }
+  } else {
+    uint8_t adjustOpcode = opcode - header.opcodeBase;
+    uint64_t addrOffset =
+      (adjustOpcode / header.lineRange) * header.minInstLength;
+    int32_t lineOffset =
+      header.lineBase + (adjustOpcode % header.lineRange);
+    state.line += lineOffset;
+    state.addr += addrOffset;
+    return true;
+  }
+  return false;
+}
+
+// Rebuild .debug_line directly from binary, bypassing YAML materialization.
+static void patchDebugLineBinary(Module& wasm,
+                                 const BinaryenDWARFInfo& info,
+                                 LocationUpdater& locationUpdater) {
+  std::vector<char>* sectionDataPtr = nullptr;
+  for (auto& section : wasm.customSections) {
+    if (section.name == ".debug_line") {
+      sectionDataPtr = &section.data;
+      break;
+    }
+  }
+  if (!sectionDataPtr) return;
+
+  llvm::StringRef lineStr(sectionDataPtr->data(), sectionDataPtr->size());
+  llvm::DataExtractor lineData(lineStr, true, AddressSize);
+
+  struct TableResult {
+    uint32_t oldPosition;
+    std::string prologue; // raw prologue bytes (copied verbatim)
+    std::string opcodes;  // new opcode stream (binary)
+  };
+  std::vector<TableResult> results;
+
+  for (const auto& CU : info.context->compile_units()) {
+    auto CUDIE = CU->getUnitDIE();
+    if (!CUDIE) continue;
+    auto stmtOffset = llvm::dwarf::toSectionOffset(
+        CUDIE.find(llvm::dwarf::DW_AT_stmt_list));
+    if (!stmtOffset) continue;
+
+    uint64_t offset = *stmtOffset;
+    LineTableHeader header;
+    header.position = offset;
+
+    // Parse header.
+    header.totalLength = lineData.getU32(&offset);
+    header.prologueStart = offset;
+    header.tableEnd = header.position + 4 + header.totalLength;
+    header.version = lineData.getU16(&offset);
+    header.prologueLength = lineData.getU32(&offset);
+    uint64_t prologueDataStart = offset;
+    header.opcodeStart = prologueDataStart + header.prologueLength;
+    header.minInstLength = lineData.getU8(&offset);
+    if (header.version >= 4)
+      header.maxOpsPerInst = lineData.getU8(&offset);
+    else
+      header.maxOpsPerInst = 1;
+    header.defaultIsStmt = lineData.getU8(&offset);
+    header.lineBase = (int8_t)lineData.getU8(&offset);
+    header.lineRange = lineData.getU8(&offset);
+    header.opcodeBase = lineData.getU8(&offset);
+    header.standardOpcodeLengths.reserve(header.opcodeBase - 1);
+    for (uint8_t i = 1; i < header.opcodeBase; i++)
+      header.standardOpcodeLengths.push_back(lineData.getU8(&offset));
+
+    // Copy prologue verbatim (from after length field to opcodeStart).
+    std::string prologueBytes(
+      sectionDataPtr->data() + header.prologueStart,
+      sectionDataPtr->data() + header.opcodeStart);
+
+    // Process opcodes through LineState (same logic as updateDebugLines).
+    offset = header.opcodeStart;
+    uint32_t sequenceId = 0;
+    LineState state = makeLineState(header, sequenceId);
+    std::vector<BinaryLocation> newAddrs;
+    std::unordered_map<BinaryLocation, LineState> newAddrInfo;
+    bool omittingRange = false;
+
+    while (offset < header.tableEnd) {
+      bool isEndSequence = false;
+      bool isSetAddress = false;
+      bool rowReady = readAndUpdateLineState(
+        state, lineData, offset, header, isEndSequence, isSetAddress);
+
+      if (isSetAddress) {
+        omittingRange = false;
+      }
+
+      if (rowReady) {
+        if (isTombstone(state.addr)) {
+          omittingRange = true;
+        }
+        if (omittingRange) {
+          state = makeLineState(header, sequenceId);
+          if (isEndSequence) {
+            sequenceId++;
+            state = makeLineState(header, sequenceId);
+          }
+          continue;
+        }
+        BinaryLocation oldAddr = state.addr;
+        BinaryLocation newAddr = 0;
+        if (locationUpdater.hasOldExprStart(oldAddr)) {
+          newAddr = locationUpdater.getNewExprStart(oldAddr);
+        } else if (locationUpdater.hasOldFuncEnd(oldAddr)) {
+          newAddr = locationUpdater.getNewFuncEnd(oldAddr);
+        } else if (locationUpdater.hasOldFuncStart(oldAddr)) {
+          newAddr = locationUpdater.getNewFuncStart(oldAddr);
+        } else if (locationUpdater.hasOldDelimiter(oldAddr)) {
+          newAddr = locationUpdater.getNewDelimiter(oldAddr);
+        } else if (locationUpdater.hasOldExprEnd(oldAddr)) {
+          newAddr = locationUpdater.getNewExprEnd(oldAddr);
+        }
+        if (newAddr && state.needToEmit()) {
+          if (newAddrInfo.count(newAddr)) {
+            if (isEndSequence) {
+              sequenceId++;
+              state = makeLineState(header, sequenceId);
+            }
+            continue;
+          }
+          newAddrs.push_back(newAddr);
+          newAddrInfo.emplace(newAddr, state);
+          newAddrInfo.at(newAddr).addr = newAddr;
+          state.resetAfterLine();
+        }
+        if (isEndSequence) {
+          sequenceId++;
+          state = makeLineState(header, sequenceId);
+        }
+      }
+    }
+
+    // Sort and emit new opcodes directly to binary.
+    std::sort(newAddrs.begin(), newAddrs.end());
+
+    std::string opcodeBuffer;
+    llvm::raw_string_ostream opcodeStream(opcodeBuffer);
+    for (size_t i = 0; i < newAddrs.size(); i++) {
+      LineState curState = newAddrInfo.at(newAddrs[i]);
+      LineState lastState = makeLineState(header, -1);
+      if (i != 0) {
+        lastState = newAddrInfo.at(newAddrs[i - 1]);
+        if (lastState.sequenceId != curState.sequenceId) {
+          lastState = makeLineState(header, -1);
+        }
+      }
+      bool endSequence =
+        i + 1 == newAddrs.size() ||
+        newAddrInfo.at(newAddrs[i + 1]).sequenceId != curState.sequenceId;
+      curState.emitDiffBinary(lastState, opcodeStream, AddressSize,
+                              true, endSequence);
+    }
+    opcodeStream.flush();
+
+    TableResult result;
+    result.oldPosition = header.position;
+    result.prologue = std::move(prologueBytes);
+    result.opcodes = std::move(opcodeBuffer);
+    results.push_back(std::move(result));
+  }
+
+  // Build new .debug_line section and debugLineMap.
+  std::string newSection;
+  llvm::raw_string_ostream sectionStream(newSection);
+  BinaryLocation newLocation = 0;
+
+  for (auto& result : results) {
+    locationUpdater.debugLineMap[result.oldPosition] = newLocation;
+    uint32_t contentSize = result.prologue.size() + result.opcodes.size();
+    sectionStream.write(reinterpret_cast<const char*>(&contentSize), 4);
+    sectionStream << result.prologue;
+    sectionStream << result.opcodes;
+    newLocation += 4 + contentSize;
+  }
+  sectionStream.flush();
+
+  sectionDataPtr->resize(newSection.size());
+  std::copy(newSection.begin(), newSection.end(), sectionDataPtr->data());
+}
+
 void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
   BinaryenDWARFInfo info(wasm);
 
-  // Convert to Data representation, which YAML can use to write.
-  llvm::DWARFYAML::Data data;
-  if (dwarf2yaml(*info.context, data)) {
-    Fatal() << "Failed to parse DWARF to YAML";
-  }
-
   LocationUpdater locationUpdater(wasm, newLocations);
 
-  updateDebugLines(data, locationUpdater);
+  // Patch debug_line directly from binary, bypassing YAML entirely.
+  // This must run before patchDebugInfoBinary since debug_info needs
+  // the debugLineMap populated by patchDebugLineBinary.
+  patchDebugLineBinary(wasm, info, locationUpdater);
 
   bool is64 = wasm.memories.size() > 0 ? wasm.memories[0]->is64() : false;
-  updateCompileUnits(info, data, locationUpdater, is64);
 
-  // Patch .debug_ranges and .debug_loc directly on the binary sections
-  // instead of going through the YAML round-trip. Clear the YAML data so
-  // EmitDebugSections doesn't overwrite our binary patches.
+  // Patch debug_info in-place using DWARFContext attributes.
+  // This also populates locToUnitMap/compileUnitBases for debug_loc.
+  patchDebugInfoBinary(wasm, info, locationUpdater, is64);
+
+  // Patch debug_ranges and debug_loc directly on the binary sections.
   patchDebugRangesBinary(wasm, locationUpdater);
-  data.Ranges.clear();
-
   patchDebugLocBinary(wasm, locationUpdater);
-  data.Locs.clear();
 
-  // Convert remaining sections to binary.
-  auto newSections =
-    EmitDebugSections(data, false /* EmitFixups for debug_info */);
-
-  // Update the custom sections in the wasm (skip debug_ranges and debug_loc
-  // since we already patched them in-place).
-  for (auto& section : wasm.customSections) {
-    if (Name(section.name).startsWith(".debug_") &&
-        section.name != ".debug_ranges" &&
-        section.name != ".debug_loc") {
-      auto llvmName = section.name.substr(1);
-      if (newSections.count(llvmName)) {
-        auto llvmData = newSections[llvmName]->getBuffer();
-        section.data.resize(llvmData.size());
-        std::copy(llvmData.begin(), llvmData.end(), section.data.data());
-      }
-    }
-  }
+  // All DWARF sections are now patched in-place. No YAML round-trip needed.
 }
 
 #else // BUILD_LLVM_DWARF

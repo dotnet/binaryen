@@ -183,7 +183,8 @@ void dumpDebugPubSections(DWARFContext &DCtx, DWARFYAML::Data &Y) {
   dumpPubSection(DCtx, Y.GNUPubTypes, D.getGnuPubtypesSection());
 }
 
-void dumpDebugInfo(DWARFContext &DCtx, DWARFYAML::Data &Y) {
+void dumpDebugInfo(DWARFContext &DCtx, DWARFYAML::Data &Y,
+                   bool headersOnly = false) {
   for (const auto &CU : DCtx.compile_units()) {
     DWARFYAML::Unit NewUnit;
     NewUnit.Length.setLength(CU->getLength());
@@ -194,6 +195,10 @@ void dumpDebugInfo(DWARFContext &DCtx, DWARFYAML::Data &Y) {
       NewUnit.AbbrOffset = Abbreviations->getOffset();
     }
     NewUnit.AddrSize = CU->getAddressByteSize();
+    if (headersOnly) {
+      Y.CompileUnits.push_back(NewUnit);
+      continue;
+    }
     for (auto DIE : CU->dies()) {
       DWARFYAML::Entry NewEntry;
       DataExtractor EntryData = CU->getDebugInfoExtractor();
@@ -425,16 +430,23 @@ void dumpDebugLines(DWARFContext &DCtx, DWARFYAML::Data &Y) {
   }
 }
 
-std::error_code dwarf2yaml(DWARFContext &DCtx, DWARFYAML::Data &Y) {
+std::error_code dwarf2yaml(DWARFContext &DCtx, DWARFYAML::Data &Y,
+                          bool skipCompileUnits = false) {
   Y.IsLittleEndian = true; // XXX BINARYEN
   dumpDebugAbbrev(DCtx, Y);
   dumpDebugStrings(DCtx, Y);
   dumpDebugARanges(DCtx, Y);
-  dumpDebugRanges(DCtx, Y); // XXX BINARYEN
+  if (!skipCompileUnits) {
+    dumpDebugRanges(DCtx, Y); // XXX BINARYEN
+  }
   dumpDebugPubSections(DCtx, Y);
-  dumpDebugInfo(DCtx, Y);
-  // dumpDebugLoc relies on the address size being known from dumpDebugInfo.
-  dumpDebugLoc(DCtx, Y); // XXX BINARYEN
+  // When skipCompileUnits is true, only extract CU headers (for AddrSize)
+  // but skip materializing DIE entries to save memory.
+  dumpDebugInfo(DCtx, Y, /*headersOnly=*/skipCompileUnits);
+  if (!skipCompileUnits) {
+    // dumpDebugLoc relies on the address size being known from dumpDebugInfo.
+    dumpDebugLoc(DCtx, Y); // XXX BINARYEN
+  }
   dumpDebugLines(DCtx, Y);
   return obj2yaml_error::success;
 }
