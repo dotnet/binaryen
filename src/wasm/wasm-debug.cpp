@@ -20,6 +20,7 @@
 #ifdef BUILD_LLVM_DWARF
 #include "llvm/ObjectYAML/DWARFEmitter.h"
 #include "llvm/ObjectYAML/DWARFYAML.h"
+#include "llvm/Support/LEB128.h"
 #include "llvm/include/llvm/DebugInfo/DWARFContext.h"
 
 std::error_code dwarf2yaml(llvm::DWARFContext& DCtx, llvm::DWARFYAML::Data& Y,
@@ -336,6 +337,72 @@ struct LineState {
 
   // Some flags are automatically reset after each debug line.
   void resetAfterLine() { prologueEnd = false; }
+
+  // Write the diff from old state to this state directly as binary opcodes.
+  void emitDiffBinary(const LineState& old,
+                      llvm::raw_ostream& OS,
+                      uint32_t addrSize,
+                      bool isLittleEndian,
+                      bool endSequence) const {
+    if (addr != old.addr) {
+      // DW_LNE_set_address: extended opcode
+      OS.write(0);
+      llvm::encodeULEB128(1 + addrSize, OS); // length
+      OS.write(llvm::dwarf::DW_LNE_set_address);
+      if (addrSize == 4) {
+        uint32_t v = addr;
+        OS.write(reinterpret_cast<const char*>(&v), 4);
+      } else {
+        uint64_t v = addr;
+        OS.write(reinterpret_cast<const char*>(&v), 8);
+      }
+    }
+    if (line != old.line) {
+      OS.write(llvm::dwarf::DW_LNS_advance_line);
+      llvm::encodeSLEB128(int32_t(line - old.line), OS);
+    }
+    if (col != old.col) {
+      OS.write(llvm::dwarf::DW_LNS_set_column);
+      llvm::encodeULEB128(col, OS);
+    }
+    if (file != old.file) {
+      OS.write(llvm::dwarf::DW_LNS_set_file);
+      llvm::encodeULEB128(file, OS);
+    }
+    if (isa != old.isa) {
+      OS.write(llvm::dwarf::DW_LNS_set_isa);
+      llvm::encodeULEB128(isa, OS);
+    }
+    if (discriminator != old.discriminator) {
+      OS.write(0);
+      // discriminator uses ULEB128, compute its size
+      uint8_t discBuf[16];
+      unsigned discSize = llvm::encodeULEB128(discriminator, discBuf);
+      llvm::encodeULEB128(1 + discSize, OS); // length
+      OS.write(llvm::dwarf::DW_LNE_set_discriminator);
+      OS.write(reinterpret_cast<const char*>(discBuf), discSize);
+    }
+    if (isStmt != old.isStmt) {
+      OS.write(llvm::dwarf::DW_LNS_negate_stmt);
+    }
+    if (basicBlock != old.basicBlock) {
+      assert(basicBlock);
+      OS.write(llvm::dwarf::DW_LNS_set_basic_block);
+    }
+    if (prologueEnd) {
+      OS.write(llvm::dwarf::DW_LNS_set_prologue_end);
+    }
+    if (epilogueBegin != old.epilogueBegin) {
+      Fatal() << "eb";
+    }
+    if (endSequence) {
+      OS.write(0);
+      llvm::encodeULEB128(1, OS);
+      OS.write(llvm::dwarf::DW_LNE_end_sequence);
+    } else {
+      OS.write(llvm::dwarf::DW_LNS_copy);
+    }
+  }
 
 private:
   llvm::DWARFYAML::LineTableOpcode
@@ -1100,21 +1167,312 @@ static void patchDebugInfoBinary(Module& wasm,
   }
 }
 
+// Lightweight prologue info for binary line table processing.
+struct LineTableHeader {
+  uint32_t position;      // offset in .debug_line section
+  uint32_t totalLength;   // total length field value
+  uint16_t version;
+  uint32_t prologueLength;
+  uint8_t minInstLength;
+  uint8_t maxOpsPerInst;
+  uint8_t defaultIsStmt;
+  int8_t lineBase;
+  uint8_t lineRange;
+  uint8_t opcodeBase;
+  std::vector<uint8_t> standardOpcodeLengths;
+  uint64_t opcodeStart;   // byte offset where opcode stream starts
+  uint64_t tableEnd;      // byte offset where this table ends
+  uint64_t prologueStart; // byte offset after the 4-byte length field
+};
+
+// Construct a LineState from a LineTableHeader (binary version).
+static LineState makeLineState(const LineTableHeader& header,
+                               uint32_t sequenceId) {
+  llvm::DWARFYAML::LineTable fakeTable;
+  fakeTable.DefaultIsStmt = header.defaultIsStmt;
+  fakeTable.MinInstLength = header.minInstLength;
+  fakeTable.LineBase = header.lineBase;
+  fakeTable.LineRange = header.lineRange;
+  fakeTable.OpcodeBase = header.opcodeBase;
+  return LineState(fakeTable, sequenceId);
+}
+
+// Read one opcode from binary debug_line data, update LineState.
+// Returns true when a new row is ready.
+static bool readAndUpdateLineState(
+    LineState& state,
+    llvm::DataExtractor& data,
+    uint64_t& offset,
+    const LineTableHeader& header,
+    bool& isEndSequence,
+    bool& isSetAddress) {
+  isEndSequence = false;
+  isSetAddress = false;
+
+  uint8_t opcode = data.getU8(&offset);
+  if (opcode == 0) {
+    uint64_t extLen = data.getULEB128(&offset);
+    uint64_t extEnd = offset + extLen;
+    uint8_t subOpcode = data.getU8(&offset);
+    switch (subOpcode) {
+      case llvm::dwarf::DW_LNE_set_address:
+        state.addr = data.getAddress(&offset);
+        isSetAddress = true;
+        break;
+      case llvm::dwarf::DW_LNE_end_sequence:
+        isEndSequence = true;
+        return true;
+      case llvm::dwarf::DW_LNE_set_discriminator:
+        state.discriminator = data.getAddress(&offset);
+        break;
+      case llvm::dwarf::DW_LNE_define_file:
+        Fatal() << "TODO: DW_LNE_define_file";
+        break;
+      default:
+        offset = extEnd;
+        break;
+    }
+  } else if (opcode < header.opcodeBase) {
+    switch (opcode) {
+      case llvm::dwarf::DW_LNS_copy:
+        return true;
+      case llvm::dwarf::DW_LNS_advance_pc:
+        state.addr += data.getULEB128(&offset);
+        break;
+      case llvm::dwarf::DW_LNS_advance_line:
+        state.line += data.getSLEB128(&offset);
+        break;
+      case llvm::dwarf::DW_LNS_set_file:
+        state.file = data.getULEB128(&offset);
+        break;
+      case llvm::dwarf::DW_LNS_set_column:
+        state.col = data.getULEB128(&offset);
+        break;
+      case llvm::dwarf::DW_LNS_negate_stmt:
+        state.isStmt = !state.isStmt;
+        break;
+      case llvm::dwarf::DW_LNS_set_basic_block:
+        state.basicBlock = true;
+        break;
+      case llvm::dwarf::DW_LNS_const_add_pc: {
+        uint8_t adjustOpcode = 255 - header.opcodeBase;
+        uint64_t addrOffset =
+          (adjustOpcode / header.lineRange) * header.minInstLength;
+        state.addr += addrOffset;
+        break;
+      }
+      case llvm::dwarf::DW_LNS_fixed_advance_pc:
+        state.addr += data.getU16(&offset);
+        break;
+      case llvm::dwarf::DW_LNS_set_prologue_end:
+        state.prologueEnd = true;
+        break;
+      case llvm::dwarf::DW_LNS_set_epilogue_begin:
+        state.epilogueBegin = true;
+        break;
+      case llvm::dwarf::DW_LNS_set_isa:
+        state.isa = data.getULEB128(&offset);
+        break;
+      default:
+        if (opcode - 1 < header.standardOpcodeLengths.size()) {
+          for (uint8_t i = 0; i < header.standardOpcodeLengths[opcode - 1]; i++)
+            data.getULEB128(&offset);
+        }
+        break;
+    }
+  } else {
+    uint8_t adjustOpcode = opcode - header.opcodeBase;
+    uint64_t addrOffset =
+      (adjustOpcode / header.lineRange) * header.minInstLength;
+    int32_t lineOffset =
+      header.lineBase + (adjustOpcode % header.lineRange);
+    state.line += lineOffset;
+    state.addr += addrOffset;
+    return true;
+  }
+  return false;
+}
+
+// Rebuild .debug_line directly from binary, bypassing YAML materialization.
+static void patchDebugLineBinary(Module& wasm,
+                                 const BinaryenDWARFInfo& info,
+                                 LocationUpdater& locationUpdater) {
+  std::vector<char>* sectionDataPtr = nullptr;
+  for (auto& section : wasm.customSections) {
+    if (section.name == ".debug_line") {
+      sectionDataPtr = &section.data;
+      break;
+    }
+  }
+  if (!sectionDataPtr) return;
+
+  llvm::StringRef lineStr(sectionDataPtr->data(), sectionDataPtr->size());
+  llvm::DataExtractor lineData(lineStr, true, AddressSize);
+
+  struct TableResult {
+    uint32_t oldPosition;
+    std::string prologue; // raw prologue bytes (copied verbatim)
+    std::string opcodes;  // new opcode stream (binary)
+  };
+  std::vector<TableResult> results;
+
+  for (const auto& CU : info.context->compile_units()) {
+    auto CUDIE = CU->getUnitDIE();
+    if (!CUDIE) continue;
+    auto stmtOffset = llvm::dwarf::toSectionOffset(
+        CUDIE.find(llvm::dwarf::DW_AT_stmt_list));
+    if (!stmtOffset) continue;
+
+    uint64_t offset = *stmtOffset;
+    LineTableHeader header;
+    header.position = offset;
+
+    // Parse header.
+    header.totalLength = lineData.getU32(&offset);
+    header.prologueStart = offset;
+    header.tableEnd = header.position + 4 + header.totalLength;
+    header.version = lineData.getU16(&offset);
+    header.prologueLength = lineData.getU32(&offset);
+    uint64_t prologueDataStart = offset;
+    header.opcodeStart = prologueDataStart + header.prologueLength;
+    header.minInstLength = lineData.getU8(&offset);
+    if (header.version >= 4)
+      header.maxOpsPerInst = lineData.getU8(&offset);
+    else
+      header.maxOpsPerInst = 1;
+    header.defaultIsStmt = lineData.getU8(&offset);
+    header.lineBase = (int8_t)lineData.getU8(&offset);
+    header.lineRange = lineData.getU8(&offset);
+    header.opcodeBase = lineData.getU8(&offset);
+    header.standardOpcodeLengths.reserve(header.opcodeBase - 1);
+    for (uint8_t i = 1; i < header.opcodeBase; i++)
+      header.standardOpcodeLengths.push_back(lineData.getU8(&offset));
+
+    // Copy prologue verbatim (from after length field to opcodeStart).
+    std::string prologueBytes(
+      sectionDataPtr->data() + header.prologueStart,
+      sectionDataPtr->data() + header.opcodeStart);
+
+    // Process opcodes through LineState (same logic as updateDebugLines).
+    offset = header.opcodeStart;
+    uint32_t sequenceId = 0;
+    LineState state = makeLineState(header, sequenceId);
+    std::vector<BinaryLocation> newAddrs;
+    std::unordered_map<BinaryLocation, LineState> newAddrInfo;
+    bool omittingRange = false;
+
+    while (offset < header.tableEnd) {
+      bool isEndSequence = false;
+      bool isSetAddress = false;
+      bool rowReady = readAndUpdateLineState(
+        state, lineData, offset, header, isEndSequence, isSetAddress);
+
+      if (isSetAddress) {
+        omittingRange = false;
+      }
+
+      if (rowReady) {
+        if (isTombstone(state.addr)) {
+          omittingRange = true;
+        }
+        if (omittingRange) {
+          state = makeLineState(header, sequenceId);
+          if (isEndSequence) {
+            sequenceId++;
+            state = makeLineState(header, sequenceId);
+          }
+          continue;
+        }
+        BinaryLocation oldAddr = state.addr;
+        BinaryLocation newAddr = 0;
+        if (locationUpdater.hasOldExprStart(oldAddr)) {
+          newAddr = locationUpdater.getNewExprStart(oldAddr);
+        } else if (locationUpdater.hasOldFuncEnd(oldAddr)) {
+          newAddr = locationUpdater.getNewFuncEnd(oldAddr);
+        } else if (locationUpdater.hasOldFuncStart(oldAddr)) {
+          newAddr = locationUpdater.getNewFuncStart(oldAddr);
+        } else if (locationUpdater.hasOldDelimiter(oldAddr)) {
+          newAddr = locationUpdater.getNewDelimiter(oldAddr);
+        } else if (locationUpdater.hasOldExprEnd(oldAddr)) {
+          newAddr = locationUpdater.getNewExprEnd(oldAddr);
+        }
+        if (newAddr && state.needToEmit()) {
+          if (newAddrInfo.count(newAddr)) {
+            if (isEndSequence) {
+              sequenceId++;
+              state = makeLineState(header, sequenceId);
+            }
+            continue;
+          }
+          newAddrs.push_back(newAddr);
+          newAddrInfo.emplace(newAddr, state);
+          newAddrInfo.at(newAddr).addr = newAddr;
+          state.resetAfterLine();
+        }
+        if (isEndSequence) {
+          sequenceId++;
+          state = makeLineState(header, sequenceId);
+        }
+      }
+    }
+
+    // Sort and emit new opcodes directly to binary.
+    std::sort(newAddrs.begin(), newAddrs.end());
+
+    std::string opcodeBuffer;
+    llvm::raw_string_ostream opcodeStream(opcodeBuffer);
+    for (size_t i = 0; i < newAddrs.size(); i++) {
+      LineState curState = newAddrInfo.at(newAddrs[i]);
+      LineState lastState = makeLineState(header, -1);
+      if (i != 0) {
+        lastState = newAddrInfo.at(newAddrs[i - 1]);
+        if (lastState.sequenceId != curState.sequenceId) {
+          lastState = makeLineState(header, -1);
+        }
+      }
+      bool endSequence =
+        i + 1 == newAddrs.size() ||
+        newAddrInfo.at(newAddrs[i + 1]).sequenceId != curState.sequenceId;
+      curState.emitDiffBinary(lastState, opcodeStream, AddressSize,
+                              true, endSequence);
+    }
+    opcodeStream.flush();
+
+    TableResult result;
+    result.oldPosition = header.position;
+    result.prologue = std::move(prologueBytes);
+    result.opcodes = std::move(opcodeBuffer);
+    results.push_back(std::move(result));
+  }
+
+  // Build new .debug_line section and debugLineMap.
+  std::string newSection;
+  llvm::raw_string_ostream sectionStream(newSection);
+  BinaryLocation newLocation = 0;
+
+  for (auto& result : results) {
+    locationUpdater.debugLineMap[result.oldPosition] = newLocation;
+    uint32_t contentSize = result.prologue.size() + result.opcodes.size();
+    sectionStream.write(reinterpret_cast<const char*>(&contentSize), 4);
+    sectionStream << result.prologue;
+    sectionStream << result.opcodes;
+    newLocation += 4 + contentSize;
+  }
+  sectionStream.flush();
+
+  sectionDataPtr->resize(newSection.size());
+  std::copy(newSection.begin(), newSection.end(), sectionDataPtr->data());
+}
+
 void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
   BinaryenDWARFInfo info(wasm);
 
-  // Convert to Data representation, which YAML can use to write.
-  // Only debug_line goes through YAML. debug_info, debug_ranges, and
-  // debug_loc are patched directly on the binary sections, so skip
-  // materializing CompileUnits/Ranges/Locs to save memory.
-  llvm::DWARFYAML::Data data;
-  if (dwarf2yaml(*info.context, data, /*skipCompileUnits=*/true)) {
-    Fatal() << "Failed to parse DWARF to YAML";
-  }
-
   LocationUpdater locationUpdater(wasm, newLocations);
 
-  updateDebugLines(data, locationUpdater);
+  // Patch debug_line directly from binary, bypassing YAML entirely.
+  // This must run before patchDebugInfoBinary since debug_info needs
+  // the debugLineMap populated by patchDebugLineBinary.
+  patchDebugLineBinary(wasm, info, locationUpdater);
 
   bool is64 = wasm.memories.size() > 0 ? wasm.memories[0]->is64() : false;
 
@@ -1126,24 +1484,7 @@ void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
   patchDebugRangesBinary(wasm, locationUpdater);
   patchDebugLocBinary(wasm, locationUpdater);
 
-  // Convert remaining sections (debug_line, debug_str, debug_abbrev) to binary.
-  auto newSections =
-    EmitDebugSections(data, false /* EmitFixups for debug_info */);
-
-  // Update the custom sections in the wasm (skip sections patched in-place).
-  for (auto& section : wasm.customSections) {
-    if (Name(section.name).startsWith(".debug_") &&
-        section.name != ".debug_ranges" &&
-        section.name != ".debug_loc" &&
-        section.name != ".debug_info") {
-      auto llvmName = section.name.substr(1);
-      if (newSections.count(llvmName)) {
-        auto llvmData = newSections[llvmName]->getBuffer();
-        section.data.resize(llvmData.size());
-        std::copy(llvmData.begin(), llvmData.end(), section.data.data());
-      }
-    }
-  }
+  // All DWARF sections are now patched in-place. No YAML round-trip needed.
 }
 
 #else // BUILD_LLVM_DWARF
