@@ -355,14 +355,45 @@ private:
   }
 };
 
+// A sorted vector of (key, value) pairs with binary search lookup.
+// Uses ~16 bytes per entry vs ~64 for std::unordered_map.
+template<typename K, typename V>
+struct SortedMap {
+  std::vector<std::pair<K, V>> data;
+
+  void reserve(size_t n) { data.reserve(n); }
+
+  void add(K key, V value) {
+    data.push_back({key, value});
+  }
+
+  // Call after all add() calls to enable lookup.
+  void sort() {
+    std::sort(data.begin(), data.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+  }
+
+  const V* find(K key) const {
+    auto it = std::lower_bound(
+      data.begin(), data.end(), key,
+      [](const auto& pair, K k) { return pair.first < k; });
+    if (it != data.end() && it->first == key) {
+      return &it->second;
+    }
+    return nullptr;
+  }
+
+  size_t count(K key) const { return find(key) ? 1 : 0; }
+};
+
 // Represents a mapping of addresses to expressions. We track beginnings and
 // endings of expressions separately, since the end of one (which is one past
 // the end in DWARF notation) overlaps with the beginning of the next, and also
 // to let us use contextual information (we may know we are looking up the end
 // of an instruction).
 struct AddrExprMap {
-  std::unordered_map<BinaryLocation, Expression*> startMap;
-  std::unordered_map<BinaryLocation, Expression*> endMap;
+  SortedMap<BinaryLocation, Expression*> startMap;
+  SortedMap<BinaryLocation, Expression*> endMap;
 
   // Some instructions have delimiter binary locations, like the else and end in
   // and if. Track those separately, including their expression and their id
@@ -372,10 +403,20 @@ struct AddrExprMap {
     Expression* expr;
     size_t id;
   };
-  std::unordered_map<BinaryLocation, DelimiterInfo> delimiterMap;
+  SortedMap<BinaryLocation, DelimiterInfo> delimiterMap;
 
   // Construct the map from the binaryLocations loaded from the wasm.
   AddrExprMap(const Module& wasm) {
+    // Count entries for reservation.
+    size_t exprCount = 0, delimCount = 0;
+    for (auto& func : wasm.functions) {
+      exprCount += func->expressionLocations.size();
+      delimCount += func->delimiterLocations.size();
+    }
+    startMap.reserve(exprCount);
+    endMap.reserve(exprCount);
+    delimiterMap.reserve(delimCount);
+
     for (auto& func : wasm.functions) {
       for (auto& [expr, span] : func->expressionLocations) {
         add(expr, span);
@@ -384,38 +425,32 @@ struct AddrExprMap {
         add(expr, delim);
       }
     }
+    startMap.sort();
+    endMap.sort();
+    delimiterMap.sort();
   }
 
   Expression* getStart(BinaryLocation addr) const {
-    auto iter = startMap.find(addr);
-    if (iter != startMap.end()) {
-      return iter->second;
-    }
-    return nullptr;
+    auto* result = startMap.find(addr);
+    return result ? *result : nullptr;
   }
 
   Expression* getEnd(BinaryLocation addr) const {
-    auto iter = endMap.find(addr);
-    if (iter != endMap.end()) {
-      return iter->second;
-    }
-    return nullptr;
+    auto* result = endMap.find(addr);
+    return result ? *result : nullptr;
   }
 
   DelimiterInfo getDelimiter(BinaryLocation addr) const {
-    auto iter = delimiterMap.find(addr);
-    if (iter != delimiterMap.end()) {
-      return iter->second;
-    }
-    return DelimiterInfo{nullptr, BinaryLocations::Invalid};
+    auto* result = delimiterMap.find(addr);
+    return result ? *result : DelimiterInfo{nullptr, BinaryLocations::Invalid};
   }
 
 private:
   void add(Expression* expr, const BinaryLocations::Span span) {
     assert(startMap.count(span.start) == 0);
-    startMap[span.start] = expr;
+    startMap.add(span.start, expr);
     assert(endMap.count(span.end) == 0);
-    endMap[span.end] = expr;
+    endMap.add(span.end, expr);
   }
 
   void add(Expression* expr,
@@ -423,7 +458,7 @@ private:
     for (Index i = 0; i < delimiter.size(); i++) {
       if (delimiter[i] != 0) {
         assert(delimiterMap.count(delimiter[i]) == 0);
-        delimiterMap[delimiter[i]] = DelimiterInfo{expr, i};
+        delimiterMap.add(delimiter[i], DelimiterInfo{expr, i});
       }
     }
   }
@@ -435,32 +470,30 @@ private:
 // of one past the end, and one before it which is the "end" opcode that is
 // emitted.
 struct FuncAddrMap {
-  std::unordered_map<BinaryLocation, Function*> startMap, endMap;
+  SortedMap<BinaryLocation, Function*> startMap, endMap;
 
   // Construct the map from the binaryLocations loaded from the wasm.
   FuncAddrMap(const Module& wasm) {
+    startMap.reserve(wasm.functions.size() * 2);
+    endMap.reserve(wasm.functions.size() * 2);
     for (auto& func : wasm.functions) {
-      startMap[func->funcLocation.start] = func.get();
-      startMap[func->funcLocation.declarations] = func.get();
-      endMap[func->funcLocation.end - 1] = func.get();
-      endMap[func->funcLocation.end] = func.get();
+      startMap.add(func->funcLocation.start, func.get());
+      startMap.add(func->funcLocation.declarations, func.get());
+      endMap.add(func->funcLocation.end - 1, func.get());
+      endMap.add(func->funcLocation.end, func.get());
     }
+    startMap.sort();
+    endMap.sort();
   }
 
   Function* getStart(BinaryLocation addr) const {
-    auto iter = startMap.find(addr);
-    if (iter != startMap.end()) {
-      return iter->second;
-    }
-    return nullptr;
+    auto* result = startMap.find(addr);
+    return result ? *result : nullptr;
   }
 
   Function* getEnd(BinaryLocation addr) const {
-    auto iter = endMap.find(addr);
-    if (iter != endMap.end()) {
-      return iter->second;
-    }
-    return nullptr;
+    auto* result = endMap.find(addr);
+    return result ? *result : nullptr;
   }
 };
 
@@ -914,148 +947,148 @@ static void updateCompileUnits(const BinaryenDWARFInfo& info,
     });
 }
 
-static void updateRanges(llvm::DWARFYAML::Data& yaml,
-                         const LocationUpdater& locationUpdater) {
-  // In each range section, try to update the start and end. If we no longer
-  // have something to map them to, we must skip that part.
-  size_t skip = 0;
-  for (size_t i = 0; i < yaml.Ranges.size(); i++) {
-    auto& range = yaml.Ranges[i];
-    BinaryLocation oldStart = range.Start, oldEnd = range.End, newStart = 0,
-                   newEnd = 0;
-    // If this is an end marker (0, 0), or an invalid range (0, x) or (x, 0)
-    // then just emit it as it is - either to mark the end, or to mark an
-    // invalid entry.
-    if (isTombstone(oldStart) || isTombstone(oldEnd)) {
-      newStart = oldStart;
-      newEnd = oldEnd;
-    } else {
-      // This was a valid entry; update it.
-      newStart = locationUpdater.getNewStart(oldStart);
-      newEnd = locationUpdater.getNewEnd(oldEnd);
-      if (isTombstone(newStart) || isTombstone(newEnd)) {
-        // This part of the range no longer has a mapping, so we must skip it.
-        // Don't use (0, 0) as that would be an end marker; emit something
-        // invalid for the debugger to ignore.
-        newStart = 0;
-        newEnd = 1;
-      }
-      // TODO even if range start and end markers have been preserved,
-      // instructions in the middle may have moved around, making the range no
-      // longer contiguous. We should check that, and possibly split/merge
-      // the range. Or, we may need to have tracking in the IR for this.
-    }
-    auto& writtenRange = yaml.Ranges[i - skip];
-    writtenRange.Start = newStart;
-    writtenRange.End = newEnd;
-  }
-}
+// Note: updateRanges (YAML-based) has been replaced by patchDebugRangesBinary
+// which patches the binary section directly, avoiding YAML materialization.
 
 // A location that is ignoreable, i.e., not a special value like 0 or -1 (which
 // would indicate an end or a base in .debug_loc).
 static const BinaryLocation IGNOREABLE_LOCATION = 1;
 
-static bool isNewBaseLoc(const llvm::DWARFYAML::Loc& loc) {
-  return loc.Start == BinaryLocation(-1);
-}
+// Note: updateLoc (YAML-based), isNewBaseLoc, and isEndMarkerLoc have been
+// replaced by patchDebugLocBinary which patches the binary section directly.
 
-static bool isEndMarkerLoc(const llvm::DWARFYAML::Loc& loc) {
-  return isTombstone(loc.Start) && isTombstone(loc.End);
-}
-
-// Update the .debug_loc section.
-static void updateLoc(llvm::DWARFYAML::Data& yaml,
-                      const LocationUpdater& locationUpdater) {
-  // Similar to ranges, try to update the start and end. Note that here we
-  // can't skip since the location description is a variable number of bytes,
-  // so we mark no longer valid addresses as empty.
-  bool atStart = true;
-  // We need to keep positions in the .debug_loc section identical to before
-  // (or else we'd need to update their positions too) and so we need to keep
-  // base entries around (a base entry is added to every entry after it in the
-  // list). However, we may change the base's value as after moving instructions
-  // around the old base may not be smaller than all the values relative to it.
-  BinaryLocation oldBase, newBase;
-  auto& locs = yaml.Locs;
-  for (size_t i = 0; i < locs.size(); i++) {
-    auto& loc = locs[i];
-    if (atStart) {
-      std::tie(oldBase, newBase) =
-        locationUpdater.getCompileUnitBasesForLoc(loc.CompileUnitOffset);
-      atStart = false;
+// Patch .debug_ranges section in-place on the binary data, bypassing YAML.
+// The section is a flat array of (uint32_t start, uint32_t end) pairs,
+// terminated by (0, 0). This avoids materializing DWARFYAML::Range objects.
+static void patchDebugRangesBinary(Module& wasm,
+                                   const LocationUpdater& locationUpdater) {
+  for (auto& section : wasm.customSections) {
+    if (section.name != ".debug_ranges") {
+      continue;
     }
-    // By default we copy values over, unless we modify them below.
-    BinaryLocation newStart = loc.Start, newEnd = loc.End;
-    if (isNewBaseLoc(loc)) {
-      // This is a new base.
-      // Note that the base is not the address of an instruction, necessarily -
-      // it's just a number (seems like it could always be an instruction, but
-      // that's not what LLVM emits).
-      // We must look forward at everything relative to this base, so that we
-      // can emit a new proper base (as mentioned earlier, the original base may
-      // not be valid if instructions moved to a position before it - they must
-      // be positive offsets from it).
-      oldBase = newBase = newEnd;
-      BinaryLocation smallest = -1;
-      for (size_t j = i + 1; j < locs.size(); j++) {
-        auto& futureLoc = locs[j];
-        if (isNewBaseLoc(futureLoc) || isEndMarkerLoc(futureLoc)) {
-          break;
-        }
-        auto updatedStart =
-          locationUpdater.getNewStart(futureLoc.Start + oldBase);
-        // If we found a valid mapping, this is a relevant value for us. If the
-        // optimizer removed it, it's a 0, and we can ignore it here - we will
-        // emit IGNOREABLE_LOCATION for it later anyhow.
-        if (updatedStart != 0) {
-          smallest = std::min(smallest, updatedStart);
-        }
-      }
-      // If we found no valid values that will be relativized here, just use 0
-      // as the new (never-to-be-used) base, which is less confusing (otherwise
-      // the value looks like it means something).
-      if (smallest == BinaryLocation(-1)) {
-        smallest = 0;
-      }
-      newBase = newEnd = smallest;
-    } else if (isEndMarkerLoc(loc)) {
-      // This is an end marker, this list is done; reset the base.
-      atStart = true;
-    } else {
-      // This is a normal entry, try to find what it should be updated to. First
-      // de-relativize it to the base to get the absolute address, then look for
-      // a new address for it.
-      newStart = locationUpdater.getNewStart(loc.Start + oldBase);
-      newEnd = locationUpdater.getNewEnd(loc.End + oldBase);
-      if (newStart == 0 || newEnd == 0 || newStart > newEnd) {
-        // This part of the loc no longer has a mapping, or after the mapping
-        // it is no longer a proper span, so we must ignore it.
-        newStart = newEnd = IGNOREABLE_LOCATION;
+    auto* data = reinterpret_cast<uint8_t*>(section.data.data());
+    size_t size = section.data.size();
+    // Each entry is two uint32_t values (start, end).
+    for (size_t offset = 0; offset + 8 <= size; offset += 8) {
+      uint32_t oldStart, oldEnd;
+      memcpy(&oldStart, data + offset, 4);
+      memcpy(&oldEnd, data + offset + 4, 4);
+      uint32_t newStart = oldStart, newEnd = oldEnd;
+      if (oldStart == 0 && oldEnd == 0) {
+        // End marker, leave as-is.
+      } else if (isTombstone(oldStart) || isTombstone(oldEnd)) {
+        // Tombstone or invalid, leave as-is.
       } else {
-        // We picked a new base that ensures it is smaller than the values we
-        // will relativize to it.
-        assert(newStart >= newBase && newEnd >= newBase);
-        newStart -= newBase;
-        newEnd -= newBase;
-        if (newStart == 0 && newEnd == 0) {
-          // After mapping to the new positions, and after relativizing to the
-          // base, if we end up with (0, 0) then we must emit something else, as
-          // that would be interpreted as the end of a list. As it is an empty
-          // span, the actual value doesn't matter, it just has to be != 0.
-          // This can happen if the very first span in a compile unit is an
-          // empty span, in which case relative to the base of the compile unit
-          // we would have (0, 0).
-          newStart = newEnd = IGNOREABLE_LOCATION;
+        newStart = locationUpdater.getNewStart(oldStart);
+        newEnd = locationUpdater.getNewEnd(oldEnd);
+        if (isTombstone(newStart) || isTombstone(newEnd)) {
+          newStart = 0;
+          newEnd = 1;
         }
       }
-      // The loc start and end markers have been preserved. However, TODO
-      // instructions in the middle may have moved around, making the loc no
-      // longer contiguous, we should check that, and possibly split/merge
-      // the loc. Or, we may need to have tracking in the IR for this.
+      memcpy(data + offset, &newStart, 4);
+      memcpy(data + offset + 4, &newEnd, 4);
     }
-    loc.Start = newStart;
-    loc.End = newEnd;
-    // Note how the ".Location" field is unchanged.
+    break;
+  }
+}
+
+// Patch .debug_loc section in-place on the binary data, bypassing YAML.
+// Format: sequences of location list entries, each being:
+//   - Base address entry: start=0xFFFFFFFF, end=new_base (8 bytes)
+//   - Normal entry: start(4), end(4), length(2), expr(length bytes)
+//   - End marker: start=0, end=0 (8 bytes)
+// Location expressions are NOT modified — only the address pairs.
+static void patchDebugLocBinary(Module& wasm,
+                                LocationUpdater& locationUpdater) {
+  for (auto& section : wasm.customSections) {
+    if (section.name != ".debug_loc") {
+      continue;
+    }
+    auto* data = reinterpret_cast<uint8_t*>(section.data.data());
+    size_t size = section.data.size();
+
+    // Collect entry offsets so we can forward-scan for base recomputation.
+    struct LocEntry {
+      size_t offset;
+      uint32_t start, end;
+      bool isBase, isEnd;
+    };
+    std::vector<LocEntry> entries;
+
+    size_t pos = 0;
+    while (pos + 8 <= size) {
+      LocEntry entry;
+      entry.offset = pos;
+      memcpy(&entry.start, data + pos, 4);
+      memcpy(&entry.end, data + pos + 4, 4);
+      entry.isBase = (entry.start == uint32_t(-1));
+      entry.isEnd = (entry.start == 0 && entry.end == 0);
+      pos += 8;
+      if (!entry.isBase && !entry.isEnd) {
+        // Normal entry: skip past the expression.
+        if (pos + 2 > size) break;
+        uint16_t exprLen;
+        memcpy(&exprLen, data + pos, 2);
+        pos += 2 + exprLen;
+      }
+      entries.push_back(entry);
+    }
+
+    // Patch addresses using the same logic as the former updateLoc.
+    bool atStart = true;
+    BinaryLocation oldBase = 0, newBase = 0;
+
+    for (size_t i = 0; i < entries.size(); i++) {
+      auto& entry = entries[i];
+      if (atStart) {
+        std::tie(oldBase, newBase) =
+          locationUpdater.getCompileUnitBasesForLoc(entry.offset);
+        atStart = false;
+      }
+
+      uint32_t newStart = entry.start, newEnd = entry.end;
+
+      if (entry.isBase) {
+        // Base address entry — recompute by forward scanning.
+        oldBase = newBase = entry.end;
+        BinaryLocation smallest = BinaryLocation(-1);
+        for (size_t j = i + 1; j < entries.size(); j++) {
+          if (entries[j].isBase || entries[j].isEnd) break;
+          auto updatedStart =
+            locationUpdater.getNewStart(entries[j].start + oldBase);
+          if (updatedStart != 0) {
+            smallest = std::min(smallest, updatedStart);
+          }
+        }
+        if (smallest == BinaryLocation(-1)) {
+          smallest = 0;
+        }
+        newBase = newEnd = smallest;
+        newStart = uint32_t(-1); // keep as base marker
+      } else if (entry.isEnd) {
+        atStart = true;
+      } else {
+        // Normal entry — de-relativize, map, re-relativize.
+        newStart = locationUpdater.getNewStart(entry.start + oldBase);
+        newEnd = locationUpdater.getNewEnd(entry.end + oldBase);
+        if (newStart == 0 || newEnd == 0 || newStart > newEnd) {
+          newStart = newEnd = IGNOREABLE_LOCATION;
+        } else {
+          assert(newStart >= newBase && newEnd >= newBase);
+          newStart -= newBase;
+          newEnd -= newBase;
+          if (newStart == 0 && newEnd == 0) {
+            newStart = newEnd = IGNOREABLE_LOCATION;
+          }
+        }
+      }
+
+      // Write back patched addresses.
+      memcpy(data + entry.offset, &newStart, 4);
+      memcpy(data + entry.offset + 4, &newEnd, 4);
+    }
+    break;
   }
 }
 
@@ -1075,18 +1108,25 @@ void writeDWARFSections(Module& wasm, const BinaryLocations& newLocations) {
   bool is64 = wasm.memories.size() > 0 ? wasm.memories[0]->is64() : false;
   updateCompileUnits(info, data, locationUpdater, is64);
 
-  updateRanges(data, locationUpdater);
+  // Patch .debug_ranges and .debug_loc directly on the binary sections
+  // instead of going through the YAML round-trip. Clear the YAML data so
+  // EmitDebugSections doesn't overwrite our binary patches.
+  patchDebugRangesBinary(wasm, locationUpdater);
+  data.Ranges.clear();
 
-  updateLoc(data, locationUpdater);
+  patchDebugLocBinary(wasm, locationUpdater);
+  data.Locs.clear();
 
-  // Convert to binary sections.
+  // Convert remaining sections to binary.
   auto newSections =
     EmitDebugSections(data, false /* EmitFixups for debug_info */);
 
-  // Update the custom sections in the wasm.
-  // TODO: efficiency
+  // Update the custom sections in the wasm (skip debug_ranges and debug_loc
+  // since we already patched them in-place).
   for (auto& section : wasm.customSections) {
-    if (Name(section.name).startsWith(".debug_")) {
+    if (Name(section.name).startsWith(".debug_") &&
+        section.name != ".debug_ranges" &&
+        section.name != ".debug_loc") {
       auto llvmName = section.name.substr(1);
       if (newSections.count(llvmName)) {
         auto llvmData = newSections[llvmName]->getBuffer();
