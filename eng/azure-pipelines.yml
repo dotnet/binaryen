@@ -1,0 +1,308 @@
+variables:
+- template: /eng/common-variables.yml@self
+- template: /eng/common/templates-official/variables/pool-providers.yml@self
+- name: Codeql.Enabled  # TODO: split codeql into separate pipeline
+  value: true
+- name: LinuxImage
+  value: build.azurelinux.3.amd64
+- name: WindowsImage
+  value: 1es-windows-2022
+- name: MacImage
+  value: macOS-14
+
+trigger:
+  batch: true
+  branches:
+    include:
+    - dotnet/main
+    - dotnet/release/*
+    - dotnet/test/*
+
+pr: none
+
+resources:
+  repositories:
+  - repository: 1ESPipelineTemplates
+    type: git
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/tags/release
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    sdl:
+      tsa:
+        enabled: true
+      policheck:
+        enabled: true
+      binskim:
+        enabled: true
+        scanOutputDirectoryOnly: true
+    pool:
+      name: $(DncEngInternalBuildPool)
+      image: $(WindowsImage)
+      os: windows
+    containers:
+      mariner2crossamd64:
+        image: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-amd64
+      mariner2crossarm64:
+        image: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-arm64
+      mariner2crossamd64alpine:
+        image: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-amd64-alpine
+      mariner2crossarm64alpine:
+        image: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-arm64-alpine
+    stages:
+    - stage: build
+      displayName: Build
+      jobs:
+      - template: /eng/common/templates-official/jobs/jobs.yml@self
+        parameters:
+          enablePublishBuildArtifacts: true
+          enablePublishBuildAssets: true
+          publishingVersion: 4
+          jobs:
+
+          ############ LINUX X64 BUILD ############
+          - job: Build_Linux_x64
+            enablePublishing: true
+            displayName: Linux_x64
+            timeoutInMinutes: 360
+            variables:
+              - assetManifestOS: linux
+              - assetManifestPlatform: x64
+              - rootfs: /crossrootfs/x64
+              - ClangTargetArg: /p:ClangTarget=x86_64-linux-gnu
+              - ClangBinDirArg: /p:ClangBinDir=/usr/local/bin
+              - archflag: --arch x64
+            pool:
+              name: $(DncEngInternalBuildPool)
+              image: $(LinuxImage)
+              os: linux
+            container: mariner2crossamd64
+            steps:
+            - script: |
+                git clean -ffdx
+                git reset --hard HEAD
+              displayName: 'Clean up working directory'
+
+            - bash: |
+                ./build.sh --ci --restore --build --pack $(archflag) --configuration $(_BuildConfig) $(_InternalBuildArgs) $(ClangTargetArg) $(ClangBinDirArg) /p:RestoreUsingNuGetTargets=false
+              displayName: 'Build and package'
+              env:
+                ROOTFS_DIR: $(rootfs)
+
+            - bash:
+                ./eng/common/build.sh --ci --restore --publish --configuration $(_BuildConfig) $(_InternalBuildArgs) /p:AssetManifestOS=$(assetManifestOS) /p:PlatformName=$(assetManifestPlatform) --projects $(Build.SourcesDirectory)/binaryen.proj
+              displayName: Publish packages
+
+          ############ LINUX ARM64 BUILD ############
+          - job: Build_Linux_arm64
+            enablePublishing: true
+            displayName: Linux_arm64
+            timeoutInMinutes: 360
+            variables:
+              - assetManifestOS: linux
+              - assetManifestPlatform: arm64
+              - rootfs: /crossrootfs/arm64
+              - ClangTargetArg: /p:ClangTarget=aarch64-linux-gnu
+              - ClangBinDirArg: /p:ClangBinDir=/usr/local/bin
+              - archflag: --arch arm64
+            pool:
+              name: $(DncEngInternalBuildPool)
+              image: $(LinuxImage)
+              os: linux
+            container: mariner2crossarm64
+            steps:
+            - script: |
+                git clean -ffdx
+                git reset --hard HEAD
+              displayName: 'Clean up working directory'
+
+            - bash: |
+                ./build.sh --ci --restore --build --pack $(archflag) --configuration $(_BuildConfig) $(_InternalBuildArgs) $(ClangTargetArg) $(ClangBinDirArg) /p:RestoreUsingNuGetTargets=false
+              displayName: 'Build and package'
+              env:
+                ROOTFS_DIR: $(rootfs)
+
+            - bash:
+                ./eng/common/build.sh --ci --restore --publish --configuration $(_BuildConfig) $(_InternalBuildArgs) /p:AssetManifestOS=$(assetManifestOS) /p:PlatformName=$(assetManifestPlatform) --projects $(Build.SourcesDirectory)/binaryen.proj
+              displayName: Publish packages
+
+          ############ LINUX MUSL X64 BUILD ############
+          - job: Build_Linux_musl_x64
+            enablePublishing: true
+            displayName: Linux_musl_x64
+            timeoutInMinutes: 360
+            variables:
+              - assetManifestOS: linux-musl
+              - assetManifestPlatform: x64
+              - rootfs: /crossrootfs/x64
+              - ClangTargetArg: /p:ClangTarget=x86_64-alpine-linux-musl
+              - ClangBinDirArg: /p:ClangBinDir=/usr/local/bin
+              - archflag: --arch x64
+            pool:
+              name: $(DncEngInternalBuildPool)
+              image: $(LinuxImage)
+              os: linux
+            container: mariner2crossamd64alpine
+            steps:
+            - script: |
+                git clean -ffdx
+                git reset --hard HEAD
+              displayName: 'Clean up working directory'
+
+            - bash: |
+                ./build.sh --ci --restore --build --pack $(archflag) --configuration $(_BuildConfig) $(_InternalBuildArgs) /p:OutputRid=linux-musl-$(assetManifestPlatform) $(ClangTargetArg) $(ClangBinDirArg) /p:RestoreUsingNuGetTargets=false
+              displayName: 'Build and package'
+              env:
+                ROOTFS_DIR: $(rootfs)
+
+            - bash:
+                ./eng/common/build.sh --ci --restore --publish --configuration $(_BuildConfig) $(_InternalBuildArgs) /p:AssetManifestOS=$(assetManifestOS) /p:PlatformName=$(assetManifestPlatform) --projects $(Build.SourcesDirectory)/binaryen.proj
+              displayName: Publish packages
+
+          ############ LINUX MUSL ARM64 BUILD ############
+          - job: Build_Linux_musl_arm64
+            enablePublishing: true
+            displayName: Linux_musl_arm64
+            timeoutInMinutes: 360
+            variables:
+              - assetManifestOS: linux-musl
+              - assetManifestPlatform: arm64
+              - rootfs: /crossrootfs/arm64
+              - ClangTargetArg: /p:ClangTarget=aarch64-alpine-linux-musl
+              - ClangBinDirArg: /p:ClangBinDir=/usr/local/bin
+              - archflag: --arch arm64
+            pool:
+              name: $(DncEngInternalBuildPool)
+              image: $(LinuxImage)
+              os: linux
+            container: mariner2crossarm64alpine
+            steps:
+            - script: |
+                git clean -ffdx
+                git reset --hard HEAD
+              displayName: 'Clean up working directory'
+
+            - bash: |
+                ./build.sh --ci --restore --build --pack $(archflag) --configuration $(_BuildConfig) $(_InternalBuildArgs) /p:OutputRid=linux-musl-$(assetManifestPlatform) $(ClangTargetArg) $(ClangBinDirArg) /p:RestoreUsingNuGetTargets=false
+              displayName: 'Build and package'
+              env:
+                ROOTFS_DIR: $(rootfs)
+
+            - bash:
+                ./eng/common/build.sh --ci --restore --publish --configuration $(_BuildConfig) $(_InternalBuildArgs) /p:AssetManifestOS=$(assetManifestOS) /p:PlatformName=$(assetManifestPlatform) --projects $(Build.SourcesDirectory)/binaryen.proj
+              displayName: Publish packages
+
+          ############ MACOS X64 BUILD ############
+          - job: Build_macOS_x64
+            enablePublishing: true
+            displayName: macOS_x64
+            timeoutInMinutes: 360
+            variables:
+              - assetManifestOS: osx
+              - assetManifestPlatform: x64
+              - archflag: --arch x64
+            pool:
+              name: Azure Pipelines
+              image: $(MacImage)
+              os: macOS
+            steps:
+            - script: |
+                git clean -ffdx
+                git reset --hard HEAD
+              displayName: 'Clean up working directory'
+
+            - bash: |
+                ./build.sh --ci --restore --build --pack $(archflag) --configuration $(_BuildConfig) $(_InternalBuildArgs) /p:RestoreUsingNuGetTargets=false
+              displayName: 'Build and package'
+
+            - bash:
+                ./eng/common/build.sh --ci --restore --publish --configuration $(_BuildConfig) $(_InternalBuildArgs) /p:AssetManifestOS=$(assetManifestOS) /p:PlatformName=$(assetManifestPlatform) --projects $(Build.SourcesDirectory)/binaryen.proj
+              displayName: Publish packages
+
+          ############ MACOS ARM64 BUILD ############
+          - job: Build_macOS_ARM64
+            enablePublishing: true
+            displayName: macOS_arm64
+            timeoutInMinutes: 360
+            variables:
+              - assetManifestOS: osx
+              - assetManifestPlatform: arm64
+              - archflag: --arch arm64
+            pool:
+              name: Azure Pipelines
+              image: $(MacImage)
+              os: macOS
+            steps:
+            - script: |
+                git clean -ffdx
+                git reset --hard HEAD
+              displayName: 'Clean up working directory'
+
+            - bash: |
+                ./build.sh --ci --restore --build --pack $(archflag) --configuration $(_BuildConfig) $(_InternalBuildArgs) /p:RestoreUsingNuGetTargets=false
+              displayName: 'Build and package'
+
+            - bash:
+                ./eng/common/build.sh --ci --restore --publish --configuration $(_BuildConfig) $(_InternalBuildArgs) /p:AssetManifestOS=$(assetManifestOS) /p:PlatformName=$(assetManifestPlatform) --projects $(Build.SourcesDirectory)/binaryen.proj
+              displayName: Publish packages
+
+          ############ WINDOWS X64 BUILD ############
+          - job: Build_Windows_x64
+            enablePublishing: true
+            displayName: Windows_x64
+            timeoutInMinutes: 120
+            variables:
+              - assetManifestOS: win
+              - assetManifestPlatform: x64
+              - archflag: -arch x64
+            pool:
+              name: $(DncEngInternalBuildPool)
+              image: $(WindowsImage)
+              os: windows
+            steps:
+            - script: |
+                git clean -ffdx
+                git reset --hard HEAD
+              displayName: 'Clean up working directory'
+
+            - powershell: eng\build.ps1 -ci -restore -build -pack $(archflag) -configuration $(_BuildConfig) $(_InternalBuildArgs) /p:RestoreUsingNuGetTargets=false
+              displayName: 'Build and package'
+
+            - powershell: eng\common\build.ps1 -ci -restore -publish -configuration $(_BuildConfig) $(_InternalBuildArgs) /p:AssetManifestOS=$(_BuildConfig)-$(assetManifestOS) /p:PlatformName=$(assetManifestPlatform) -projects $(Build.SourcesDirectory)\binaryen.proj
+              displayName: Publish packages
+
+          ############ WINDOWS ARM64 BUILD ############
+          - job: Build_Windows_arm64
+            enablePublishing: true
+            displayName: Windows_arm64
+            timeoutInMinutes: 120
+            variables:
+              - assetManifestOS: win
+              - assetManifestPlatform: arm64
+              - archflag: -arch arm64
+            pool:
+              name: $(DncEngInternalBuildPool)
+              image: $(WindowsImage)
+              os: windows
+            steps:
+            - script: |
+                git clean -ffdx
+                git reset --hard HEAD
+              displayName: 'Clean up working directory'
+
+            - powershell: eng\build.ps1 -ci -restore -build -pack $(archflag) -configuration $(_BuildConfig) $(_InternalBuildArgs) /p:RestoreUsingNuGetTargets=false
+              displayName: 'Build and package'
+
+            - powershell: eng\common\build.ps1 -ci -restore -publish -configuration $(_BuildConfig) $(_InternalBuildArgs) /p:AssetManifestOS=$(_BuildConfig)-$(assetManifestOS) /p:PlatformName=$(assetManifestPlatform) -projects $(Build.SourcesDirectory)\binaryen.proj
+              displayName: Publish packages
+
+    ############ POST BUILD ARCADE LOGIC ############
+    - template: /eng/common/templates-official/post-build/post-build.yml@self
+      parameters:
+        publishingInfraVersion: 4
+        enableSourceLinkValidation: false
+        enableSigningValidation: false
+        enableSymbolValidation: false
+        enableNugetValidation: true

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Dependencies>
+  <ToolsetDependencies>
+    <Dependency Name="Microsoft.DotNet.Arcade.Sdk" Version="11.0.0-beta.26251.2">
+      <Uri>https://github.com/dotnet/arcade</Uri>
+      <Sha>3f6871376906201d8237b9c0167fd4a844098566</Sha>
+    </Dependency>
+    <Dependency Name="Microsoft.DotNet.Build.Tasks.Packaging" Version="11.0.0-beta.26251.2">
+      <Uri>https://github.com/dotnet/arcade</Uri>
+      <Sha>3f6871376906201d8237b9c0167fd4a844098566</Sha>
+    </Dependency>
+    <Dependency Name="runtime.linux-arm64.Microsoft.NETCore.Runtime.Mono.LLVM.Sdk" Version="19.1.0-alpha.1.26208.2">
+      <Uri>https://github.com/dotnet/llvm-project</Uri>
+      <Sha>db9a80a3e25e21268d55cf3385298dc03cfbed4d</Sha>
+    </Dependency>
+    <Dependency Name="runtime.linux-arm64.Microsoft.NETCore.Runtime.Mono.LLVM.Tools" Version="19.1.0-alpha.1.26208.2">
+      <Uri>https://github.com/dotnet/llvm-project</Uri>
+      <Sha>db9a80a3e25e21268d55cf3385298dc03cfbed4d</Sha>
+    </Dependency>
+    <Dependency Name="runtime.linux-musl-arm64.Microsoft.NETCore.Runtime.Mono.LLVM.Sdk" Version="19.1.0-alpha.1.26208.2">
+      <Uri>https://github.com/dotnet/llvm-project</Uri>
+      <Sha>db9a80a3e25e21268d55cf3385298dc03cfbed4d</Sha>
+    </Dependency>
+    <Dependency Name="runtime.linux-musl-arm64.Microsoft.NETCore.Runtime.Mono.LLVM.Tools" Version="19.1.0-alpha.1.26208.2">
+      <Uri>https://github.com/dotnet/llvm-project</Uri>
+      <Sha>db9a80a3e25e21268d55cf3385298dc03cfbed4d</Sha>
+    </Dependency>
+    <Dependency Name="runtime.linux-x64.Microsoft.NETCore.Runtime.Mono.LLVM.Sdk" Version="19.1.0-alpha.1.26208.2">
+      <Uri>https://github.com/dotnet/llvm-project</Uri>
+      <Sha>db9a80a3e25e21268d55cf3385298dc03cfbed4d</Sha>
+    </Dependency>
+    <Dependency Name="runtime.linux-x64.Microsoft.NETCore.Runtime.Mono.LLVM.Tools" Version="19.1.0-alpha.1.26208.2">
+      <Uri>https://github.com/dotnet/llvm-project</Uri>
+      <Sha>db9a80a3e25e21268d55cf3385298dc03cfbed4d</Sha>
+    </Dependency>
+    <Dependency Name="runtime.linux-musl-x64.Microsoft.NETCore.Runtime.Mono.LLVM.Sdk" Version="19.1.0-alpha.1.26208.2">
+      <Uri>https://github.com/dotnet/llvm-project</Uri>
+      <Sha>db9a80a3e25e21268d55cf3385298dc03cfbed4d</Sha>
+    </Dependency>
+    <Dependency Name="runtime.linux-musl-x64.Microsoft.NETCore.Runtime.Mono.LLVM.Tools" Version="19.1.0-alpha.1.26208.2">
+      <Uri>https://github.com/dotnet/llvm-project</Uri>
+      <Sha>db9a80a3e25e21268d55cf3385298dc03cfbed4d</Sha>
+    </Dependency>
+  </ToolsetDependencies>
+</Dependencies>

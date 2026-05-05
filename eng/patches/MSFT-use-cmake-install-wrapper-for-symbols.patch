@@ -1,0 +1,52 @@
+Index: binaryen/CMakeLists.txt
+===================================================================
+--- binaryen.orig/CMakeLists.txt
++++ binaryen/CMakeLists.txt
+@@ -10,6 +10,8 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14"
+ project(binaryen LANGUAGES C CXX VERSION 112)
+ include(GNUInstallDirs)
+ 
++INCLUDE(eng/functions.cmake)
++
+ # The C++ standard whose features are required to build Binaryen.
+ # Keep in sync with scripts/test/shared.py cxx_standard
+ # The if condition allows embedding in a project with a higher default C++ standard set
+@@ -136,7 +138,7 @@ function(binaryen_add_executable name so
+   target_link_libraries(${name} ${CMAKE_THREAD_LIBS_INIT})
+   target_link_libraries(${name} binaryen)
+   binaryen_setup_rpath(${name})
+-  install(TARGETS ${name} DESTINATION ${CMAKE_INSTALL_BINDIR})
++  install_with_stripped_symbols(${name} TARGETS bin)
+ endfunction()
+ 
+ # Options
+@@ -395,10 +397,7 @@ else()
+ endif()
+ target_link_libraries(binaryen ${CMAKE_THREAD_LIBS_INIT})
+ if(INSTALL_LIBS OR NOT BUILD_STATIC_LIB)
+-  install(TARGETS binaryen
+-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
++  install_with_stripped_symbols(binaryen TARGETS lib)
+ endif()
+ if(INSTALL_LIBS)
+   install(FILES src/binaryen-c.h src/wasm-delegations.def DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+@@ -435,7 +434,7 @@ if(EMSCRIPTEN)
+   target_link_libraries(binaryen_wasm optimized "-Wno-error=closure")
+   target_link_libraries(binaryen_wasm optimized "-flto")
+   target_link_libraries(binaryen_wasm debug "--profiling")
+-  install(TARGETS binaryen_wasm DESTINATION ${CMAKE_INSTALL_BINDIR})
++  install_with_stripped_symbols(binaryen_wasm TARGETS bin)
+ 
+   # binaryen.js JavaScript variant
+   add_executable(binaryen_js
+@@ -482,7 +481,7 @@ if(EMSCRIPTEN)
+   target_link_libraries(binaryen_js optimized "-flto")
+   target_link_libraries(binaryen_js debug "--profiling")
+   target_link_libraries(binaryen_js debug "-sASSERTIONS")
+-  install(TARGETS binaryen_js DESTINATION ${CMAKE_INSTALL_BINDIR})
++  install_with_stripped_symbols(binaryen_js TARGETS bin)
+ endif()
+ 
+ configure_file(scripts/binaryen-lit.in ${CMAKE_BINARY_DIR}/bin/binaryen-lit @ONLY)
