@@ -502,8 +502,10 @@ if(BUILD_TOOLS)
   add_subdirectory(src/tools)
 endif()
 
-# Configure lit tests
-add_subdirectory(test/lit)
+if(BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/lit")
+  # Configure lit tests
+  add_subdirectory(test/lit)
+endif()
 
 if(BUILD_TESTS)
   # Configure GTest unit tests
