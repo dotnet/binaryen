@@ -47,122 +47,172 @@
 // This pass works well with TypeMerging. See notes there for more.
 //
 
-#include "ir/find_all.h"
+#include "ir/child-typer.h"
 #include "ir/module-utils.h"
 #include "ir/names.h"
 #include "ir/possible-constant.h"
 #include "ir/utils.h"
 #include "pass.h"
 #include "support/hash.h"
-#include "wasm-builder.h"
+#include "wasm-type-shape.h"
 #include "wasm.h"
 
 namespace wasm {
 
 namespace {
 
-// Given some TypeBuilder items that we want to build new types with, this
-// function builds the types in a new rec group.
-//
-// This is almost the same as just calling build(), but there is a risk of a
-// collision with an existing rec group. This function handles that by finding a
-// way to ensure that the new types are in fact in a new rec group.
-//
-// TODO: Move this outside if we find more uses.
-std::vector<HeapType> ensureTypesAreInNewRecGroup(RecGroup recGroup,
-                                                  Module& wasm) {
-  auto num = recGroup.size();
-
-  std::vector<HeapType> types;
-  types.reserve(num);
-  for (auto type : recGroup) {
-    types.push_back(type);
+// Ensure there are no conflicts between the newly built types in the given
+// RecGroup and any existing types.
+std::vector<HeapType> ensureRecGroupIsUnique(RecGroup group, Module& wasm) {
+  std::unordered_set<RecGroup> existing;
+  for (auto type : ModuleUtils::collectHeapTypes(wasm)) {
+    existing.insert(type.getRecGroup());
   }
 
-  // Find all the heap types present before we create the new ones. The new
-  // types must not appear in |existingSet|.
-  std::vector<HeapType> existing = ModuleUtils::collectHeapTypes(wasm);
-  std::unordered_set<HeapType> existingSet(existing.begin(), existing.end());
-
-  // Check for a collision with an existing rec group. Note that it is enough to
-  // check one of the types: either the entire rec group gets merged, so they
-  // are all merged, or not.
-  if (existingSet.count(types[0])) {
-    // Unfortunately there is a conflict. Handle it by adding a "hash" - a
-    // "random" extra item in the rec group that is so outlandish it will
-    // surely (?) never collide with anything. We must loop while doing so,
-    // until we find a hash that does not collide.
-    auto hashSize = num + 10;
-    size_t random = num;
-    while (1) {
-      // Make a builder and add a slot for the hash.
-      TypeBuilder builder(num + 1);
-      for (Index i = 0; i < num; i++) {
-        auto type = types[i];
-        if (type.isStruct()) {
-          builder[i] = type.getStruct();
-        } else {
-          // Atm this pass only needs struct and array types. If we refactor
-          // this function to be general purpose we'd need to extend that. TODO
-          assert(type.isArray());
-          builder[i] = type.getArray();
-        }
-        if (auto super = type.getDeclaredSuperType()) {
-          builder[i].subTypeOf(*super);
-        }
-        builder[i].setOpen(type.isOpen());
-      }
-
-      // Implement the hash as a struct with "random" fields, and add it.
-      Struct hashStruct;
-      for (Index i = 0; i < hashSize; i++) {
-        // TODO: a denser encoding?
-        auto type = (random & 1) ? Type::i32 : Type::f64;
-        hash_combine(random, hashSize + i);
-        hashStruct.fields.push_back(Field(type, Mutable));
-      }
-      builder[num] = hashStruct;
-
-      // Build and hope for the best.
-      builder.createRecGroup(0, num + 1);
-      auto result = builder.build();
-      assert(!result.getError());
-      types = *result;
-      assert(types.size() == num + 1);
-
-      if (existingSet.count(types[0])) {
-        // There is still a collision. Exponentially use larger hashes to
-        // quickly find one that works. Note that we also use different
-        // pseudorandom values while doing so in the for-loop above.
-        hashSize *= 2;
-      } else {
-        // Success! Leave the loop.
-        break;
-      }
-    }
+  UniqueRecGroups unique(wasm.features);
+  for (auto group : existing) {
+    // N.B. we use `insertOrGet` rather than `insert` because some passes (DAE,
+    // BlockMerging) can create multiple types with the same shape, so we can't
+    // assume all the rec groups are already unique. The rec groups will have
+    // different types, but their shapes will match considering how exactness,
+    // etc. will be erased by the binary writer.
+    unique.insertOrGet(group);
   }
 
-#ifndef NDEBUG
-  // Verify the lack of a collision, just to be safe.
-  for (auto newType : types) {
-    assert(!existingSet.count(newType));
+  RecGroup uniqueGroup = unique.insert(group);
+  std::vector<HeapType> uniqueTypes(uniqueGroup.begin(), uniqueGroup.end());
+  if (uniqueTypes.size() != group.size()) {
+    // Remove the brand type, which we do not need to consider further.
+    uniqueTypes.pop_back();
   }
-#endif
-
-  return types;
+  assert(uniqueTypes.size() == group.size());
+  return uniqueTypes;
 }
 
 // A vector of struct.new or one of the variations on array.new.
 using News = std::vector<Expression*>;
 
-struct NewFinder : public PostWalker<NewFinder> {
+// A set of types for which the exactness of allocations may be observed.
+using TypeSet = std::unordered_set<HeapType>;
+
+struct Analyzer
+  : public PostWalker<Analyzer, UnifiedExpressionVisitor<Analyzer>> {
+  // Find allocations we can potentially optimize.
   News news;
 
-  void visitStructNew(StructNew* curr) { news.push_back(curr); }
-  void visitArrayNew(ArrayNew* curr) { news.push_back(curr); }
-  void visitArrayNewData(ArrayNewData* curr) { news.push_back(curr); }
-  void visitArrayNewElem(ArrayNewElem* curr) { news.push_back(curr); }
-  void visitArrayNewFixed(ArrayNewFixed* curr) { news.push_back(curr); }
+  // Also find heap types for which the exactness of allocations is observed. We
+  // will not be able to optimize allocations of these types without an analysis
+  // proving that an allocation does not flow into any location where its
+  // exactness is observed.
+  TypeSet disallowedTypes;
+
+  // Find allocations we can potentially optimize.
+  void visitStructNew(StructNew* curr) {
+    news.push_back(curr);
+    visitExpression(curr);
+  }
+  void visitArrayNew(ArrayNew* curr) {
+    news.push_back(curr);
+    visitExpression(curr);
+  }
+  void visitArrayNewData(ArrayNewData* curr) {
+    news.push_back(curr);
+    visitExpression(curr);
+  }
+  void visitArrayNewElem(ArrayNewElem* curr) {
+    news.push_back(curr);
+    visitExpression(curr);
+  }
+  void visitArrayNewFixed(ArrayNewFixed* curr) {
+    news.push_back(curr);
+    visitExpression(curr);
+  }
+
+  // Find casts to exact types. Allocations of these types will not be able to
+  // be optimized.
+  template<typename Cast> void visitCast(Cast* cast) {
+    if (auto type = cast->getCastType(); type.isExact()) {
+      disallowedTypes.insert(type.getHeapType());
+    }
+  }
+  void visitRefTest(RefTest* curr) { visitCast(curr); }
+  void visitRefCast(RefCast* curr) { visitCast(curr); }
+  void visitBrOn(BrOn* curr) {
+    if (curr->op == BrOnCast || curr->op == BrOnCastFail) {
+      visitCast(curr);
+    }
+  }
+
+  void visitExpression(Expression* curr) {
+    // Look at the constraints on this expression's operands to see if it
+    // requires an exact operand. If it does, we cannot optimize allocations of
+    // that type. As an optimization, do not let control flow structures or
+    // branches inhibit optimization since they can safely be refinalized to use
+    // new types as long as no other instruction expected the original exact
+    // type. Also allow optimizing if the instruction that would inhibit
+    // optimizing will not be written in the final output. Skipping further
+    // analysis for these instructions also ensures that the ChildTyper below
+    // sees the type information it expects in the instructions it analyzes.
+    if (Properties::isControlFlowStructure(curr) ||
+        Properties::isBranch(curr) ||
+        Properties::hasUnwritableTypeImmediate(curr)) {
+      return;
+    }
+
+    struct ExactChildTyper : ChildTyper<ExactChildTyper> {
+      Analyzer& parent;
+      ExactChildTyper(Analyzer& parent)
+        : ChildTyper(*parent.getModule(), parent.getFunction()),
+          parent(parent) {}
+
+      void note(Expression**, Constraints type) {
+        // Check closed type constraints for exactness. Other kinds of type
+        // constraints do not concern us.
+        // TODO: Handle tuples?
+        for (auto varType : type) {
+          if (auto* t = std::get_if<Type>(&varType)) {
+            if (t->isExact()) {
+              parent.disallowedTypes.insert(t->getHeapType());
+            }
+          }
+        }
+      }
+
+      Type getLabelType(Name label) { WASM_UNREACHABLE("unexpected branch"); }
+
+      // We don't mind if we cannot compute a constraint due to unreachability.
+      void noteUnknown() {}
+    } typer(*this);
+    typer.visit(curr);
+  }
+
+  void visitFunction(Function* func) {
+    // Returned exact references must remain exact references to the original
+    // heap types.
+    for (auto type : func->getSig().results) {
+      if (type.isExact()) {
+        disallowedTypes.insert(type.getHeapType());
+      }
+    }
+  }
+
+  void visitGlobal(Global* global) {
+    // This could be more precise by checking that the init expression is not
+    // null before inhibiting optimization, or by just inhibiting optimization
+    // of the allocations used in the initialization, but this is simpler.
+    for (auto type : global->type) {
+      if (type.isExact()) {
+        disallowedTypes.insert(type.getHeapType());
+      }
+    }
+  }
+
+  void visitElementSegment(ElementSegment* segment) {
+    assert(!segment->type.isTuple());
+    if (segment->type.isExact()) {
+      disallowedTypes.insert(segment->type.getHeapType());
+    }
+  }
 };
 
 struct TypeSSA : public Pass {
@@ -178,28 +228,48 @@ struct TypeSSA : public Pass {
       return;
     }
 
-    // First, find all the struct/array.news.
+    struct Info {
+      News news;
+      TypeSet disallowedTypes;
+    };
 
-    ModuleUtils::ParallelFunctionAnalysis<News> analysis(
-      *module, [&](Function* func, News& news) {
+    // First, analyze the function to find struct/array.news and disallowed
+    // types.
+    ModuleUtils::ParallelFunctionAnalysis<Info> analysis(
+      *module, [&](Function* func, Info& info) {
         if (func->imported()) {
           return;
         }
 
-        NewFinder finder;
-        finder.walk(func->body);
-        news = std::move(finder.news);
+        Analyzer analyzer;
+        analyzer.walkFunctionInModule(func, module);
+        info.news = std::move(analyzer.news);
+        info.disallowedTypes = std::move(analyzer.disallowedTypes);
       });
 
     // Also find news in the module scope.
-    NewFinder moduleFinder;
-    moduleFinder.walkModuleCode(module);
+    Analyzer moduleAnalyzer;
+    moduleAnalyzer.walkModuleCode(module);
+    for (auto& global : module->globals) {
+      moduleAnalyzer.visitGlobal(global.get());
+    }
+    for (auto& segment : module->elementSegments) {
+      moduleAnalyzer.visitElementSegment(segment.get());
+    }
+    // TODO: Visit tables with initializers once we support those.
+
+    // Find all the types that are unoptimizable because the exactness of their
+    // allocations may be observed.
+    ModuleUtils::iterDefinedFunctions(*module, [&](Function* func) {
+      processDisallowedTypes(analysis.map[func].disallowedTypes);
+    });
+    processDisallowedTypes(moduleAnalyzer.disallowedTypes);
 
     // Process all the news to find the ones we want to modify, adding them to
     // newsToModify. Note that we must do so in a deterministic order.
     ModuleUtils::iterDefinedFunctions(
-      *module, [&](Function* func) { processNews(analysis.map[func]); });
-    processNews(moduleFinder.news);
+      *module, [&](Function* func) { processNews(analysis.map[func].news); });
+    processNews(moduleAnalyzer.news);
 
     // Modify the ones we found are relevant. We must modify them all at once as
     // in the isorecursive type system we want to create a single new rec group
@@ -208,6 +278,13 @@ struct TypeSSA : public Pass {
 
     // Finally, refinalize to propagate the new types to parents.
     ReFinalize().run(getPassRunner(), module);
+    ReFinalize().runOnModuleCode(getPassRunner(), module);
+  }
+
+  TypeSet disallowedTypes;
+
+  void processDisallowedTypes(const TypeSet& types) {
+    disallowedTypes.insert(types.begin(), types.end());
   }
 
   News newsToModify;
@@ -217,7 +294,11 @@ struct TypeSSA : public Pass {
 
   void processNews(const News& news) {
     for (auto* curr : news) {
-      if (isInteresting(curr)) {
+      bool disallowed = false;
+      if (curr->type.isRef()) {
+        disallowed = disallowedTypes.contains(curr->type.getHeapType());
+      }
+      if (!disallowed && isInteresting(curr)) {
         newsToModify.push_back(curr);
       }
     }
@@ -249,12 +330,20 @@ struct TypeSSA : public Pass {
     for (Index i = 0; i < num; i++) {
       auto* curr = newsToModify[i];
       auto oldType = curr->type.getHeapType();
-      if (oldType.isStruct()) {
-        builder[i] = oldType.getStruct();
-      } else {
-        builder[i] = oldType.getArray();
+      switch (oldType.getKind()) {
+        case HeapTypeKind::Struct:
+          builder[i] = oldType.getStruct();
+          break;
+        case HeapTypeKind::Array:
+          builder[i] = oldType.getArray();
+          break;
+        case HeapTypeKind::Func:
+        case HeapTypeKind::Cont:
+        case HeapTypeKind::Basic:
+          WASM_UNREACHABLE("unexpected kind");
       }
       builder[i].subTypeOf(oldType);
+      builder[i].setShared(oldType.getShared());
       builder[i].setOpen();
     }
     builder.createRecGroup(0, num);
@@ -264,8 +353,7 @@ struct TypeSSA : public Pass {
     assert(newTypes.size() == num);
 
     // Make sure this is actually a new rec group.
-    auto recGroup = newTypes[0].getRecGroup();
-    newTypes = ensureTypesAreInNewRecGroup(recGroup, *module);
+    newTypes = ensureRecGroupIsUnique(newTypes[0].getRecGroup(), *module);
 
     // Success: we can apply the new types.
 
@@ -281,10 +369,10 @@ struct TypeSSA : public Pass {
       auto* curr = newsToModify[i];
       auto oldType = curr->type.getHeapType();
       auto newType = newTypes[i];
-      curr->type = Type(newType, NonNullable);
+      curr->type = Type(newType, NonNullable, Exact);
 
       // If the old type has a nice name, make a nice name for the new one.
-      if (typeNames.count(oldType)) {
+      if (typeNames.contains(oldType)) {
         auto intendedName = typeNames[oldType].name.toString() + '_' +
                             std::to_string(++nameCounter);
         auto newName =
@@ -312,8 +400,14 @@ struct TypeSSA : public Pass {
       return false;
     }
 
-    if (!curr->type.getHeapType().isOpen()) {
+    auto type = curr->type.getHeapType();
+    if (!type.isOpen()) {
       // We can't create new subtypes of a final type anyway.
+      return false;
+    }
+
+    // Do not attempt to optimize types with descriptors or describees yet.
+    if (type.getDescribedType() || type.getDescriptorType()) {
       return false;
     }
 
@@ -342,8 +436,6 @@ struct TypeSSA : public Pass {
 
       return false;
     };
-
-    auto type = curr->type.getHeapType();
 
     if (auto* structNew = curr->dynCast<StructNew>()) {
       if (structNew->isWithDefault()) {

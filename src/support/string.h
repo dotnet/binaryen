@@ -58,6 +58,23 @@ public:
   }
 };
 
+template<typename StringLike,
+         typename = std::enable_if_t<
+           std::is_convertible_v<StringLike, std::string_view>>>
+std::string join(const std::vector<StringLike>& strs, std::string_view sep) {
+  if (strs.empty()) {
+    return "";
+  }
+
+  std::string ret = std::string(strs[0]);
+  for (size_t i = 1; i < strs.size(); i++) {
+    ret.append(sep);
+    ret.append(strs[i]);
+  }
+
+  return ret;
+}
+
 // Handles bracketing in a list initially split by ",", but the list may
 // contain nested ","s. For example,
 //   void foo(int, double)
@@ -75,9 +92,35 @@ inline bool isNumber(const std::string& str) {
   return !str.empty() && std::all_of(str.begin(), str.end(), ::isdigit);
 }
 
-std::ostream& printEscaped(std::ostream& os, const std::string_view str);
+std::ostream& printEscaped(std::ostream& os, std::string_view str);
 
-std::ostream& printEscapedJSON(std::ostream& os, const std::string_view str);
+// `str` must be a valid WTF-16 string.
+std::ostream& printEscapedJSON(std::ostream& os, std::string_view str);
+
+std::ostream& writeWTF8CodePoint(std::ostream& os, uint32_t u);
+
+std::ostream& writeWTF16CodePoint(std::ostream& os, uint32_t u);
+
+// Writes the WTF-16LE encoding of the given WTF-8 string to `os`, inserting
+// replacement characters as necessary when encountering invalid WTF-8. Returns
+// `true` iff the input was valid WTF-8.
+bool convertWTF8ToWTF16(std::ostream& os, std::string_view str);
+
+// Writes the WTF-8 encoding of the given WTF-16LE string to `os`, inserting a
+// replacement character at the end if the string is an odd number of bytes.
+// Returns `true` iff the input was valid WTF-16.
+bool convertWTF16ToWTF8(std::ostream& os, std::string_view str);
+
+// Writes the UTF-8 encoding of the given UTF-16LE string to `os`, inserting a
+// replacement character in place of any unpaired surrogate or incomplete code
+// unit. Returns `true` if the input was valid UTF-16.
+bool convertUTF16ToUTF8(std::ostream& os, std::string_view str);
+
+// Whether the string is valid UTF-8.
+bool isUTF8(std::string_view str);
+
+// Given a string of properly-escaped JSON in UTF8, unescape it into WTF16.
+std::ostream& unescapeUTF8JSONtoWTF16(std::ostream& os, const char* str);
 
 } // namespace wasm::String
 

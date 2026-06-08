@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <optional>
 #include <ostream>
 
 #include "support/string.h"
@@ -82,20 +83,66 @@ Split handleBracketingOperators(Split split) {
 }
 
 bool wildcardMatch(const std::string& pattern, const std::string& value) {
-  for (size_t i = 0; i < pattern.size(); i++) {
-    if (pattern[i] == '*') {
-      return wildcardMatch(pattern.substr(i + 1), value.substr(i)) ||
-             (value.size() > 0 &&
-              wildcardMatch(pattern.substr(i), value.substr(i + 1)));
-    }
-    if (i >= value.size()) {
-      return false;
-    }
-    if (pattern[i] != value[i]) {
-      return false;
+  size_t psize = pattern.size(), vsize = value.size();
+  // When we start looking at a potential match after a wildcard, we must stash
+  // our current state in case we need to backtrack later. Store the positions
+  // in the pattern and the value.
+  std::vector<std::pair<size_t, size_t>> states;
+  states.emplace_back(0, 0);
+  while (!states.empty()) {
+    auto [p, v] = states.back();
+    states.pop_back();
+
+    // Consume input until we need to backtrack.
+    while (true) {
+      // Consume matching non-wildcard input from the pattern and value.
+      while (p < psize && v < vsize && pattern[p] != '*' &&
+             pattern[p] == value[v]) {
+        ++p;
+        ++v;
+      }
+
+      // Handle wildcards.
+      if (p < psize && pattern[p] == '*') {
+        // Skip past the sequence of wildcards.
+        while (p < psize && pattern[p] == '*') {
+          ++p;
+        }
+        if (p == psize) {
+          // The pattern ended in a wildcard, so it matches the rest of the
+          // value no matter what it is.
+          return true;
+        }
+        // Find the next possible match.
+        while (v < vsize && value[v] != pattern[p]) {
+          ++v;
+        }
+        if (v == vsize) {
+          // No match. Backtrack if possible.
+          break;
+        }
+        // We do lazy matching where the wildcard consumes as little as
+        // possible. Try continuing the match after the wildcard from here, but
+        // stash the alternative state where we still have a wildcard and it has
+        // consumed this character in case we need to backtrack.
+        states.emplace_back(p - 1, v + 1);
+        continue;
+      }
+
+      // Check end conditions.
+      if (p == psize && v == vsize) {
+        // Success! We've matched the full pattern against the full value.
+        return true;
+      }
+
+      // We're either out of pattern or out of value or we found a mismatch,
+      // so we need to try to backtrack.
+      assert(p == psize || v == vsize || pattern[p] != value[v]);
+      break;
     }
   }
-  return value.size() == pattern.size();
+  // No match, but cannot backtrack any further.
+  return false;
 }
 
 std::string trim(const std::string& input) {
@@ -106,7 +153,7 @@ std::string trim(const std::string& input) {
   return input.substr(0, size);
 }
 
-std::ostream& printEscaped(std::ostream& os, const std::string_view str) {
+std::ostream& printEscaped(std::ostream& os, std::string_view str) {
   os << '"';
   for (unsigned char c : str) {
     switch (c) {
@@ -140,67 +187,228 @@ std::ostream& printEscaped(std::ostream& os, const std::string_view str) {
   return os << '"';
 }
 
-std::ostream& printEscapedJSON(std::ostream& os, const std::string_view str) {
-  os << '"';
-  constexpr uint32_t replacementCharacter = 0xFFFD;
-  bool lastWasLeadingSurrogate = false;
-  for (size_t i = 0; i < str.size();) {
-    // Decode from WTF-8 into a unicode code point.
-    uint8_t leading = str[i];
-    size_t trailingBytes;
-    uint32_t u;
-    if ((leading & 0b10000000) == 0b00000000) {
-      // 0xxxxxxx
-      trailingBytes = 0;
-      u = leading;
-    } else if ((leading & 0b11100000) == 0b11000000) {
-      // 110xxxxx 10xxxxxx
-      trailingBytes = 1;
-      u = (leading & 0b00011111) << 6;
-    } else if ((leading & 0b11110000) == 0b11100000) {
-      // 1110xxxx 10xxxxxx 10xxxxxx
-      trailingBytes = 2;
-      u = (leading & 0b00001111) << 12;
-    } else if ((leading & 0b11111000) == 0b11110000) {
-      // 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
-      trailingBytes = 3;
-      u = (leading & 0b00000111) << 18;
-    } else {
-      std::cerr << "warning: Bad WTF-8 leading byte (" << std::hex
-                << int(leading) << std::dec << "). Replacing.\n";
-      trailingBytes = 0;
-      u = replacementCharacter;
-    }
+namespace {
 
-    ++i;
+std::optional<uint32_t> takeWTF8CodePoint(std::string_view& str) {
+  bool valid = true;
 
-    if (i + trailingBytes > str.size()) {
-      std::cerr << "warning: Unexpected end of string. Replacing.\n";
-      u = replacementCharacter;
-    } else {
-      for (size_t j = 0; j < trailingBytes; ++j) {
-        uint8_t trailing = str[i + j];
-        if ((trailing & 0b11000000) != 0b10000000) {
-          std::cerr << "warning: Bad WTF-8 trailing byte (" << std::hex
-                    << int(trailing) << std::dec << "). Replacing.\n";
-          u = replacementCharacter;
-          break;
-        }
-        // Shift 6 bits for every remaining trailing byte after this one.
-        u |= (trailing & 0b00111111) << (6 * (trailingBytes - j - 1));
+  if (str.size() == 0) {
+    return std::nullopt;
+  }
+
+  uint8_t leading = str[0];
+  size_t trailingBytes;
+  // Initialized only to avoid spurious compiler warnings.
+  uint32_t u = 0;
+  if ((leading & 0b10000000) == 0b00000000) {
+    // 0xxxxxxx
+    trailingBytes = 0;
+    u = leading;
+  } else if ((leading & 0b11100000) == 0b11000000) {
+    // 110xxxxx 10xxxxxx
+    trailingBytes = 1;
+    u = (leading & 0b00011111) << 6;
+  } else if ((leading & 0b11110000) == 0b11100000) {
+    // 1110xxxx 10xxxxxx 10xxxxxx
+    trailingBytes = 2;
+    u = (leading & 0b00001111) << 12;
+  } else if ((leading & 0b11111000) == 0b11110000) {
+    // 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+    trailingBytes = 3;
+    u = (leading & 0b00000111) << 18;
+  } else {
+    // Bad WTF-8 leading byte.
+    trailingBytes = 0;
+    valid = false;
+  }
+
+  if (str.size() <= trailingBytes) {
+    // Unexpected end of string.
+    str = str.substr(str.size());
+    return std::nullopt;
+  }
+
+  if (valid) {
+    for (size_t j = 0; j < trailingBytes; ++j) {
+      uint8_t trailing = str[1 + j];
+      if ((trailing & 0b11000000) != 0b10000000) {
+        // Bad WTF-8 trailing byte.
+        valid = false;
+        break;
       }
+      // Shift 6 bits for every remaining trailing byte after this one.
+      u |= (trailing & 0b00111111) << (6 * (trailingBytes - j - 1));
+    }
+  }
+
+  str = str.substr(1 + trailingBytes);
+
+  if (!valid) {
+    return std::nullopt;
+  }
+
+  size_t expectedTrailing = u < 0x80       ? 0
+                            : u < 0x800    ? 1
+                            : u < 0x10000  ? 2
+                            : u < 0x110000 ? 3
+                                           : -1;
+  if (trailingBytes != expectedTrailing) {
+    // Overlong encoding or overlarge code point.
+    return std::nullopt;
+  }
+
+  return u;
+}
+
+std::optional<uint16_t> takeWTF16CodeUnit(std::string_view& str) {
+  if (str.size() < 2) {
+    str = str.substr(str.size());
+    return std::nullopt;
+  }
+
+  // Use a little-endian encoding.
+  uint16_t u = uint8_t(str[0]) | (uint8_t(str[1]) << 8);
+  str = str.substr(2);
+  return u;
+}
+
+std::optional<uint32_t> takeWTF16CodePoint(std::string_view& str,
+                                           bool allowWTF = true) {
+  auto u = takeWTF16CodeUnit(str);
+  if (!u) {
+    return std::nullopt;
+  }
+
+  if (0xD800 <= *u && *u < 0xDC00) {
+    // High surrogate; take the next low surrogate if it exists.
+    auto next = str;
+    auto low = takeWTF16CodeUnit(next);
+    if (low && 0xDC00 <= *low && *low < 0xE000) {
+      str = next;
+      uint16_t highBits = *u - 0xD800;
+      uint16_t lowBits = *low - 0xDC00;
+      return 0x10000 + ((highBits << 10) | lowBits);
+    } else if (!allowWTF) {
+      // Unpaired high surrogate.
+      return std::nullopt;
+    }
+  } else if (!allowWTF && 0xDC00 <= *u && *u < 0xE000) {
+    // Unpaired low surrogate.
+    return std::nullopt;
+  }
+
+  return *u;
+}
+
+void writeWTF16CodeUnit(std::ostream& os, uint16_t u) {
+  // Little-endian encoding.
+  os << uint8_t(u & 0xFF);
+  os << uint8_t(u >> 8);
+}
+
+constexpr uint32_t replacementCharacter = 0xFFFD;
+
+bool doConvertWTF16ToWTF8(std::ostream& os,
+                          std::string_view str,
+                          bool allowWTF) {
+  bool valid = true;
+
+  while (str.size()) {
+    auto u = takeWTF16CodePoint(str, allowWTF);
+    if (!u) {
+      valid = false;
+      u = replacementCharacter;
+    }
+    writeWTF8CodePoint(os, *u);
+  }
+
+  return valid;
+}
+
+} // anonymous namespace
+
+std::ostream& writeWTF8CodePoint(std::ostream& os, uint32_t u) {
+  assert(u < 0x110000);
+  if (u < 0x80) {
+    // 0xxxxxxx
+    os << uint8_t(u);
+  } else if (u < 0x800) {
+    // 110xxxxx 10xxxxxx
+    os << uint8_t(0b11000000 | ((u >> 6) & 0b00011111));
+    os << uint8_t(0b10000000 | ((u >> 0) & 0b00111111));
+  } else if (u < 0x10000) {
+    // 1110xxxx 10xxxxxx 10xxxxxx
+    os << uint8_t(0b11100000 | ((u >> 12) & 0b00001111));
+    os << uint8_t(0b10000000 | ((u >> 6) & 0b00111111));
+    os << uint8_t(0b10000000 | ((u >> 0) & 0b00111111));
+  } else {
+    // 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+    os << uint8_t(0b11110000 | ((u >> 18) & 0b00000111));
+    os << uint8_t(0b10000000 | ((u >> 12) & 0b00111111));
+    os << uint8_t(0b10000000 | ((u >> 6) & 0b00111111));
+    os << uint8_t(0b10000000 | ((u >> 0) & 0b00111111));
+  }
+  return os;
+}
+
+std::ostream& writeWTF16CodePoint(std::ostream& os, uint32_t u) {
+  assert(u < 0x110000);
+  if (u < 0x10000) {
+    writeWTF16CodeUnit(os, u);
+  } else {
+    // Encode with a surrogate pair.
+    uint16_t high = 0xD800 + ((u - 0x10000) >> 10);
+    uint16_t low = 0xDC00 + ((u - 0x10000) & 0x3FF);
+    writeWTF16CodeUnit(os, high);
+    writeWTF16CodeUnit(os, low);
+  }
+  return os;
+}
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+
+bool convertWTF8ToWTF16(std::ostream& os, std::string_view str) {
+  bool valid = true;
+  bool lastWasLeadingSurrogate = false;
+
+  while (str.size()) {
+    auto u = takeWTF8CodePoint(str);
+    if (!u) {
+      valid = false;
+      u = replacementCharacter;
     }
 
-    i += trailingBytes;
-
-    bool isLeadingSurrogate = 0xD800 <= u && u <= 0xDBFF;
-    bool isTrailingSurrogate = 0xDC00 <= u && u <= 0xDFFF;
+    bool isLeadingSurrogate = 0xD800 <= *u && *u < 0xDC00;
+    bool isTrailingSurrogate = 0xDC00 <= *u && *u < 0xE000;
     if (lastWasLeadingSurrogate && isTrailingSurrogate) {
-      std::cerr << "warning: Invalid surrogate sequence in WTF-8.\n";
+      // Invalid surrogate sequence.
+      valid = false;
     }
     lastWasLeadingSurrogate = isLeadingSurrogate;
 
-    // Encode unicode code point into JSON.
+    writeWTF16CodePoint(os, *u);
+  }
+
+  return valid;
+}
+
+#pragma GCC diagnostic pop
+
+bool convertWTF16ToWTF8(std::ostream& os, std::string_view str) {
+  return doConvertWTF16ToWTF8(os, str, true);
+}
+
+bool convertUTF16ToUTF8(std::ostream& os, std::string_view str) {
+  return doConvertWTF16ToWTF8(os, str, false);
+}
+
+std::ostream& printEscapedJSON(std::ostream& os, std::string_view str) {
+  os << '"';
+  while (str.size()) {
+    auto u = *takeWTF16CodePoint(str);
+
+    // Use escape sequences mandated by the JSON spec.
     switch (u) {
       case '"':
         os << "\\\"";
@@ -258,6 +466,71 @@ std::ostream& printEscapedJSON(std::ostream& os, const std::string_view str) {
     }
   }
   return os << '"';
+}
+
+bool isUTF8(std::string_view str) {
+  while (str.size()) {
+    auto u = takeWTF8CodePoint(str);
+    if (!u || (0xD800 <= *u && *u < 0xE000)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::ostream& unescapeUTF8JSONtoWTF16(std::ostream& os, const char* str) {
+  size_t i = 0;
+  while (str[i]) {
+    if (str[i] != '\\') {
+      // Normal character.
+      writeWTF16CodePoint(os, str[i]);
+      i++;
+      continue;
+    }
+
+    // Escaped character.
+    char c = str[i + 1];
+    if (c != 'u') {
+      switch (c) {
+        case 'b':
+          c = '\b';
+          break;
+        case 'f':
+          c = '\f';
+          break;
+        case 'n':
+          c = '\n';
+          break;
+        case 'r':
+          c = '\r';
+          break;
+        case 't':
+          c = '\t';
+          break;
+        case 0:
+          Fatal() << "Invalid escaped JSON ends in slash";
+      }
+      writeWTF16CodePoint(os, c);
+      i += 2;
+      continue;
+    }
+
+    // \uXXXX, 4-digit hex number. First, read the hex.
+    unsigned int x;
+    std::stringstream unhex;
+    if (!str[i + 2] || !str[i + 3] || !str[i + 4] || !str[i + 5]) {
+      Fatal() << "Invalid escaped JSON \\uXXXX";
+    }
+    unhex << std::hex << std::string_view(str + i + 2, 4);
+    unhex >> x;
+
+    // Write out the results.
+    writeWTF16CodePoint(os, x);
+
+    i += 6;
+  }
+
+  return os;
 }
 
 } // namespace wasm::String

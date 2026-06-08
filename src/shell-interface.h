@@ -22,8 +22,10 @@
 #define wasm_shell_interface_h
 
 #include "asmjs/shared-constants.h"
+#include "interpreter/exception.h"
 #include "ir/module-utils.h"
 #include "shared-constants.h"
+#include "support/bits.h"
 #include "support/name.h"
 #include "support/utilities.h"
 #include "wasm-interpreter.h"
@@ -31,32 +33,10 @@
 
 namespace wasm {
 
-// An exception emitted when exit() is called.
-struct ExitException {};
-
-// An exception emitted when a wasm trap occurs.
-struct TrapException {};
-
-// An exception emitted when a host limitation is hit. (These are not wasm traps
-// as they are not in the spec; for example, the spec has no limit on how much
-// GC memory may be allocated, but hosts have limits.)
-struct HostLimitException {};
-
 struct ShellExternalInterface : ModuleRunner::ExternalInterface {
-  // The underlying memory can be accessed through unaligned pointers which
-  // isn't well-behaved in C++. WebAssembly nonetheless expects it to behave
-  // properly. Avoid emitting unaligned load/store by checking for alignment
-  // explicitly, and performing memcpy if unaligned.
-  //
-  // The allocated memory tries to have the same alignment as the memory being
-  // simulated.
   class Memory {
     // Use char because it doesn't run afoul of aliasing rules.
     std::vector<char> memory;
-    template<typename T> static bool aligned(const char* address) {
-      static_assert(!(sizeof(T) & (sizeof(T) - 1)), "must be a power of 2");
-      return 0 == (reinterpret_cast<uintptr_t>(address) & (sizeof(T) - 1));
-    }
 
   public:
     Memory() = default;
@@ -75,25 +55,14 @@ struct ShellExternalInterface : ModuleRunner::ExternalInterface {
       }
     }
     template<typename T> void set(size_t address, T value) {
-      if (aligned<T>(&memory[address])) {
-        *reinterpret_cast<T*>(&memory[address]) = value;
-      } else {
-        std::memcpy(&memory[address], &value, sizeof(T));
-      }
+      Bits::writeLE<T>(value, &memory[address]);
     }
     template<typename T> T get(size_t address) {
-      if (aligned<T>(&memory[address])) {
-        return *reinterpret_cast<T*>(&memory[address]);
-      } else {
-        T loaded;
-        std::memcpy(&loaded, &memory[address], sizeof(T));
-        return loaded;
-      }
+      return Bits::readLE<T>(&memory[address]);
     }
   };
 
   std::map<Name, Memory> memories;
-  std::unordered_map<Name, std::vector<Literal>> tables;
   std::map<Name, std::shared_ptr<ModuleRunner>> linkedInstances;
 
   ShellExternalInterface(
@@ -102,97 +71,64 @@ struct ShellExternalInterface : ModuleRunner::ExternalInterface {
   }
   virtual ~ShellExternalInterface() = default;
 
-  ModuleRunner* getImportInstance(Importable* import) {
+  ModuleRunner* getImportInstanceOrNull(Importable* import) {
     auto it = linkedInstances.find(import->module);
     if (it == linkedInstances.end()) {
-      Fatal() << "importGlobals: unknown import: " << import->module.str << "."
-              << import->base.str;
+      return nullptr;
     }
     return it->second.get();
+  }
+
+  ModuleRunner* getImportInstance(Importable* import) {
+    auto* ret = getImportInstanceOrNull(import);
+    if (!ret) {
+      Fatal() << "getImportInstance: unknown import: " << import->module.str
+              << "." << import->base.str;
+    }
+    return ret;
   }
 
   void init(Module& wasm, ModuleRunner& instance) override {
     ModuleUtils::iterDefinedMemories(wasm, [&](wasm::Memory* memory) {
       auto shellMemory = Memory();
-      shellMemory.resize(memory->initial * wasm::Memory::kPageSize);
+      shellMemory.resize(memory->initial << memory->pageSizeLog2);
       memories[memory->name] = shellMemory;
     });
-    ModuleUtils::iterDefinedTables(
-      wasm, [&](Table* table) { tables[table->name].resize(table->initial); });
   }
 
-  void importGlobals(std::map<Name, Literals>& globals, Module& wasm) override {
-    ModuleUtils::iterImportedGlobals(wasm, [&](Global* import) {
-      auto inst = getImportInstance(import);
-      auto* exportedGlobal = inst->wasm.getExportOrNull(import->base);
-      if (!exportedGlobal) {
-        Fatal() << "importGlobals: unknown import: " << import->module.str
-                << "." << import->name.str;
-      }
-      globals[import->name] = inst->globals[exportedGlobal->value];
-    });
-  }
-
-  Literals callImport(Function* import, const Literals& arguments) override {
+  Literal getImportedFunction(Function* import) override {
+    // TODO: We should perhaps restrict the types with which the well-known
+    // functions can be imported.
     if (import->module == SPECTEST && import->base.startsWith(PRINT)) {
-      for (auto argument : arguments) {
-        std::cout << argument << " : " << argument.type << '\n';
-      }
-      return {};
+      // Use a null instance because these are host functions.
+      return Literal(
+        std::make_shared<FuncData>(import->name,
+                                   nullptr,
+                                   [](const Literals& arguments) -> Flow {
+                                     for (auto argument : arguments) {
+                                       std::cout << argument << " : "
+                                                 << argument.type << '\n';
+                                     }
+                                     return Flow();
+                                   }),
+        import->type);
     } else if (import->module == ENV && import->base == EXIT) {
-      // XXX hack for torture tests
-      std::cout << "exit()\n";
-      throw ExitException();
-    } else if (auto* inst = getImportInstance(import)) {
-      return inst->callExport(import->base, arguments);
+      return Literal(std::make_shared<FuncData>(import->name,
+                                                nullptr,
+                                                [](const Literals&) -> Flow {
+                                                  // XXX hack for torture tests
+                                                  std::cout << "exit()\n";
+                                                  throw ExitException();
+                                                }),
+                     import->type);
+    } else if (auto* inst = getImportInstanceOrNull(import)) {
+      return inst->getExportedFunction(import->base);
     }
-    Fatal() << "callImport: unknown import: " << import->module.str << "."
-            << import->name.str;
-  }
-
-  Literals callTable(Name tableName,
-                     Index index,
-                     HeapType sig,
-                     Literals& arguments,
-                     Type results,
-                     ModuleRunner& instance) override {
-
-    auto it = tables.find(tableName);
-    if (it == tables.end()) {
-      trap("callTable on non-existing table");
-    }
-
-    auto& table = it->second;
-    if (index >= table.size()) {
-      trap("callTable overflow");
-    }
-    Function* func = nullptr;
-    if (table[index].isFunction() && !table[index].isNull()) {
-      func = instance.wasm.getFunctionOrNull(table[index].getFunc());
-    }
-    if (!func) {
-      trap("uninitialized table element");
-    }
-    if (sig != func->type) {
-      trap("callIndirect: function types don't match");
-    }
-    if (func->getParams().size() != arguments.size()) {
-      trap("callIndirect: bad # of arguments");
-    }
-    size_t i = 0;
-    for (const auto& param : func->getParams()) {
-      if (!Type::isSubType(arguments[i++].type, param)) {
-        trap("callIndirect: bad argument type");
-      }
-    }
-    if (func->getResults() != results) {
-      trap("callIndirect: bad result type");
-    }
-    if (func->imported()) {
-      return callImport(func, arguments);
-    } else {
-      return instance.callFunctionInternal(func->name, arguments);
-    }
+    // This is not a known import. Create a literal for it, which is good enough
+    // if it is never called (see the ref_func.wast spec test, which does that).
+    std::cerr << "warning: getImportedFunction: unknown import: "
+              << import->module.str << "." << import->name.str << '\n';
+    return Literal::makeFunc(import->name, import->type);
   }
 
   int8_t load8s(Address addr, Name memoryName) override {
@@ -282,34 +218,6 @@ struct ShellExternalInterface : ModuleRunner::ExternalInterface {
     auto& memory = it->second;
     memory.set<std::array<uint8_t, 16>>(addr, value);
   }
-
-  Index tableSize(Name tableName) override {
-    return (Index)tables[tableName].size();
-  }
-
-  void tableStore(Name tableName, Index index, const Literal& entry) override {
-    auto& table = tables[tableName];
-    if (index >= table.size()) {
-      trap("out of bounds table access");
-    } else {
-      table[index] = entry;
-    }
-  }
-
-  Literal tableLoad(Name tableName, Index index) override {
-    auto it = tables.find(tableName);
-    if (it == tables.end()) {
-      trap("tableGet on non-existing table");
-    }
-
-    auto& table = it->second;
-    if (index >= table.size()) {
-      trap("out of bounds table access");
-    }
-
-    return table[index];
-  }
-
   bool
   growMemory(Name memoryName, Address /*oldSize*/, Address newSize) override {
     // Apply a reasonable limit on memory size, 1GB, to avoid DOS on the
@@ -325,30 +233,15 @@ struct ShellExternalInterface : ModuleRunner::ExternalInterface {
     memory.resize(newSize);
     return true;
   }
-
-  bool growTable(Name name,
-                 const Literal& value,
-                 Index /*oldSize*/,
-                 Index newSize) override {
-    // Apply a reasonable limit on table size, 1GB, to avoid DOS on the
-    // interpreter.
-    if (newSize > 1024 * 1024 * 1024) {
-      return false;
-    }
-    tables[name].resize(newSize, value);
-    return true;
-  }
-
-  void trap(const char* why) override {
+  void trap(std::string_view why) override {
     std::cout << "[trap " << why << "]\n";
     throw TrapException();
   }
 
-  void hostLimit(const char* why) override {
+  void hostLimit(std::string_view why) override {
     std::cout << "[host limit " << why << "]\n";
     throw HostLimitException();
   }
-
   void throwException(const WasmException& exn) override { throw exn; }
 };
 

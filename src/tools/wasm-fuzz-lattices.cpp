@@ -36,6 +36,7 @@
 #include "analysis/reaching-definitions-transfer-function.h"
 #include "analysis/transfer-function.h"
 
+#include "support/bits.h"
 #include "support/command-line.h"
 #include "tools/fuzzing.h"
 #include "tools/fuzzing/random.h"
@@ -185,7 +186,7 @@ using LatticeVariant = std::variant<RandomFullLattice,
                                     ArrayLattice,
                                     Vector<RandomLattice>,
                                     TupleLattice,
-                                    Shared<RandomLattice>>;
+                                    SharedPath<RandomLattice>>;
 
 struct RandomLattice::LatticeImpl : LatticeVariant {};
 
@@ -196,7 +197,7 @@ using LatticeElementVariant =
                typename ArrayLattice::Element,
                typename Vector<RandomLattice>::Element,
                typename TupleLattice::Element,
-               typename Shared<RandomLattice>::Element>;
+               typename SharedPath<RandomLattice>::Element>;
 
 struct RandomLattice::ElementImpl : LatticeElementVariant {};
 
@@ -271,7 +272,7 @@ RandomLattice::RandomLattice(Random& rand, size_t depth) : rand(rand) {
       return;
     case FullLatticePicks + 5:
       lattice = std::make_unique<LatticeImpl>(
-        LatticeImpl{Shared{RandomLattice{rand, depth + 1}}});
+        LatticeImpl{SharedPath{RandomLattice{rand, depth + 1}}});
       return;
   }
   WASM_UNREACHABLE("unexpected pick");
@@ -375,7 +376,7 @@ RandomLattice::Element RandomLattice::makeElement() const noexcept {
       typename TupleLattice::Element{std::get<0>(l->lattices).makeElement(),
                                      std::get<1>(l->lattices).makeElement()}};
   }
-  if (const auto* l = std::get_if<Shared<RandomLattice>>(lattice.get())) {
+  if (const auto* l = std::get_if<SharedPath<RandomLattice>>(lattice.get())) {
     auto elem = l->getBottom();
     l->join(elem, l->lattice.makeElement());
     return ElementImpl{elem};
@@ -489,8 +490,9 @@ void printElement(std::ostream& os,
     indent(os, depth);
     os << ")\n";
   } else if (const auto* e =
-               std::get_if<typename Shared<RandomLattice>::Element>(&*elem)) {
-    os << "Shared(\n";
+               std::get_if<typename SharedPath<RandomLattice>::Element>(
+                 &*elem)) {
+    os << "SharedPath(\n";
     printElement(os, **e, depth + 1);
     indent(os, depth);
     os << ")\n";
@@ -828,7 +830,7 @@ struct LivenessChecker {
 // Struct to set up and check reaching definitions analysis lattice and transfer
 // function.
 struct ReachingDefinitionsChecker {
-  LocalGraph::GetSetses getSetses;
+  LocalGraph::GetSetsMap getSetsMap;
   LocalGraph::Locations locations;
   ReachingDefinitionsTransferFunction txfn;
   AnalysisChecker<FinitePowersetLattice<LocalSet*>,
@@ -837,7 +839,7 @@ struct ReachingDefinitionsChecker {
   ReachingDefinitionsChecker(Function* func,
                              uint64_t latticeElementSeed,
                              Name funcName)
-    : txfn(func, getSetses, locations),
+    : txfn(func, getSetsMap, locations),
       checker(txfn.lattice,
               txfn,
               "FinitePowersetLattice<LocalSet*>",
@@ -994,7 +996,7 @@ struct Fuzzer {
     // Fewer bytes are needed to generate three random lattices.
     std::vector<char> funcBytes(128);
     for (size_t i = 0; i < funcBytes.size(); i += sizeof(uint64_t)) {
-      *(uint64_t*)(funcBytes.data() + i) = getFuncRand();
+      Bits::writeLE<uint64_t>(getFuncRand(), funcBytes.data() + i);
     }
 
     Random rand(std::move(funcBytes));
@@ -1029,7 +1031,7 @@ struct Fuzzer {
     // 4kb of random bytes should be enough for anyone!
     std::vector<char> bytes(4096);
     for (size_t i = 0; i < bytes.size(); i += sizeof(uint64_t)) {
-      *(uint64_t*)(bytes.data() + i) = getRand();
+      Bits::writeLE<uint64_t>(getRand(), bytes.data() + i);
     }
 
     Module testModule;
@@ -1065,7 +1067,7 @@ int main(int argc, const char* argv[]) {
 
   Options options("wasm-fuzz-lattices",
                   "Fuzz lattices for reflexivity, transitivity, and "
-                  "anti-symmetry, and tranfer functions for monotonicity.");
+                  "anti-symmetry, and transfer functions for monotonicity.");
 
   std::optional<uint64_t> seed;
   options.add("--seed",

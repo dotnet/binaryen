@@ -297,6 +297,41 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
       });
   }
 
+  void visitRefFunc(RefFunc* curr) {
+    auto sig = curr->type.getHeapType().getSignature();
+
+    bool hasI64Param = false;
+    for (auto t : sig.params) {
+      if (t == Type::i64) {
+        hasI64Param = true;
+        break;
+      }
+    }
+    auto params = sig.params;
+    if (hasI64Param) {
+      std::vector<Type> newParams;
+      for (auto t : sig.params) {
+        if (t == Type::i64) {
+          newParams.push_back(Type::i32);
+          newParams.push_back(Type::i32);
+        } else {
+          newParams.push_back(t);
+        }
+      }
+      params = Type(newParams);
+    };
+    auto results = sig.results;
+    // Update the results the same way we do when visiting functions. We use a
+    // global rather than multivalue to lower i64 results.
+    if (results == Type::i64) {
+      results = Type::i32;
+    }
+
+    if (params != sig.params || results != sig.results) {
+      curr->type = curr->type.with(HeapType(Signature(params, results)));
+    }
+  }
+
   void visitLocalGet(LocalGet* curr) {
     const auto mappedIndex = indexMap[curr->index];
     // Need to remap the local into the new naming scheme, regardless of
@@ -350,7 +385,7 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
     if (!getFunction()) {
       return; // if in a global init, skip - we already handled that.
     }
-    if (!originallyI64Globals.count(curr->name)) {
+    if (!originallyI64Globals.contains(curr->name)) {
       return;
     }
     curr->type = Type::i32;
@@ -363,7 +398,7 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
   }
 
   void visitGlobalSet(GlobalSet* curr) {
-    if (!originallyI64Globals.count(curr->name)) {
+    if (!originallyI64Globals.contains(curr->name)) {
       return;
     }
     if (handleUnreachable(curr)) {
@@ -379,7 +414,7 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
     if (curr->type != Type::i64) {
       return;
     }
-    assert(!curr->isAtomic && "64-bit atomic load not implemented");
+    assert(!curr->isAtomic() && "64-bit atomic load not implemented");
     TempVar lowBits = getTemp();
     TempVar highBits = getTemp();
     TempVar ptrTemp = getTemp();
@@ -423,7 +458,7 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
       return;
     }
     assert(curr->offset + 4 > curr->offset);
-    assert(!curr->isAtomic && "atomic store not implemented");
+    assert(!curr->isAtomic() && "atomic store not implemented");
     TempVar highBits = fetchOutParam(curr->value);
     uint8_t bytes = curr->bytes;
     curr->bytes = std::min(curr->bytes, uint8_t(4));
@@ -454,7 +489,7 @@ struct I64ToI32Lowering : public WalkerPass<PostWalker<I64ToI32Lowering>> {
       return;
     }
     // We cannot break this up into smaller operations as it must be atomic.
-    // Lower to an instrinsic function that wasm2js will implement.
+    // Lower to an intrinsic function that wasm2js will implement.
     TempVar lowBits = getTemp();
     TempVar highBits = getTemp();
     auto* getLow = builder->makeCall(

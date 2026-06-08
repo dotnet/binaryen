@@ -21,6 +21,10 @@
 #include "wasm-traversal.h"
 #include "wasm.h"
 
+#ifndef BRANCH_UTILS_DEBUG
+#define BRANCH_UTILS_DEBUG 0
+#endif
+
 namespace wasm::BranchUtils {
 
 // Some branches are obviously not actually reachable (e.g. (br $out
@@ -83,9 +87,16 @@ void operateOnScopeNameUsesAndSentTypes(Expression* expr, T func) {
         }
       }
     } else if (auto* r = expr->dynCast<Resume>()) {
-      for (Index i = 0; i < r->handlerTags.size(); i++) {
-        auto dest = r->handlerTags[i];
-        if (dest == name) {
+      for (Index i = 0; i < r->handlerBlocks.size(); i++) {
+        auto dest = r->handlerBlocks[i];
+        if (!dest.isNull() && dest == name) {
+          func(name, r->sentTypes[i]);
+        }
+      }
+    } else if (auto* r = expr->dynCast<ResumeThrow>()) {
+      for (Index i = 0; i < r->handlerBlocks.size(); i++) {
+        auto dest = r->handlerBlocks[i];
+        if (!dest.isNull() && dest == name) {
           func(name, r->sentTypes[i]);
         }
       }
@@ -108,14 +119,17 @@ void operateOnScopeNameUsesAndSentValues(Expression* expr, T func) {
     } else if (auto* sw = expr->dynCast<Switch>()) {
       func(name, sw->value);
     } else if (auto* br = expr->dynCast<BrOn>()) {
-      func(name, br->ref);
-    } else if (auto* tt = expr->dynCast<TryTable>()) {
+      // A value may not be sent (e.g. BrOnNull does *not* send a null).
+      func(name, br->getSentType() != Type::none ? br->ref : nullptr);
+    } else if (expr->is<TryTable>()) {
       // The values are supplied by throwing instructions, so we are unable to
       // know what they will be here.
       func(name, nullptr);
-    } else if (auto* res = expr->dynCast<Resume>()) {
+    } else if (expr->is<Resume>()) {
       // The values are supplied by suspend instructions executed while running
       // the continuation, so we are unable to know what they will be here.
+      func(name, nullptr);
+    } else if (expr->is<ResumeThrow>()) {
       func(name, nullptr);
     } else {
       assert(expr->is<Try>() || expr->is<Rethrow>()); // delegate or rethrow
@@ -132,7 +146,7 @@ template<typename T> void operateOnScopeNameDefs(Expression* expr, T func) {
 
 #define DELEGATE_GET_FIELD(id, field) cast->field
 
-#define DELEGATE_FIELD_SCOPE_NAME_DEF(id, field) func(cast->field)
+#define DELEGATE_FIELD_SCOPE_NAME_DEF(id, field) func(cast->field);
 
 #define DELEGATE_FIELD_CHILD(id, field)
 #define DELEGATE_FIELD_INT(id, field)
@@ -404,8 +418,8 @@ public:
   }
 
   bool hasBranch(Expression* curr, Name target) {
-    bool result = getBranches(curr).count(target);
-#ifdef BRANCH_UTILS_DEBUG
+    bool result = getBranches(curr).contains(target);
+#if BRANCH_UTILS_DEBUG
     assert(bresult == BranchSeeker::has(curr, target));
 #endif
     return result;
@@ -419,10 +433,14 @@ struct BranchTargets {
 
   // Gets the expression that defines this branch target, i.e., where we branch
   // to if we branch to that name.
-  Expression* getTarget(Name name) { return inner.targets[name]; }
+  Expression* getTarget(Name name) const {
+    auto iter = inner.targets.find(name);
+    assert(iter != inner.targets.end());
+    return iter->second;
+  }
 
   // Gets the expressions branching to a target.
-  std::unordered_set<Expression*> getBranches(Name name) {
+  std::unordered_set<Expression*> getBranches(Name name) const {
     auto iter = inner.branches.find(name);
     if (iter != inner.branches.end()) {
       return iter->second;

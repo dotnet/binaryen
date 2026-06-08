@@ -79,29 +79,19 @@ struct SubTypes {
   }
 
   // A topological sort that visits subtypes first.
-  auto getSubTypesFirstSort() const {
-    struct SubTypesFirstSort : TopologicalSort<HeapType, SubTypesFirstSort> {
-      const SubTypes& parent;
-
-      SubTypesFirstSort(const SubTypes& parent) : parent(parent) {
-        for (auto type : parent.types) {
-          // The roots are types with no supertype.
-          if (!type.getDeclaredSuperType()) {
-            push(type);
-          }
-        }
+  std::vector<HeapType> getSubTypesFirstSort() const {
+    std::vector<std::pair<HeapType, std::vector<HeapType>>> graph;
+    graph.reserve(types.size());
+    for (auto type : types) {
+      if (auto it = typeSubTypes.find(type); it != typeSubTypes.end()) {
+        graph.emplace_back(*it);
+      } else {
+        graph.emplace_back(type, std::vector<HeapType>{});
       }
-
-      void pushPredecessors(HeapType type) {
-        // Things we need to process before each type are its subtypes. Once we
-        // know their depth, we can easily compute our own.
-        for (auto pred : parent.getImmediateSubTypes(type)) {
-          push(pred);
-        }
-      }
-    };
-
-    return SubTypesFirstSort(*this);
+    }
+    auto sorted = TopologicalSort::sortOf(graph.begin(), graph.end());
+    std::reverse(sorted.begin(), sorted.end());
+    return sorted;
   }
 
   // Computes the depth of children for each type. This is 0 if the type has no
@@ -121,38 +111,76 @@ struct SubTypes {
       depths[type] = depth;
     }
 
-    // Add the max depths of basic types.
+    // Add the max depths of basic types that have non-basic subtypes.
     for (auto type : types) {
       HeapType basic;
-      if (type.isStruct()) {
-        basic = HeapType::struct_;
-      } else if (type.isArray()) {
-        basic = HeapType::array;
-      } else {
-        assert(type.isSignature());
-        basic = HeapType::func;
+      auto share = type.getShared();
+      switch (type.getKind()) {
+        case HeapTypeKind::Func:
+          basic = HeapTypes::func.getBasic(share);
+          break;
+        case HeapTypeKind::Struct:
+          basic = HeapTypes::struct_.getBasic(share);
+          break;
+        case HeapTypeKind::Array:
+          basic = HeapTypes::array.getBasic(share);
+          break;
+        case HeapTypeKind::Cont:
+          basic = HeapTypes::cont.getBasic(share);
+          break;
+        case HeapTypeKind::Basic:
+          WASM_UNREACHABLE("unexpected kind");
       }
-      depths[basic] = std::max(depths[basic], depths[type] + 1);
+      auto& basicDepth = depths[basic];
+      basicDepth = std::max(basicDepth, depths[type] + 1);
     }
 
-    depths[HeapType::eq] =
-      std::max(depths[HeapType::struct_], depths[HeapType::array]) + 1;
-    depths[HeapType::any] = depths[HeapType::eq] + 1;
+    // Fill in the other basic types.
+    for (auto share : {Unshared, Shared}) {
+      depths[HeapTypes::eq.getBasic(share)] =
+        std::max(depths[HeapTypes::struct_.getBasic(share)],
+                 depths[HeapTypes::array.getBasic(share)]) +
+        1;
+      depths[HeapTypes::any.getBasic(share)] =
+        depths[HeapTypes::eq.getBasic(share)] + 1;
+
+      depths[HeapTypes::i31.getBasic(share)] = 0;
+      depths[HeapTypes::exn.getBasic(share)] = 0;
+
+      // Extern has string as a subtype.
+      depths[HeapTypes::ext.getBasic(share)] = 1;
+      depths[HeapTypes::string.getBasic(share)] = 0;
+
+      depths[HeapTypes::none.getBasic(share)] = 0;
+      depths[HeapTypes::noext.getBasic(share)] = 0;
+      depths[HeapTypes::nofunc.getBasic(share)] = 0;
+      depths[HeapTypes::nocont.getBasic(share)] = 0;
+      depths[HeapTypes::noexn.getBasic(share)] = 0;
+
+      // func would appear already if we saw function types, but if not, ensure
+      // it exists here. Ditto for cont.
+      depths[HeapTypes::func.getBasic(share)];
+      depths[HeapTypes::cont.getBasic(share)];
+    }
 
     return depths;
   }
 
   // Efficiently iterate on subtypes of a type, up to a particular depth (depth
   // 0 means not to traverse subtypes, etc.). The callback function receives
-  // (type, depth).
+  // (type, depth) and returns whether to continue the scan, i.e. if it returns
+  // false, we stop. Returns the last value returned to it, that is, returns
+  // true if we did not stop early, and false if we did.
   template<typename F>
-  void iterSubTypes(HeapType type, Index depth, F func) const {
+  bool iterSubTypes(HeapType type, Index depth, F func) const {
     // Start by traversing the type itself.
-    func(type, 0);
+    if (!func(type, 0)) {
+      return false;
+    }
 
     if (depth == 0) {
       // Nothing else to scan.
-      return;
+      return true;
     }
 
     // getImmediateSubTypes() returns vectors of subtypes, so for efficiency
@@ -177,17 +205,21 @@ struct SubTypes {
       auto& currVec = *item.vec;
       assert(currDepth <= depth);
       for (auto type : currVec) {
-        func(type, currDepth);
+        if (!func(type, currDepth)) {
+          return false;
+        }
         auto* subVec = &getImmediateSubTypes(type);
         if (currDepth + 1 <= depth && !subVec->empty()) {
           work.push_back({subVec, currDepth + 1});
         }
       }
     }
+
+    return true;
   }
 
   // As above, but iterate to the maximum depth.
-  template<typename F> void iterSubTypes(HeapType type, F func) const {
+  template<typename F> bool iterSubTypes(HeapType type, F func) const {
     return iterSubTypes(type, std::numeric_limits<Index>::max(), func);
   }
 

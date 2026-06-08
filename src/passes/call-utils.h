@@ -19,6 +19,7 @@
 
 #include <variant>
 
+#include "ir/debuginfo.h"
 #include "ir/type-updating.h"
 #include "wasm.h"
 
@@ -100,8 +101,7 @@ convertToDirectCalls(T* curr,
   // execute first, so we'll use locals for them all. First, see if any are
   // unreachable, and if so stop trying to optimize and leave this for DCE.
   for (auto* operand : operands) {
-    if (operand->type == Type::unreachable ||
-        !TypeUpdating::canHandleAsLocal(operand->type)) {
+    if (operand->type == Type::unreachable) {
       return nullptr;
     }
   }
@@ -130,14 +130,17 @@ convertToDirectCalls(T* curr,
   };
 
   auto makeCall = [&](IndirectCallInfo info) -> Expression* {
+    Expression* ret;
     if (std::get_if<Trap>(&info)) {
-      return builder.makeUnreachable();
+      ret = builder.makeUnreachable();
     } else {
-      return builder.makeCall(std::get<Known>(info).target,
-                              getOperands(),
-                              curr->type,
-                              curr->isReturn);
+      ret = builder.makeCall(std::get<Known>(info).target,
+                             getOperands(),
+                             curr->type,
+                             curr->isReturn);
     }
+    debuginfo::copyOriginalToReplacement(curr, ret, &func);
+    return ret;
   };
   auto* ifTrueCall = makeCall(ifTrueCallInfo);
   auto* ifFalseCall = makeCall(ifFalseCallInfo);

@@ -24,43 +24,50 @@
 
 #include <array>
 #include <cassert>
-#include <iterator>
 #include <vector>
 
+#include "support/parent_index_iterator.h"
+
 namespace wasm {
-
-// We don't understand this warning, only here and only on aarch64,
-// we suspect it's spurious so disabling for now.
-//
-// For context: https://github.com/WebAssembly/binaryen/issues/6311
-
-#if defined(__aarch64__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-#endif
 
 template<typename T, size_t N> class SmallVector {
   // fixed-space storage
   size_t usedFixed = 0;
-  std::array<T, N> fixed;
+  std::array<T, N> fixed{};
 
   // flexible additional storage
   std::vector<T> flexible;
-
-#if defined(__aarch64__)
-#pragma GCC diagnostic pop
-#endif
 
 public:
   using value_type = T;
 
   SmallVector() {}
+  SmallVector(const SmallVector<T, N>& other)
+    : usedFixed(other.usedFixed), fixed(other.fixed), flexible(other.flexible) {
+  }
+  SmallVector(SmallVector<T, N>&& other)
+    : usedFixed(other.usedFixed), fixed(std::move(other.fixed)),
+      flexible(std::move(other.flexible)) {}
   SmallVector(std::initializer_list<T> init) {
     for (T item : init) {
       push_back(item);
     }
   }
   SmallVector(size_t initialSize) { resize(initialSize); }
+
+  SmallVector<T, N>& operator=(const SmallVector<T, N>& other) {
+    usedFixed = other.usedFixed;
+    fixed = other.fixed;
+    flexible = other.flexible;
+    return *this;
+  }
+
+  SmallVector<T, N>& operator=(SmallVector<T, N>&& other) {
+    usedFixed = other.usedFixed;
+    fixed = std::move(other.fixed);
+    flexible = std::move(other.flexible);
+    return *this;
+  }
 
   T& operator[](size_t i) {
     if (i < N) {
@@ -161,63 +168,30 @@ public:
 
   // iteration
 
-  template<typename Parent, typename Iterator> struct IteratorBase {
-    // TODO: Add remaining things from
-    //       https://en.cppreference.com/w/cpp/named_req/RandomAccessIterator
-    using iterator_category = std::random_access_iterator_tag;
+  struct Iterator : ParentIndexIterator<SmallVector<T, N>*, Iterator> {
     using value_type = T;
-    using difference_type = long;
-    using reference = T&;
     using pointer = T*;
+    using reference = T&;
 
-    Parent* parent;
-    size_t index;
-
-    IteratorBase(Parent* parent, size_t index) : parent(parent), index(index) {}
-
-    bool operator!=(const Iterator& other) const {
-      return index != other.index || parent != other.parent;
-    }
-
-    Iterator& operator++() {
-      Iterator& self = *static_cast<Iterator*>(this);
-      index++;
-      return self;
-    }
-    Iterator operator++(int) {
-      Iterator self = *static_cast<Iterator*>(this);
-      index++;
-      return self;
-    }
-
-    Iterator& operator+=(difference_type off) {
-      index += off;
-      return *this;
-    }
-
-    const Iterator operator+(difference_type off) const {
-      return Iterator(*this) += off;
-    }
-
-    difference_type operator-(const Iterator& other) const {
-      return index - other.index;
-    }
-
-    bool operator==(const Iterator& other) const {
-      return parent == other.parent && index == other.index;
-    }
-  };
-
-  struct Iterator : IteratorBase<SmallVector<T, N>, Iterator> {
     Iterator(SmallVector<T, N>* parent, size_t index)
-      : IteratorBase<SmallVector<T, N>, Iterator>(parent, index) {}
-    value_type& operator*() { return (*this->parent)[this->index]; }
+      : ParentIndexIterator<SmallVector<T, N>*, Iterator>{parent, index} {}
+    Iterator(const Iterator& other) = default;
+
+    T& operator*() { return (*this->parent)[this->index]; }
   };
 
-  struct ConstIterator : IteratorBase<const SmallVector<T, N>, ConstIterator> {
+  struct ConstIterator
+    : ParentIndexIterator<const SmallVector<T, N>*, ConstIterator> {
+    using value_type = const T;
+    using pointer = const T*;
+    using reference = const T&;
+
     ConstIterator(const SmallVector<T, N>* parent, size_t index)
-      : IteratorBase<const SmallVector<T, N>, ConstIterator>(parent, index) {}
-    const value_type& operator*() const { return (*this->parent)[this->index]; }
+      : ParentIndexIterator<const SmallVector<T, N>*, ConstIterator>{parent,
+                                                                     index} {}
+    ConstIterator(const ConstIterator& other) = default;
+
+    const T& operator*() const { return (*this->parent)[this->index]; }
   };
 
   Iterator begin() { return Iterator(this, 0); }

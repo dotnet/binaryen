@@ -14,33 +14,34 @@
  * limitations under the License.
  */
 
-#include "Relooper.h"
-
-#include <stdlib.h>
-#include <string.h>
-
+#include <cstdlib>
+#include <cstring>
 #include <list>
-#include <stack>
 #include <string>
 
+#include "Relooper.h"
 #include "ir/branch-utils.h"
 #include "ir/utils.h"
 #include "parsing.h"
 
-namespace CFG {
+#ifndef RELOOPER_OPTIMIZER_DEBUG
+#define RELOOPER_OPTIMIZER_DEBUG 0
+#endif
 
-template<class T, class U>
-static bool contains(const T& container, const U& contained) {
-  return !!container.count(contained);
-}
-
-#ifdef RELOOPER_DEBUG
+#if RELOOPER_DEBUG
 static void PrintDebug(const char* Format, ...);
 #define DebugDump(x, ...) Debugging::Dump(x, __VA_ARGS__)
 #else
 #define PrintDebug(x, ...)
 #define DebugDump(x, ...)
 #endif
+
+namespace CFG {
+
+template<class T, class U>
+static bool contains(const T& container, const U& contained) {
+  return container.contains(contained);
+}
 
 // Rendering utilities
 
@@ -666,7 +667,7 @@ struct Optimizer : public RelooperRecursor {
         // Add a branch to the target (which may be the unchanged original) in
         // the set of new branches. If it's a replacement, it may collide, and
         // we need to merge.
-        if (NewBranchesOut.count(Replacement)) {
+        if (NewBranchesOut.contains(Replacement)) {
 #if RELOOPER_OPTIMIZER_DEBUG
           std::cout << "  merge\n";
 #endif
@@ -914,7 +915,7 @@ private:
       return false;
     }
     for (auto& [ABlock, ABranch] : A->BranchesOut) {
-      if (B->BranchesOut.count(ABlock) == 0) {
+      if (!B->BranchesOut.contains(ABlock)) {
         return false;
       }
       auto* BBranch = B->BranchesOut[ABlock];
@@ -1372,7 +1373,7 @@ void Relooper::Calculate(Block* Entry) {
         }
       }
 
-#ifdef RELOOPER_DEBUG
+#if RELOOPER_DEBUG
       PrintDebug("Investigated independent groups:\n");
       for (auto& iter : IndependentGroups) {
         DebugDump(iter.second, " group: ");
@@ -1577,7 +1578,7 @@ void Relooper::Calculate(Block* Entry) {
             // jumped to forward, without using the label variable
             bool Checked = false;
             for (auto* Entry : *Entries) {
-              if (InitialEntries.count(Entry)) {
+              if (InitialEntries.contains(Entry)) {
                 Checked = true;
                 break;
               }
@@ -1597,7 +1598,7 @@ void Relooper::Calculate(Block* Entry) {
   BlockSet AllBlocks;
   for (auto* Curr : Live.Live) {
     AllBlocks.insert(Curr);
-#ifdef RELOOPER_DEBUG
+#if RELOOPER_DEBUG
     PrintDebug("Adding block %d (%s)\n", Curr->Id, Curr->Code);
 #endif
   }
@@ -1616,7 +1617,7 @@ wasm::Expression* Relooper::Render(RelooperBuilder& Builder) {
   return ret;
 }
 
-#ifdef RELOOPER_DEBUG
+#if RELOOPER_DEBUG
 // Debugging
 
 void Debugging::Dump(Block* Curr, const char* prefix) {

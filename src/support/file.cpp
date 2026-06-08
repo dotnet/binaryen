@@ -36,7 +36,9 @@ std::vector<char> wasm::read_stdin() {
   return input;
 }
 
-template<typename T> struct do_read_stdin { T operator()(); };
+template<typename T> struct do_read_stdin {
+  T operator()();
+};
 
 template<> std::vector<char> do_read_stdin<std::vector<char>>::operator()() {
   return wasm::read_stdin();
@@ -71,7 +73,8 @@ T wasm::read_file(const std::string& filename, Flags::BinaryOption binary) {
             << "': Input file too large: " << insize
             << " bytes. Try rebuilding in 64-bit mode.";
   }
-  T input(size_t(insize) + (binary == Flags::Binary ? 0 : 1), '\0');
+  // Zero-initialize the string or vector with the expected size.
+  T input(size_t(insize), '\0');
   if (size_t(insize) == 0) {
     return input;
   }
@@ -82,8 +85,7 @@ T wasm::read_file(const std::string& filename, Flags::BinaryOption binary) {
     // Truncate size to the number of ASCII characters actually read in text
     // mode (which is generally less than the number of bytes on Windows, if
     // \r\n line endings are present)
-    input.resize(chars + 1);
-    input[chars] = '\0';
+    input.resize(chars);
   }
   return input;
 }
@@ -134,4 +136,30 @@ size_t wasm::file_size(std::string filename) {
   std::ifstream infile(wasm::Path::to_path(filename),
                        std::ifstream::ate | std::ifstream::binary);
   return infile.tellg();
+}
+
+void wasm::flush_and_quick_exit(int code) {
+  // We expect C++ files to be flushed by their destructors already. Flush the
+  // standard streams manually.
+  std::cout << std::flush;
+  std::cerr << std::flush;
+
+  // To be safe, also flush at the C level.
+  fflush(NULL);
+
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) ||     \
+  __has_feature(memory_sanitizer) || __has_feature(leak_sanitizer) ||          \
+  __has_feature(undefined_behavior_sanitizer)
+  // Avoid quick_exit when using sanitizers, so that leak checks and other
+  // things can run during shutdown normally.
+  std::exit(code);
+#else
+  // A "better" function to use here would be std::quick_exit, however on older
+  // version of macOS (at least as new as 13.2 which currently runs on our CI)
+  // the C symbol _quick_exit (which is called by std::quick_exit) is missing.
+  // So instead use _Exit(); the only difference is that _Exit() does not call
+  // handlers registered by at_quick_exit(). Currently Binaryen does not have
+  // any of those.
+  _Exit(code);
+#endif
 }

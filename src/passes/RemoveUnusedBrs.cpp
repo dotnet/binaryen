@@ -15,19 +15,25 @@
  */
 
 //
-// Removes branches for which we go to where they go anyhow
+// Removes branches for which we go to where they go anyhow.
 //
 
-#include <ir/branch-utils.h>
-#include <ir/cost.h>
-#include <ir/effects.h>
-#include <ir/gc-type-utils.h>
-#include <ir/literal-utils.h>
-#include <ir/utils.h>
-#include <parsing.h>
-#include <pass.h>
-#include <wasm-builder.h>
-#include <wasm.h>
+#include "ir/branch-hints.h"
+#include "ir/branch-utils.h"
+#include "ir/cost.h"
+#include "ir/drop.h"
+#include "ir/effects.h"
+#include "ir/gc-type-utils.h"
+#include "ir/literal-utils.h"
+#include "ir/localize.h"
+#include "ir/properties.h"
+#include "ir/utils.h"
+#include "parsing.h"
+#include "pass.h"
+#include "support/small_set.h"
+#include "wasm-builder.h"
+#include "wasm-type.h"
+#include "wasm.h"
 
 namespace wasm {
 
@@ -88,8 +94,14 @@ static bool canTurnIfIntoBrIf(Expression* ifCondition,
 //  * https://github.com/WebAssembly/binaryen/issues/5983
 const Index TooCostlyToRunUnconditionally = 8;
 
-static_assert(TooCostlyToRunUnconditionally < CostAnalyzer::Unacceptable,
-              "We never run code unconditionally if it has unacceptable cost");
+// Some costs are known to be too high to move from conditional to unconditional
+// execution.
+static_assert(CostAnalyzer::AtomicCost >= TooCostlyToRunUnconditionally,
+              "We never run atomics unconditionally");
+static_assert(CostAnalyzer::ThrowCost >= TooCostlyToRunUnconditionally,
+              "We never run throws unconditionally");
+static_assert(CostAnalyzer::CastCost > TooCostlyToRunUnconditionally / 2,
+              "We only run casts unconditionally when optimizing for size");
 
 static bool tooCostlyToRunUnconditionally(const PassOptions& passOptions,
                                           Index cost) {
@@ -148,6 +160,12 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
   }
 
   bool anotherCycle;
+
+  // Whether we are allowed to unconditionalize code, that is, make code run
+  // that previously might not have. Unconditionalizing code is a problem for
+  // fuzzing branch hints: a branch hint that never ran might be wrong, and if
+  // we start to run it, the fuzzer would report a finding.
+  bool neverUnconditionalize;
 
   using Flows = std::vector<Expression**>;
 
@@ -252,15 +270,16 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
         }
       }
     } else if (curr->is<Nop>()) {
-      // ignore (could be result of a previous cycle)
+      // Ignore (could be result of a previous cycle).
       self->stopValueFlow();
-    } else if (curr->is<Loop>()) {
-      // do nothing - it's ok for values to flow out
+    } else if (curr->is<Loop>() || curr->is<TryTable>()) {
+      // Do nothing - it's ok for values to flow out.
+      // TODO: Legacy Try as well?
     } else if (auto* sw = curr->dynCast<Switch>()) {
       self->stopFlow();
       self->optimizeSwitch(sw);
     } else {
-      // anything else stops the flow
+      // Anything else stops the flow.
       self->stopFlow();
     }
   }
@@ -385,6 +404,7 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
               curr->condition, br->value, getPassOptions(), *getModule())) {
           if (!br->condition) {
             br->condition = curr->condition;
+            BranchHints::copyTo(curr, br, getFunction());
           } else {
             // In this case we can replace
             //   if (condition1) br_if (condition2)
@@ -394,7 +414,12 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
             // zero (also 3 bytes). The size is unchanged, but the select may
             // be further optimizable, and if select does not branch we also
             // avoid one branch.
-            // Multivalue selects are not supported
+            if (neverUnconditionalize) {
+              // Creating a select, below, would unconditionally run the
+              // select's condition.
+              return;
+            }
+            // Multivalue selects are not supported.
             if (br->value && br->value->type.isTuple()) {
               return;
             }
@@ -416,6 +441,7 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
             // That keeps the order of the two conditions as it was originally.
             br->condition =
               builder.makeSelect(br->condition, curr->condition, zero);
+            BranchHints::applyAndTo(curr, br, br, getFunction());
           }
           br->finalize();
           replaceCurrent(Builder(*getModule()).dropIfConcretelyTyped(br));
@@ -434,6 +460,11 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
         if (child->ifFalse) {
           return;
         }
+        if (neverUnconditionalize) {
+          // Creating a select, below, would unconditionally run the inner if's
+          // condition (condition-B, in the comment above).
+          return;
+        }
         // If running the child's condition unconditionally is too expensive,
         // give up.
         if (tooCostlyToRunUnconditionally(getPassOptions(), child->condition)) {
@@ -448,6 +479,7 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
         Builder builder(*getModule());
         curr->condition = builder.makeSelect(
           child->condition, curr->condition, builder.makeConst(int32_t(0)));
+        BranchHints::applyAndTo(curr, child, curr, getFunction());
         curr->ifTrue = child->ifTrue;
       }
     }
@@ -456,13 +488,78 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
     //       later down, see visitLocalSet.
   }
 
+  // A stack of catching expressions that are parents of the current expression,
+  // that is, Try and TryTable.
+  std::vector<Expression*> catchers;
+
+  static void popCatcher(RemoveUnusedBrs* self, Expression** currp) {
+    assert(!self->catchers.empty() && self->catchers.back() == *currp);
+    self->catchers.pop_back();
+  }
+
+  void visitThrow(Throw* curr) {
+    // If a throw will definitely be caught, and it is not a catch with a
+    // reference, then it is just a branch (i.e. the code is using exceptions as
+    // control flow). Turn it into a branch here so that the rest of the pass
+    // can optimize it with all other branches.
+    //
+    // To do so, look at the closest try and see if it will catch us, and
+    // proceed outwards if not.
+    auto thrownTag = curr->tag;
+    for (int i = catchers.size() - 1; i >= 0; i--) {
+      auto* tryy = catchers[i]->dynCast<TryTable>();
+      if (!tryy) {
+        // We do not handle mixtures of Try and TryTable.
+        return;
+      }
+      for (Index j = 0; j < tryy->catchTags.size(); j++) {
+        auto tag = tryy->catchTags[j];
+        // The tag must match, or be a catch_all.
+        if (tag == thrownTag || tag.isNull()) {
+          // This must not be a catch with exnref.
+          if (!tryy->catchRefs[j]) {
+            // Success! Create a break to replace the throw.
+            auto dest = tryy->catchDests[j];
+            auto& wasm = *getModule();
+            Builder builder(wasm);
+            if (!tag.isNull()) {
+              // We are catching a specific tag, so values might be sent.
+              Expression* value = nullptr;
+              if (curr->operands.size() == 1) {
+                value = curr->operands[0];
+              } else if (curr->operands.size() > 1) {
+                value = builder.makeTupleMake(curr->operands);
+              }
+              auto* br = builder.makeBreak(dest, value);
+              replaceCurrent(br);
+              return;
+            }
+
+            // catch_all: no values are sent. Drop the throw's children (while
+            // ignoring parent effects: the parent is a throw, but we have
+            // proven we can remove that effect).
+            auto* br = builder.makeBreak(dest);
+            auto* rep = getDroppedChildrenAndAppend(
+              curr, wasm, getPassOptions(), br, DropMode::IgnoreParentEffects);
+            replaceCurrent(rep);
+            // We modified the code here and may have added a drop, etc., so
+            // stop the flow (rather than re-scan it somehow). We leave
+            // optimizing anything that flows out for later iterations.
+            stopFlow();
+          }
+
+          // Return even if we did not optimize: we found our tag was caught.
+          return;
+        }
+      }
+    }
+  }
+
   // override scan to add a pre and a post check task to all nodes
   static void scan(RemoveUnusedBrs* self, Expression** currp) {
     self->pushTask(visitAny, currp);
 
-    auto* iff = (*currp)->dynCast<If>();
-
-    if (iff) {
+    if (auto* iff = (*currp)->dynCast<If>()) {
       if (iff->condition->type == Type::unreachable) {
         // avoid trying to optimize this, we never reach it anyhow
         return;
@@ -478,9 +575,16 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
       self->pushTask(scan, &iff->ifTrue);
       self->pushTask(clear, currp); // clear all flow after the condition
       self->pushTask(scan, &iff->condition);
-    } else {
-      super::scan(self, currp);
+      return;
     }
+    if ((*currp)->is<TryTable>() || (*currp)->is<Try>()) {
+      // Push the try we are reaching, and add a task to pop it, after all the
+      // tasks that Super::scan will push for its children.
+      self->catchers.push_back(*currp);
+      self->pushTask(popCatcher, currp);
+    }
+
+    Super::scan(self, currp);
   }
 
   // optimizes a loop. returns true if we made changes
@@ -540,9 +644,13 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
             block->finalize();
             return true;
           }
-        } else {
-          // this is already an if-else. if one side is a dead end, we can
-          // append to the other, if there is no returned value to concern us
+        } else if (iff->condition->type != Type::unreachable) {
+          // This is already an if-else. If one side is a dead end, we can
+          // append to the other, if there is no returned value to concern us.
+          // Note that we skip ifs with unreachable conditions, as they are dead
+          // code that DCE can remove, and modifying them can lead to errors
+          // (one of the arms may still be concrete, in which case appending to
+          // it would be invalid).
 
           // can't be, since in the middle of a block
           assert(!iff->type.isConcrete());
@@ -602,6 +710,7 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
             brIf->condition = builder.makeUnary(EqZInt32, brIf->condition);
             last->name = brIf->name;
             brIf->name = loop->name;
+            BranchHints::flip(brIf, getFunction());
             return true;
           } else {
             // there are elements in the middle,
@@ -622,6 +731,7 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
                 builder.makeIf(brIf->condition,
                                builder.makeBreak(brIf->name),
                                stealSlice(builder, block, i + 1, list.size()));
+              BranchHints::copyTo(brIf, list[i], getFunction());
               block->finalize();
               return true;
             }
@@ -676,6 +786,12 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
             replaceCurrent(loop);
             worked = true;
           } else if (auto* iff = curr->list[0]->dynCast<If>()) {
+            if (iff->condition->type == Type::unreachable) {
+              // The block result type may not be compatible with the arm result
+              // types since the unreachable If can satisfy any type of block.
+              // Just leave this for DCE.
+              return;
+            }
             // The label can't be used in the condition.
             if (BranchUtils::BranchSeeker::count(iff->condition, curr->name) ==
                 0) {
@@ -768,139 +884,256 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
           if (Type::isSubType(expr->type, type)) {
             return expr;
           }
-          if (HeapType::isSubType(expr->type.getHeapType(),
-                                  type.getHeapType())) {
+          if (type.isNonNullable() && expr->type.isNullable() &&
+              Type::isSubType(expr->type.with(NonNullable), type)) {
             return builder.makeRefAs(RefAsNonNull, expr);
           }
           return builder.makeRefCast(expr, type);
         };
 
-        if (curr->op == BrOnNull) {
-          if (refType.isNull()) {
-            // The branch will definitely be taken.
-            replaceCurrent(builder.makeSequence(builder.makeDrop(curr->ref),
-                                                builder.makeBreak(curr->name)));
-            worked = true;
-            return;
+        // When we optimize out a cast, we still need the ref value to either
+        // send on the optimized branch or return from the current expression.
+        // When we have a descriptor cast, the ref value needs to be moved
+        // across the descriptor value, which might have side effects. If so, we
+        // need to use a scratch local.
+        auto getRefValue = [&]() -> Expression* {
+          if (curr->desc) {
+            // Preserve the trap on a null descriptor.
+            if (curr->desc->type.isNullable()) {
+              curr->desc = builder.makeRefAs(RefAsNonNull, curr->desc);
+            }
+            Block* ref =
+              ChildLocalizer(curr, getFunction(), *getModule(), passOptions)
+                .getChildrenReplacement();
+            ref->list.push_back(curr->ref);
+            ref->type = curr->ref->type;
+            return ref;
           }
-          if (refType.isNonNullable()) {
-            // The branch will definitely not be taken.
-            replaceCurrent(maybeCast(curr->ref, curr->type));
-            worked = true;
-            return;
-          }
-          return;
-        }
+          return curr->ref;
+        };
 
-        if (curr->op == BrOnNonNull) {
-          if (refType.isNull()) {
-            // Definitely not taken.
-            replaceCurrent(builder.makeDrop(curr->ref));
-            worked = true;
+        switch (curr->op) {
+          case BrOnNull:
+            if (refType.isNull()) {
+              // The branch will definitely be taken.
+              replaceCurrent(builder.makeSequence(
+                builder.makeDrop(curr->ref), builder.makeBreak(curr->name)));
+              worked = true;
+              return;
+            }
+            if (refType.isNonNullable()) {
+              // The branch will definitely not be taken.
+              replaceCurrent(maybeCast(curr->ref, curr->type));
+              worked = true;
+              return;
+            }
             return;
-          }
-          if (refType.isNonNullable()) {
-            // Definitely taken.
-            replaceCurrent(builder.makeBreak(
-              curr->name, maybeCast(curr->ref, curr->getSentType())));
-            worked = true;
+          case BrOnNonNull:
+            if (refType.isNull()) {
+              // Definitely not taken.
+              replaceCurrent(builder.makeDrop(curr->ref));
+              worked = true;
+              return;
+            }
+            if (refType.isNonNullable()) {
+              // Definitely taken.
+              replaceCurrent(builder.makeBreak(
+                curr->name, maybeCast(curr->ref, curr->getSentType())));
+              worked = true;
+              return;
+            }
             return;
-          }
-          return;
-        }
+          case BrOnCast:
+          case BrOnCastFail:
+          case BrOnCastDescEq:
+          case BrOnCastDescEqFail: {
+            bool onFail =
+              curr->op == BrOnCastFail || curr->op == BrOnCastDescEqFail;
+            bool isDesc =
+              curr->op == BrOnCastDescEq || curr->op == BrOnCastDescEqFail;
 
-        // Improve the cast target type as much as possible given what we know
-        // about the input. Unlike in BrOn::finalize(), we consider type
-        // information from all the fallthrough values here. We can continue to
-        // further optimizations after this, and those optimizations might even
-        // benefit from this improvement.
-        auto glb = Type::getGreatestLowerBound(curr->castType, refType);
-        if (glb != Type::unreachable && glb != curr->castType) {
-          curr->castType = glb;
-          curr->finalize();
-          worked = true;
-        }
+            // Improve the cast target type as much as possible given what we
+            // know about the input. Unlike in BrOn::finalize(), we consider
+            // type information from all the fallthrough values here. We can
+            // continue to further optimizations after this, and those
+            // optimizations might even benefit from this improvement.
+            auto improvedType = curr->castType;
+            if (!isDesc) {
+              improvedType = Type::getGreatestLowerBound(improvedType, refType);
+            } else {
+              // For descriptor casts, the target heap type is controlled by the
+              // descriptor operand, but we can still improve nullability.
+              if (improvedType.isNullable() && refType.isNonNullable()) {
+                improvedType = improvedType.with(NonNullable);
+              }
+            }
+            if (!curr->castType.isExact()) {
+              // When custom descriptors is not enabled, nontrivial exact casts
+              // are not allowed.
+              improvedType =
+                improvedType.withInexactIfNoCustomDescs(getModule()->features);
+            }
+            if (onFail) {
+              // BrOnCastFail sends the input type, with adjusted nullability.
+              // The input heap type makes sense for the branch target, and we
+              // will not change it anyhow, but we need to be careful with
+              // nullability: if the cast type was nullable, then we were
+              // sending a non-nullable value to the branch, and if we refined
+              // the cast type to non- nullable, we would no longer be doing
+              // that. In other words, we must not refine the nullability, as
+              // that would *un*refine the send type.
+              // TODO: Consider allowing this change if the branch target
+              // expects a nullable type anyway.
+              if (curr->castType.isNullable() && improvedType.isNonNullable()) {
+                improvedType = improvedType.with(Nullable);
+              }
+            }
+            if (improvedType != Type::unreachable &&
+                improvedType != curr->castType) {
+              curr->castType = improvedType;
+              auto oldType = curr->type;
+              curr->finalize();
+              worked = true;
 
-        // Depending on what we know about the cast results, we may be able to
-        // optimize.
-        auto result = GCTypeUtils::evaluateCastCheck(refType, curr->castType);
-        if (curr->op == BrOnCastFail) {
-          result = GCTypeUtils::flipEvaluationResult(result);
-        }
+              // We refined the castType, which may *un*-refine the BrOn itself.
+              // Imagine the castType was nullable before, then nulls would go
+              // on the branch, and so the BrOn could only flow out a
+              // non-nullable value, and that was its type. If we refine the
+              // castType to be non-nullable then nulls no longer go through,
+              // making the BrOn itself nullable. This should not normally
+              // happen, but can occur because we look at the fallthrough of the
+              // ref:
+              //
+              //   (br_on_cast
+              //     (local.tee $unrefined
+              //       (refined
+              //
+              // That is, we may see a more refined type for our GLB computation
+              // than the wasm type system does, if a local.tee or such ends up
+              // unrefining the type.
+              //
+              // To check for this and fix it, see if we need a cast in order to
+              // be a subtype of the old type.
+              auto* rep = maybeCast(curr, oldType);
+              if (rep != curr) {
+                replaceCurrent(rep);
+                // Exit after doing so, leaving further work for other cycles.
+                return;
+              }
+            }
 
-        switch (result) {
-          case GCTypeUtils::Unknown:
-            // Anything could happen, so we cannot optimize.
-            return;
-          case GCTypeUtils::Success: {
-            replaceCurrent(builder.makeBreak(
-              curr->name, maybeCast(curr->ref, curr->getSentType())));
-            worked = true;
-            return;
-          }
-          case GCTypeUtils::Failure: {
-            replaceCurrent(maybeCast(curr->ref, curr->type));
-            worked = true;
-            return;
-          }
-          case GCTypeUtils::SuccessOnlyIfNull: {
-            // TODO: optimize this case using the following replacement, which
-            // avoids using any scratch locals and only does a single null
-            // check, but does require generating a fresh label:
-            //
-            //   (br_on_cast $l (ref null $X) (ref null $Y)
-            //     (...)
-            //   )
-            //     =>
-            //   (block $l' (result (ref $X))
-            //     (br_on_non_null $l' ;; reuses `curr`
-            //       (...)
-            //     )
-            //     (br $l
-            //       (ref.null bot<X>)
-            //     )
-            //   )
-            return;
-          }
-          case GCTypeUtils::SuccessOnlyIfNonNull: {
-            // Perform this replacement:
-            //
-            //   (br_on_cast $l (ref null $X') (ref $X))
-            //     (...)
-            //   )
-            //     =>
-            //   (block (result (ref bot<X>))
-            //     (br_on_non_null $l ;; reuses `curr`
-            //       (...)
-            //     (ref.null bot<X>)
-            //   )
-            curr->ref = maybeCast(
-              curr->ref, Type(curr->getSentType().getHeapType(), Nullable));
-            curr->op = BrOnNonNull;
-            curr->castType = Type::none;
-            curr->type = Type::none;
+            // Depending on what we know about the cast results, we may be able
+            // to optimize.
+            auto result =
+              GCTypeUtils::evaluateCastCheck(refType, curr->castType);
 
-            assert(curr->ref->type.isRef());
-            auto* refNull = builder.makeRefNull(curr->ref->type.getHeapType());
-            replaceCurrent(builder.makeBlock({curr, refNull}, refNull->type));
-            worked = true;
-            return;
-          }
-          case GCTypeUtils::Unreachable: {
-            // The cast is never executed, possibly because its input type is
-            // uninhabitable. Replace it with unreachable.
-            auto* drop = builder.makeDrop(curr->ref);
-            auto* unreachable = ExpressionManipulator::unreachable(curr);
-            replaceCurrent(builder.makeBlock({drop, unreachable}));
-            worked = true;
-            return;
+            if (isDesc) {
+              // Knowing that the types work out is insufficient to know that a
+              // descriptor cast will succeed. We would need to know that the
+              // descriptor values match as well.
+              switch (result) {
+                case GCTypeUtils::Success:
+                case GCTypeUtils::SuccessOnlyIfNonNull:
+                  // We cannot optimize.
+                  return;
+                case GCTypeUtils::Unknown:
+                case GCTypeUtils::Failure:
+                case GCTypeUtils::Unreachable:
+                case GCTypeUtils::SuccessOnlyIfNull:
+                  break;
+              }
+            }
+
+            if (onFail) {
+              result = GCTypeUtils::flipEvaluationResult(result);
+            }
+
+            switch (result) {
+              case GCTypeUtils::Unknown:
+                // Anything could happen, so we cannot optimize.
+                return;
+              case GCTypeUtils::Success: {
+                replaceCurrent(builder.makeBreak(
+                  curr->name, maybeCast(getRefValue(), curr->getSentType())));
+                worked = true;
+                return;
+              }
+              case GCTypeUtils::Failure: {
+                replaceCurrent(maybeCast(getRefValue(), curr->type));
+                worked = true;
+                return;
+              }
+              case GCTypeUtils::SuccessOnlyIfNull: {
+                // TODO: optimize this case using the following replacement,
+                // which avoids using any scratch locals and only does a single
+                // null check, but does require generating a fresh label:
+                //
+                //   (br_on_cast $l (ref null $X) (ref null $Y)
+                //     (...)
+                //   )
+                //     =>
+                //   (block $l' (result (ref $X))
+                //     (br_on_non_null $l' ;; reuses `curr`
+                //       (...)
+                //     )
+                //     (br $l
+                //       (ref.null bot<X>)
+                //     )
+                //   )
+                return;
+              }
+              case GCTypeUtils::SuccessOnlyIfNonNull: {
+                // Perform this replacement:
+                //
+                //   (br_on_cast $l (ref null $X') (ref $X))
+                //     (...)
+                //   )
+                //     =>
+                //   (block (result (ref bot<X>))
+                //     (br_on_non_null $l ;; reuses `curr`
+                //       (...)
+                //     (ref.null bot<X>)
+                //   )
+                //
+                // A RefCast is added in some cases, but this is still generally
+                // worth doing as the BrOnNonNull and the appended null may end
+                // up optimized with surrounding code.
+                auto* casted =
+                  maybeCast(getRefValue(), curr->getSentType().with(Nullable));
+                curr->ref = casted;
+                curr->desc = nullptr;
+                curr->op = BrOnNonNull;
+                curr->castType = Type::none;
+                curr->type = Type::none;
+
+                assert(curr->ref->type.isRef());
+                auto* refNull =
+                  builder.makeRefNull(curr->ref->type.getHeapType());
+                replaceCurrent(
+                  builder.makeBlock({curr, refNull}, refNull->type));
+                worked = true;
+                return;
+              }
+              case GCTypeUtils::Unreachable: {
+                // The cast is never executed, possibly because its input type
+                // is uninhabitable. Replace it with unreachable.
+                replaceCurrent(
+                  getDroppedChildrenAndAppend(curr,
+                                              *getModule(),
+                                              passOptions,
+                                              builder.makeUnreachable(),
+                                              DropMode::IgnoreParentEffects));
+                worked = true;
+                return;
+              }
+            }
+            break;
           }
         }
       }
     } optimizer(getPassOptions());
 
-    optimizer.setModule(getModule());
-    optimizer.doWalkFunction(func);
+    optimizer.walkFunctionInModule(func, getModule());
 
     // If we removed any BrOn instructions, that might affect the reachability
     // of the things they used to break to, so update types.
@@ -912,10 +1145,13 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
   }
 
   void doWalkFunction(Function* func) {
+    neverUnconditionalize =
+      hasArgument("remove-unused-brs-never-unconditionalize");
+
     // multiple cycles may be needed
     do {
       anotherCycle = false;
-      super::doWalkFunction(func);
+      Super::doWalkFunction(func);
       assert(ifStack.empty());
       // flows may contain returns, which are flowing out and so can be
       // optimized
@@ -951,31 +1187,37 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
       }
     } while (anotherCycle);
 
-    // thread trivial jumps
-    struct JumpThreader : public ControlFlowWalker<JumpThreader> {
-      // map of all value-less breaks and switches going to a block (and not a
-      // loop)
-      std::map<Block*, std::vector<Expression*>> branchesToBlock;
+    // Thread trivial jumps.
+    struct JumpThreader
+      : public PostWalker<JumpThreader,
+                          UnifiedExpressionVisitor<JumpThreader>> {
+      // Map of all labels (branch targets) to the branches going to them. (We
+      // only care about blocks here, and not loops, but for simplicity we
+      // store all branch targets since blocks are 99% of that set anyhow. Any
+      // loops are ignored later.)
+      std::unordered_map<Name, std::vector<Expression*>> labelToBranches;
 
       bool worked = false;
 
-      void visitBreak(Break* curr) {
-        if (!curr->value) {
-          if (auto* target = findBreakTarget(curr->name)->dynCast<Block>()) {
-            branchesToBlock[target].push_back(curr);
-          }
-        }
-      }
-      void visitSwitch(Switch* curr) {
-        if (!curr->value) {
-          auto names = BranchUtils::getUniqueTargets(curr);
-          for (auto name : names) {
-            if (auto* target = findBreakTarget(name)->dynCast<Block>()) {
-              branchesToBlock[target].push_back(curr);
+      void visitExpression(Expression* curr) {
+        // Find the relevant targets: targets that (as mentioned above) have no
+        // value sent to them.
+        SmallSet<Name, 2> relevantTargets;
+        BranchUtils::operateOnScopeNameUsesAndSentTypes(
+          curr, [&](Name name, Type sent) {
+            if (sent == Type::none) {
+              relevantTargets.insert(name);
             }
-          }
+          });
+
+        // Note ourselves on all relevant targets.
+        for (auto target : relevantTargets) {
+          labelToBranches[target].push_back(curr);
         }
+        // TODO: If all but one target trap, in TNH we can unconditionally jump
+        //       to the non-trapping place.
       }
+
       void visitBlock(Block* curr) {
         auto& list = curr->list;
         if (list.size() == 1 && curr->name.is()) {
@@ -991,20 +1233,45 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
             }
           }
         } else if (list.size() == 2) {
-          // if this block has two children, a child-block and a simple jump,
-          // then jumps to child-block can be replaced with jumps to the new
-          // target
-          auto* child = list[0]->dynCast<Block>();
-          auto* jump = list[1]->dynCast<Break>();
-          if (child && child->name.is() && jump &&
-              ExpressionAnalyzer::isSimple(jump)) {
-            redirectBranches(child, jump->name);
+          // With two items, we look for this form:
+          //
+          //  (block ;; curr
+          //    (block $child ;; child
+          //    )
+          //    after
+          //  )
+          //
+          // Anything branching to the child will end up in that second
+          // instruction |after|. That lets us optimize the cases where |after|
+          // is a br or an unreachable.
+          if (auto* child = list[0]->dynCast<Block>()) {
+            if (child->name) {
+              if (auto* jump = list[1]->dynCast<Break>()) {
+                if (ExpressionAnalyzer::isSimple(jump)) {
+                  // Unconditional jumps to the child can skip ahead to where
+                  // the child jumps.
+                  redirectBranches(child, jump->name);
+                }
+              } else if (list[1]->dynCast<Unreachable>()) {
+                // Unconditional jumps to a trap can just trap.
+                for (auto* branch : labelToBranches[child->name]) {
+                  if (auto* br = branch->dynCast<Break>()) {
+                    if (ExpressionAnalyzer::isSimple(br)) {
+                      // It is safe to just modify the br in-place because it is
+                      // only jumping here, so this the last place that will
+                      // read it.
+                      ExpressionManipulator::unreachable(br);
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
 
       void redirectBranches(Block* from, Name to) {
-        auto& branches = branchesToBlock[from];
+        auto& branches = labelToBranches[from->name];
         for (auto* branch : branches) {
           if (BranchUtils::replacePossibleTarget(branch, from->name, to)) {
             worked = true;
@@ -1012,10 +1279,8 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
         }
         // if the jump is to another block then we can update the list, and
         // maybe push it even more later
-        if (auto* newTarget = findBreakTarget(to)->dynCast<Block>()) {
-          for (auto* branch : branches) {
-            branchesToBlock[newTarget].push_back(branch);
-          }
+        for (auto* branch : branches) {
+          labelToBranches[to].push_back(branch);
         }
       }
 
@@ -1033,10 +1298,13 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
 
     // perform some final optimizations
     struct FinalOptimizer : public PostWalker<FinalOptimizer> {
-      bool shrink;
       PassOptions& passOptions;
 
+      bool shrink;
+      bool neverUnconditionalize;
+
       bool needUniqify = false;
+      bool refinalize = false;
 
       FinalOptimizer(PassOptions& passOptions) : passOptions(passOptions) {}
 
@@ -1066,6 +1334,7 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
             // we are an if-else where the ifTrue is a break without a
             // condition, so we can do this
             ifTrueBreak->condition = iff->condition;
+            BranchHints::copyTo(iff, ifTrueBreak, getFunction());
             ifTrueBreak->finalize();
             list[i] = Builder(*getModule()).dropIfConcretelyTyped(ifTrueBreak);
             ExpressionManipulator::spliceIntoBlock(curr, i + 1, iff->ifFalse);
@@ -1080,6 +1349,7 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
                                 *getModule())) {
             ifFalseBreak->condition =
               Builder(*getModule()).makeUnary(EqZInt32, iff->condition);
+            BranchHints::copyFlippedTo(iff, ifFalseBreak, getFunction());
             ifFalseBreak->finalize();
             list[i] = Builder(*getModule()).dropIfConcretelyTyped(ifFalseBreak);
             ExpressionManipulator::spliceIntoBlock(curr, i + 1, iff->ifTrue);
@@ -1112,7 +1382,9 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
                   Builder builder(*getModule());
                   br1->condition =
                     builder.makeBinary(OrInt32, br1->condition, br2->condition);
+                  BranchHints::applyOrTo(br1, br2, br1, getFunction());
                   ExpressionManipulator::nop(br2);
+                  BranchHints::clear(br2, getFunction());
                 }
               }
             } else {
@@ -1126,6 +1398,63 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
           tablify(curr);
           // Pattern-patch ifs, recreating them when it makes sense.
           restructureIf(curr);
+
+          // Optimize block tails where a dropped `br_if`'s value is redundant
+          // when the br_if targets the block itself:
+          //
+          // (block $block (result i32)
+          // ..
+          //   (drop
+          //     (br_if $block ;; <- MUST target parent $block
+          //       (value)
+          //       (condition)
+          //     )
+          //   )
+          //   (value) ;; <- MUST be same as br_if's value
+          // )
+          // =>
+          // (block $block (result i32)
+          // ..
+          //   (drop
+          //     (condition)
+          //   )
+          //   (value)
+          // )
+          size_t size = curr->list.size();
+          auto* secondLast = curr->list[size - 2];
+          auto* last = curr->list[size - 1];
+          if (auto* drop = secondLast->dynCast<Drop>()) {
+            if (auto* br = drop->value->dynCast<Break>();
+                br && br->value && br->condition && br->name == curr->name &&
+                ExpressionAnalyzer::equal(br->value, last)) {
+              // The value must have no effects, as we are removing one copy
+              // of it. Also, the condition must not interfere with that
+              // value, or it might change, e.g.
+              //
+              //   (drop
+              //     (br_if $block
+              //       (read a value)     ;; this original value is returned,
+              //       (write that value) ;; if we branch
+              //     )
+              //   )
+              //   (read a value)
+              // =>
+              //   (drop
+              //     (write that value)
+              //   )
+              //   (read a value)         ;; now the written value is used
+              auto valueEffects =
+                EffectAnalyzer(passOptions, *getModule(), br->value);
+              if (!valueEffects.hasUnremovableSideEffects()) {
+                auto conditionEffects =
+                  EffectAnalyzer(passOptions, *getModule(), br->condition);
+                if (!conditionEffects.invalidates(valueEffects)) {
+                  // All conditions met, perform the update.
+                  drop->value = br->condition;
+                }
+              }
+            }
+          }
         }
       }
 
@@ -1195,9 +1524,12 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
               // no other breaks to that name, so we can do this
               if (!drop) {
                 assert(!br->value);
-                replaceCurrent(builder.makeIf(
-                  builder.makeUnary(EqZInt32, br->condition), curr));
+                auto* iff = builder.makeIf(
+                  builder.makeUnary(EqZInt32, br->condition), curr);
+                replaceCurrent(iff);
+                BranchHints::copyFlippedTo(br, iff, getFunction());
                 ExpressionManipulator::nop(br);
+                BranchHints::clear(br, getFunction());
                 curr->finalize(curr->type);
               } else {
                 // To use an if, the value must have no side effects, as in the
@@ -1208,8 +1540,9 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
                   if (EffectAnalyzer::canReorder(
                         passOptions, *getModule(), br->condition, br->value)) {
                     ExpressionManipulator::nop(list[0]);
-                    replaceCurrent(
-                      builder.makeIf(br->condition, br->value, curr));
+                    auto* iff = builder.makeIf(br->condition, br->value, curr);
+                    BranchHints::copyTo(br, iff, getFunction());
+                    replaceCurrent(iff);
                   }
                 } else {
                   // The value has side effects, so it must always execute. We
@@ -1235,6 +1568,11 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
                   // must not have side effects.
                   // TODO: we can do this when there *are* other refs to $x,
                   //       with a larger refactoring here.
+                  if (neverUnconditionalize) {
+                    // If we optimize, we'd unconditionally execute the rest of
+                    // the block.
+                    return;
+                  }
 
                   // Test for the conditions with a temporary nop instead of the
                   // br_if.
@@ -1271,6 +1609,9 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
 
       // Convert an if into a select, if possible and beneficial to do so.
       Select* selectify(If* iff) {
+        if (neverUnconditionalize) {
+          return nullptr;
+        }
         // Only an if-else can be turned into a select.
         if (!iff->ifFalse) {
           return nullptr;
@@ -1310,8 +1651,14 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
         if (condition.invalidates(ifTrue) || condition.invalidates(ifFalse)) {
           return nullptr;
         }
-        return Builder(*getModule())
-          .makeSelect(iff->condition, iff->ifTrue, iff->ifFalse, iff->type);
+        auto* select = Builder(*getModule())
+                         .makeSelect(iff->condition, iff->ifTrue, iff->ifFalse);
+        if (select->type != iff->type) {
+          // If the select is more refined than the if it replaces, we must
+          // propagate that outwards.
+          refinalize = true;
+        }
+        return select;
       }
 
       void visitLocalSet(LocalSet* curr) {
@@ -1320,6 +1667,14 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
         // The optimizations we can do here can recurse and call each
         // other, so pass around a pointer to the output.
         optimizeSetIf(getCurrentPointer());
+      }
+
+      // Flip an if's condition with an eqz, and flip its arms.
+      void flip(If* iff) {
+        std::swap(iff->ifTrue, iff->ifFalse);
+        iff->condition =
+          Builder(*getModule()).makeUnary(EqZInt32, iff->condition);
+        BranchHints::flip(iff, getFunction());
       }
 
       void optimizeSetIf(Expression** currp) {
@@ -1363,9 +1718,10 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
                   // Wonderful, do it!
                   Builder builder(*getModule());
                   if (flipCondition) {
-                    builder.flip(iff);
+                    flip(iff);
                   }
                   br->condition = iff->condition;
+                  BranchHints::copyTo(iff, br, getFunction());
                   br->finalize();
                   set->value = two;
                   auto* block = builder.makeSequence(br, set);
@@ -1433,7 +1789,7 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
         Builder builder(*getModule());
         LocalGet* get = iff->ifTrue->dynCast<LocalGet>();
         if (get && get->index == set->index) {
-          builder.flip(iff);
+          flip(iff);
         } else {
           get = iff->ifFalse->dynCast<LocalGet>();
           if (get && get->index != set->index) {
@@ -1638,7 +1994,7 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
               Index i = 0;
               while (1) {
                 defaultName = "tablify|" + std::to_string(i++);
-                if (usedNames.count(defaultName) == 0) {
+                if (!usedNames.contains(defaultName)) {
                   break;
                 }
               }
@@ -1676,13 +2032,52 @@ struct RemoveUnusedBrs : public WalkerPass<PostWalker<RemoveUnusedBrs>> {
           start = end;
         }
       }
+
+      void visitBreak(Break* curr) {
+        if (!curr->condition) {
+          return;
+        }
+        auto* value = Properties::getFallthrough(
+          curr->condition, passOptions, *getModule());
+        // Optimize if condition's fallthrough is a constant.
+        if (auto* c = value->dynCast<Const>()) {
+          ChildLocalizer localizer(
+            curr, getFunction(), *getModule(), passOptions);
+          auto* block = localizer.getChildrenReplacement();
+          if (c->value.geti32()) {
+            // the branch is always taken, make it unconditional
+            curr->condition = nullptr;
+            curr->type = Type::unreachable;
+            block->list.push_back(curr);
+            block->finalize();
+            BranchHints::clear(curr, getFunction());
+          } else {
+            // the branch is never taken, allow control flow to fall through
+            if (curr->value) {
+              block->list.push_back(curr->value);
+              block->finalize();
+            }
+          }
+          replaceCurrent(block);
+          // The type changes if we make the break unconditional (it becomes
+          // unreachable), but a change may also happen if we see the break is
+          // not taken, as then the target block may have no more breaks, and
+          // become unreachable. Either way, refinalize.
+          refinalize = true;
+        }
+      }
     };
     FinalOptimizer finalOptimizer(getPassOptions());
     finalOptimizer.setModule(getModule());
     finalOptimizer.shrink = getPassRunner()->options.shrinkLevel > 0;
+    finalOptimizer.neverUnconditionalize = neverUnconditionalize;
+
     finalOptimizer.walkFunction(func);
     if (finalOptimizer.needUniqify) {
       wasm::UniqueNameMapper::uniquify(func->body);
+    }
+    if (finalOptimizer.refinalize) {
+      ReFinalize().walkFunctionInModule(func, getModule());
     }
   }
 };

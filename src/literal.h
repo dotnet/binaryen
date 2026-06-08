@@ -19,9 +19,8 @@
 
 #include <array>
 #include <iostream>
-#include <variant>
 
-#include "compiler-support.h"
+#include "support/bits.h"
 #include "support/hash.h"
 #include "support/name.h"
 #include "support/small_vector.h"
@@ -30,8 +29,12 @@
 
 namespace wasm {
 
+class Module;
 class Literals;
+struct FuncData;
 struct GCData;
+struct ExnData;
+struct ContData;
 
 class Literal {
   // store only integers, whose bits are deterministic. floats
@@ -40,26 +43,40 @@ class Literal {
     // Note: i31 is stored in the |i32| field, with the lower 31 bits containing
     // the value if there is one, and the highest bit containing whether there
     // is a value. Thus, a null is |i32 === 0|.
+    //
+    // Externref payloads, which serve to differentiate different external
+    // references but are otherwise meaningless, are also stored in the i32
+    // field, with their low bit set to differentiate an externref with a
+    // payload from an externalized internal reference, which uses the gcData
+    // field instead. This scheme supports 31 bits of payload for externrefs,
+    // which should be sufficient for spec test and fuzzing purposes, but if we
+    // need more bits we can use the i64 field instead. This scheme also depends
+    // on the low bit of a shared_ptr not being used.
     int32_t i32;
     int64_t i64;
     uint8_t v128[16];
-    // funcref function name. `isNull()` indicates a `null` value.
-    Name func;
+    // A reference to Function data.
+    std::shared_ptr<FuncData> funcData;
     // A reference to GC data, either a Struct or an Array. For both of those we
     // store the referred data as a Literals object (which is natural for an
     // Array, and for a Struct, is just the fields in order). The type is used
     // to indicate whether this is a Struct or an Array, and of what type. We
     // also use this to store String data, as it is similarly stored on the
-    // heap. For externrefs, the gcData is the same as for the corresponding
-    // internal references and the values are only differentiated by the type.
-    // Externalized i31 references have a gcData containing the internal i31
-    // reference as its sole value even though internal i31 references do not
-    // have a gcData.
+    // heap. For externalized or internalized references (including strings),
+    // gcData holds a single value, which is the wrapped internal or external
+    // reference.
     std::shared_ptr<GCData> gcData;
+    // A reference to Exn data.
+    std::shared_ptr<ExnData> exnData;
+    // A reference to a Continuation.
+    std::shared_ptr<ContData> contData;
   };
 
 public:
   // Type of the literal. Immutable because the literal's payload depends on it.
+  // For references to defined heap types, this is almost always an exact type.
+  // The exception is references to imported functions, since the function
+  // provided at instantiation time may have a subtype of the import type.
   const Type type;
 
   Literal() : v128(), type(Type::none) {}
@@ -80,12 +97,11 @@ public:
   explicit Literal(const std::array<Literal, 8>&);
   explicit Literal(const std::array<Literal, 4>&);
   explicit Literal(const std::array<Literal, 2>&);
-  explicit Literal(Name func, HeapType type)
-    : func(func), type(type, NonNullable) {
-    assert(type.isSignature());
-  }
+  explicit Literal(std::shared_ptr<FuncData> funcData, Type type);
   explicit Literal(std::shared_ptr<GCData> gcData, HeapType type);
-  explicit Literal(std::string string);
+  explicit Literal(std::shared_ptr<ExnData> exnData);
+  explicit Literal(std::shared_ptr<ContData> contData);
+  explicit Literal(std::string_view string);
   Literal(const Literal& other);
   Literal& operator=(const Literal& other);
   ~Literal();
@@ -96,6 +112,8 @@ public:
   // Whether this is GC data, that is, something stored on the heap (aside from
   // a null or i31). This includes structs, arrays, and also strings.
   bool isData() const { return type.isData(); }
+  bool isExn() const { return type.isExn(); }
+  bool isContinuation() const { return type.isContinuation(); }
   bool isString() const { return type.isString(); }
 
   bool isNull() const { return type.isNull(); }
@@ -205,7 +223,6 @@ public:
   }
 
   static Literal makeFromMemory(void* p, Type type);
-  static Literal makeFromMemory(void* p, const Field& field);
 
   static Literal makeSignedMin(Type type) {
     switch (type.getBasic()) {
@@ -240,12 +257,18 @@ public:
   static Literal makeNull(HeapType type) {
     return Literal(Type(type.getBottom(), Nullable));
   }
-  static Literal makeFunc(Name func, HeapType type) {
-    return Literal(func, type);
-  }
-  static Literal makeI31(int32_t value) {
-    auto lit = Literal(Type(HeapType::i31, NonNullable));
+  // Simple way to create a function from the name and type, without a full
+  // FuncData.
+  static Literal makeFunc(Name func, Type type);
+  static Literal makeFunc(Name func, Module& wasm);
+  static Literal makeI31(int32_t value, Shareability share) {
+    auto lit = Literal(Type(HeapTypes::i31.getBasic(share), NonNullable));
     lit.i32 = value | 0x80000000;
+    return lit;
+  }
+  static Literal makeExtern(int32_t payload, Shareability share) {
+    auto lit = Literal(Type(HeapTypes::ext.getBasic(share), NonNullable));
+    lit.i32 = (payload << 1) | 1;
     return lit;
   }
   // Wasm has nondeterministic rules for NaN propagation in some operations. For
@@ -281,9 +304,17 @@ public:
     return i32;
   }
   int32_t geti31(bool signed_ = true) const {
-    assert(type.getHeapType() == HeapType::i31);
+    assert(type.getHeapType().isMaybeShared(HeapType::i31));
     // Cast to unsigned for the left shift to avoid undefined behavior.
     return signed_ ? int32_t((uint32_t(i32) << 1)) >> 1 : (i32 & 0x7fffffff);
+  }
+  bool hasExternPayload() const {
+    assert(type.getHeapType().isMaybeShared(HeapType::ext));
+    return (i32 & 1) == 1;
+  }
+  int32_t getExternPayload() const {
+    assert(hasExternPayload());
+    return int32_t(uint32_t(i32) >> 1);
   }
   int64_t geti64() const {
     assert(type == Type::i64);
@@ -298,11 +329,11 @@ public:
     return bit_cast<double>(i64);
   }
   std::array<uint8_t, 16> getv128() const;
-  Name getFunc() const {
-    assert(type.isFunction() && !func.isNull());
-    return func;
-  }
+  Name getFunc() const;
+  std::shared_ptr<FuncData> getFuncData() const;
   std::shared_ptr<GCData> getGCData() const;
+  std::shared_ptr<ExnData> getExnData() const;
+  std::shared_ptr<ContData> getContData() const;
 
   // careful!
   int32_t* geti32Ptr() {
@@ -347,6 +378,8 @@ public:
   bool operator!=(const Literal& other) const;
 
   bool isNaN();
+  bool isCanonicalNaN();
+  bool isArithmeticNaN();
 
   static uint32_t NaNPayload(float f);
   static uint64_t NaNPayload(double f);
@@ -369,13 +402,18 @@ public:
   Literal extendS32() const;
   Literal wrapToI32() const;
 
+  Literal convertSIToF16() const;
+  Literal convertUIToF16() const;
   Literal convertSIToF32() const;
   Literal convertUIToF32() const;
   Literal convertSIToF64() const;
   Literal convertUIToF64() const;
+  Literal convertF32ToF16() const;
 
+  Literal truncSatToSI16() const;
   Literal truncSatToSI32() const;
   Literal truncSatToSI64() const;
+  Literal truncSatToUI16() const;
   Literal truncSatToUI32() const;
   Literal truncSatToUI64() const;
 
@@ -433,8 +471,8 @@ public:
 
   // Fused multiply add and subtract.
   // Computes this + (left * right) to infinite precision then round once.
-  Literal fma(const Literal& left, const Literal& right) const;
-  Literal fms(const Literal& left, const Literal& right) const;
+  Literal madd(const Literal& left, const Literal& right) const;
+  Literal nmadd(const Literal& left, const Literal& right) const;
 
   std::array<Literal, 16> getLanesSI8x16() const;
   std::array<Literal, 16> getLanesUI8x16() const;
@@ -442,6 +480,7 @@ public:
   std::array<Literal, 8> getLanesUI16x8() const;
   std::array<Literal, 4> getLanesI32x4() const;
   std::array<Literal, 2> getLanesI64x2() const;
+  std::array<Literal, 8> getLanesF16x8() const;
   std::array<Literal, 4> getLanesF32x4() const;
   std::array<Literal, 2> getLanesF64x2() const;
 
@@ -461,6 +500,9 @@ public:
   Literal splatI64x2() const;
   Literal extractLaneI64x2(uint8_t index) const;
   Literal replaceLaneI64x2(const Literal& other, uint8_t index) const;
+  Literal splatF16x8() const;
+  Literal extractLaneF16x8(uint8_t index) const;
+  Literal replaceLaneF16x8(const Literal& other, uint8_t index) const;
   Literal splatF32x4() const;
   Literal extractLaneF32x4(uint8_t index) const;
   Literal replaceLaneF32x4(const Literal& other, uint8_t index) const;
@@ -503,6 +545,12 @@ public:
   Literal gtSI64x2(const Literal& other) const;
   Literal leSI64x2(const Literal& other) const;
   Literal geSI64x2(const Literal& other) const;
+  Literal eqF16x8(const Literal& other) const;
+  Literal neF16x8(const Literal& other) const;
+  Literal ltF16x8(const Literal& other) const;
+  Literal gtF16x8(const Literal& other) const;
+  Literal leF16x8(const Literal& other) const;
+  Literal geF16x8(const Literal& other) const;
   Literal eqF32x4(const Literal& other) const;
   Literal neF32x4(const Literal& other) const;
   Literal ltF32x4(const Literal& other) const;
@@ -581,6 +629,7 @@ public:
   Literal dotSI8x16toI16x8(const Literal& other) const;
   Literal dotUI8x16toI16x8(const Literal& other) const;
   Literal dotSI16x8toI32x4(const Literal& other) const;
+  Literal dotSI8x16toI16x8Add(const Literal& left, const Literal& right) const;
   Literal extMulLowSI32x4(const Literal& other) const;
   Literal extMulHighSI32x4(const Literal& other) const;
   Literal extMulLowUI32x4(const Literal& other) const;
@@ -599,6 +648,21 @@ public:
   Literal extMulHighSI64x2(const Literal& other) const;
   Literal extMulLowUI64x2(const Literal& other) const;
   Literal extMulHighUI64x2(const Literal& other) const;
+  Literal absF16x8() const;
+  Literal negF16x8() const;
+  Literal sqrtF16x8() const;
+  Literal addF16x8(const Literal& other) const;
+  Literal subF16x8(const Literal& other) const;
+  Literal mulF16x8(const Literal& other) const;
+  Literal divF16x8(const Literal& other) const;
+  Literal minF16x8(const Literal& other) const;
+  Literal maxF16x8(const Literal& other) const;
+  Literal pminF16x8(const Literal& other) const;
+  Literal pmaxF16x8(const Literal& other) const;
+  Literal ceilF16x8() const;
+  Literal floorF16x8() const;
+  Literal truncF16x8() const;
+  Literal nearestF16x8() const;
   Literal absF32x4() const;
   Literal negF32x4() const;
   Literal sqrtF32x4() const;
@@ -659,14 +723,29 @@ public:
   Literal truncSatZeroUToI32x4() const;
   Literal demoteZeroToF32x4() const;
   Literal promoteLowToF64x2() const;
+  Literal promoteLowF16x8ToF32x4() const;
+  Literal truncSatToSI16x8() const;
+  Literal truncSatToUI16x8() const;
+  Literal convertSToF16x8() const;
+  Literal convertUToF16x8() const;
   Literal swizzleI8x16(const Literal& other) const;
-  Literal relaxedFmaF32x4(const Literal& left, const Literal& right) const;
-  Literal relaxedFmsF32x4(const Literal& left, const Literal& right) const;
-  Literal relaxedFmaF64x2(const Literal& left, const Literal& right) const;
-  Literal relaxedFmsF64x2(const Literal& left, const Literal& right) const;
+  Literal maddF16x8(const Literal& left, const Literal& right) const;
+  Literal nmaddF16x8(const Literal& left, const Literal& right) const;
+  Literal relaxedMaddF32x4(const Literal& left, const Literal& right) const;
+  Literal relaxedNmaddF32x4(const Literal& left, const Literal& right) const;
+  Literal relaxedMaddF64x2(const Literal& left, const Literal& right) const;
+  Literal relaxedNmaddF64x2(const Literal& left, const Literal& right) const;
 
   Literal externalize() const;
   Literal internalize() const;
+
+  // Internalize an externalized value or externalize an internalized value,
+  // otherwise return the literal unmodified.
+  Literal unwrap() const;
+
+  // Get the JS prototype configured via this struct's descriptor, if it exists,
+  // or null. Assumes this is a reference value.
+  Literal getJSPrototype() const;
 
 private:
   Literal addSatSI8(const Literal& other) const;
@@ -721,13 +800,15 @@ std::ostream& operator<<(std::ostream& o, wasm::Literals literals);
 // A GC Struct, Array, or String is a set of values with a type saying how it
 // should be interpreted.
 struct GCData {
-  // The type of this struct, array, or string.
-  HeapType type;
-
   // The element or field values.
   Literals values;
 
-  GCData(HeapType type, Literals values) : type(type), values(values) {}
+  // The descriptor, if it exists, or null.
+  Literal desc;
+
+  GCData(Literals&& values,
+         const Literal& desc = Literal::makeNull(HeapType::none))
+    : values(std::move(values)), desc(desc) {}
 };
 
 } // namespace wasm
@@ -752,7 +833,8 @@ template<> struct hash<wasm::Literal> {
           return digest;
         case wasm::Type::v128:
           uint64_t chunks[2];
-          memcpy(&chunks, a.getv128Ptr(), 16);
+          chunks[0] = wasm::Bits::readLE<uint64_t>(a.getv128Ptr());
+          chunks[1] = wasm::Bits::readLE<uint64_t>(&a.getv128Ptr()[8]);
           wasm::rehash(digest, chunks[0]);
           wasm::rehash(digest, chunks[1]);
           return digest;
@@ -768,8 +850,17 @@ template<> struct hash<wasm::Literal> {
         wasm::rehash(digest, a.getFunc());
         return digest;
       }
-      if (a.type.getHeapType() == wasm::HeapType::i31) {
+      auto type = a.type.getHeapType();
+      if (type.isMaybeShared(wasm::HeapType::i31)) {
         wasm::rehash(digest, a.geti31(true));
+        return digest;
+      }
+      if (type.isMaybeShared(wasm::HeapType::any)) {
+        // This may be an extern string that was internalized to |any|. Undo
+        // that to get the actual value. (Rehash here with the existing digest,
+        // which contains the |any| type, so that the final hash takes into
+        // account the fact that it was internalized.)
+        wasm::rehash(digest, (*this)(a.externalize()));
         return digest;
       }
       if (a.type.isString()) {
@@ -781,7 +872,8 @@ template<> struct hash<wasm::Literal> {
         return digest;
       }
       // other non-null reference type literals cannot represent concrete
-      // values, i.e. there is no concrete anyref or eqref other than null.
+      // values, i.e. there is no concrete anyref or eqref other than null and
+      // internalized strings.
       WASM_UNREACHABLE("unexpected type");
     }
     WASM_UNREACHABLE("unexpected type");

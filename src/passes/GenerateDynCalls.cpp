@@ -18,7 +18,7 @@
 // Create `dynCall` helper functions used by emscripten.  These allow JavaScript
 // to call back into WebAssembly given a function pointer (table index). These
 // are used primarily to implement the `invoke` functions which in turn are used
-// to implment exceptions handling and setjmp/longjmp.  Creates one for each
+// to implement exceptions handling and setjmp/longjmp.  Creates one for each
 // signature in the indirect function table.
 //
 
@@ -61,7 +61,7 @@ struct GenerateDynCalls : public WalkerPass<PostWalker<GenerateDynCalls>> {
       std::vector<Name> tableSegmentData;
       ElementUtils::iterElementSegmentFunctionNames(
         it->get(), [&](Name name, Index) {
-          generateDynCallThunk(wasm->getFunction(name)->type);
+          generateDynCallThunk(wasm->getFunction(name)->type.getHeapType());
         });
     }
   }
@@ -70,7 +70,7 @@ struct GenerateDynCalls : public WalkerPass<PostWalker<GenerateDynCalls>> {
     // Generate dynCalls for invokes
     if (func->imported() && func->module == ENV &&
         func->base.startsWith("invoke_")) {
-      Signature sig = func->type.getSignature();
+      Signature sig = func->type.getHeapType().getSignature();
       // The first parameter is a pointer to the original function that's called
       // by the invoke, so skip it
       std::vector<Type> newParams(sig.params.begin() + 1, sig.params.end());
@@ -110,10 +110,7 @@ static void exportFunction(Module& wasm, Name name, bool must_export) {
   if (wasm.getExportOrNull(name)) {
     return; // Already exported
   }
-  auto exp = new Export;
-  exp->name = exp->value = name;
-  exp->kind = ExternalKind::Function;
-  wasm.addExport(exp);
+  wasm.addExport(new Export(name, ExternalKind::Function, name));
 }
 
 void GenerateDynCalls::generateDynCallThunk(HeapType funcType) {
@@ -140,30 +137,37 @@ void GenerateDynCalls::generateDynCallThunk(HeapType funcType) {
   }
   std::vector<NameType> namedParams;
   std::vector<Type> params;
-  namedParams.emplace_back("fptr", Type::i32); // function pointer param
-  params.push_back(Type::i32);
-  int p = 0;
-  for (const auto& param : sig.params) {
-    namedParams.emplace_back(std::to_string(p++), param);
-    params.push_back(param);
-  }
-  auto f = builder.makeFunction(
-    name, std::move(namedParams), Signature(Type(params), sig.results), {});
-  Expression* fptr = builder.makeLocalGet(0, Type::i32);
-  std::vector<Expression*> args;
-  Index i = 0;
-  for (const auto& param : sig.params) {
-    args.push_back(builder.makeLocalGet(++i, param));
-  }
   if (wasm->tables.empty()) {
     // Add an imported table in exactly the same manner as the LLVM wasm backend
     // would add one.
     auto* table = wasm->addTable(Builder::makeTable(Name::fromInt(0)));
     table->module = ENV;
     table->base = "__indirect_function_table";
+    table->addressType = wasm->memories[0]->addressType;
   }
-  f->body =
-    builder.makeCallIndirect(wasm->tables[0]->name, fptr, args, funcType);
+  auto& table = wasm->tables[0];
+  namedParams.emplace_back("fptr",
+                           table->addressType); // function pointer param
+  params.push_back(table->addressType);
+  int p = 0;
+  for (const auto& param : sig.params) {
+    namedParams.emplace_back(std::to_string(p++), param);
+    params.push_back(param);
+  }
+  auto f = builder.makeFunction(
+    name,
+    std::move(namedParams),
+    Type(Signature(Type(params), sig.results), NonNullable, Exact),
+    {},
+    nullptr);
+  f->hasExplicitName = true;
+  Expression* fptr = builder.makeLocalGet(0, table->addressType);
+  std::vector<Expression*> args;
+  Index i = 0;
+  for (const auto& param : sig.params) {
+    args.push_back(builder.makeLocalGet(++i, param));
+  }
+  f->body = builder.makeCallIndirect(table->name, fptr, args, funcType);
 
   wasm->addFunction(std::move(f));
   exportFunction(*wasm, name, true);

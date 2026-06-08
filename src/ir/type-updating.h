@@ -21,6 +21,8 @@
 #include "ir/module-utils.h"
 #include "support/insert_ordered.h"
 #include "wasm-traversal.h"
+#include "wasm-type-shape.h"
+#include "wasm-type.h"
 
 namespace wasm {
 
@@ -79,7 +81,7 @@ struct TypeUpdater
     } else {
       BranchUtils::operateOnScopeNameUses(curr, [&](Name& name) {
         // ensure info exists, discoverBreaks can then fill it
-        blockInfos[name];
+        blockInfos.try_emplace(name);
       });
     }
     // add a break to the info, for break and switch
@@ -344,7 +346,17 @@ struct TypeUpdater
 // made while doing so.
 class GlobalTypeRewriter {
 public:
+  using PredecessorGraph =
+    std::vector<std::pair<HeapType, SmallVector<HeapType, 1>>>;
+
   Module& wasm;
+
+  // The module's types and their visibilities.
+  InsertOrderedMap<HeapType, ModuleUtils::HeapTypeInfo> typeInfo;
+
+  // The shapes of public rec groups, so we can be sure that the rewritten
+  // private types do not conflict with public types.
+  UniqueRecGroups publicGroups;
 
   GlobalTypeRewriter(Module& wasm);
   virtual ~GlobalTypeRewriter() {}
@@ -352,6 +364,9 @@ public:
   // Main entry point. This performs the entire process of creating new heap
   // types and calling the hooks below, then applies the new types throughout
   // the module.
+  //
+  // This only operates on private types (so as not to modify the module's
+  // external ABI).
   void update();
 
   using TypeMap = std::unordered_map<HeapType, HeapType>;
@@ -364,6 +379,18 @@ public:
   // not appear, it is mapped to itself.
   void mapTypes(const TypeMap& oldToNewTypes);
 
+  // Users of `mapTypes` may want to update the type names according to their
+  // mapping. This is not done automatically in `mapTypes` because other users
+  // may want the names to reflect that types have been replaced. Do the same
+  // mapping for recorded type indices.
+  void mapTypeNamesAndIndices(const TypeMap& oldToNewTypes);
+
+  // Given the predecessor graph of the types to be rebuilt, return a list of
+  // the types in the order in which they will be rebuilt. Users can override
+  // this to inject placeholders for extra types or use custom logic to sort the
+  // types.
+  virtual std::vector<HeapType> getSortedTypes(PredecessorGraph preds);
+
   // Subclasses can implement these methods to modify the new set of types that
   // we map to. By default, we simply copy over the types, and these functions
   // are the hooks to apply changes through. The methods receive as input the
@@ -371,6 +398,7 @@ public:
   // used to define the new type in the TypeBuilder.
   virtual void modifyStruct(HeapType oldType, Struct& struct_) {}
   virtual void modifyArray(HeapType oldType, Array& array) {}
+  virtual void modifyContinuation(HeapType oldType, Continuation& sig) {}
   virtual void modifySignature(HeapType oldType, Signature& sig) {}
 
   // This additional hook is called after modify* and other operations, and
@@ -392,6 +420,7 @@ public:
   // so that they can use a proper temp type of the TypeBuilder while modifying
   // things.
   Type getTempType(Type type);
+  HeapType getTempHeapType(HeapType type);
   Type getTempTupleType(Tuple tuple);
 
   using SignatureUpdates = std::unordered_map<HeapType, Signature>;
@@ -423,15 +452,13 @@ public:
   }
 
 protected:
+  // Return the graph matching each private type to its private predecessors.
+  PredecessorGraph getPrivatePredecessors();
+
   // Builds new types after updating their contents using the hooks below and
   // returns a map from the old types to the modified types. Used internally in
   // update().
-  //
-  // This only operates on private types (so as not to modify the module's
-  // external ABI). It takes as a parameter a list of public types to consider
-  // private, which allows more flexibility.
-  TypeMap
-  rebuildTypes(const std::vector<HeapType>& additionalPrivateTypes = {});
+  TypeMap rebuildTypes(std::vector<HeapType> types);
 
 private:
   TypeBuilder typeBuilder;
@@ -446,17 +473,13 @@ public:
 
   const TypeUpdates& mapping;
 
-  std::unordered_map<HeapType, Signature> newSignatures;
-
   TypeMapper(Module& wasm, const TypeUpdates& mapping)
     : GlobalTypeRewriter(wasm), mapping(mapping) {}
 
-  // As rebuildTypes, this can take an optional set of additional types to
-  // consider private (and therefore to modify).
-  void map(const std::vector<HeapType>& additionalPrivateTypes = {}) {
+  void map() {
     // Update the internals of types (struct fields, signatures, etc.) to
     // refer to the merged types.
-    auto newMapping = rebuildTypes(additionalPrivateTypes);
+    auto newMapping = rebuildTypes(getSortedTypes(getPrivatePredecessors()));
 
     // Compose the user-provided mapping from old types to other old types with
     // the new mapping from old types to new types. `newMapping` will become
@@ -476,16 +499,19 @@ public:
     mapTypes(newMapping);
   }
 
+  HeapType getNewHeapType(HeapType type) {
+    auto iter = mapping.find(type);
+    if (iter != mapping.end()) {
+      type = iter->second;
+    }
+    return getTempHeapType(type);
+  }
+
   Type getNewType(Type type) {
     if (!type.isRef()) {
       return type;
     }
-    auto heapType = type.getHeapType();
-    auto iter = mapping.find(heapType);
-    if (iter != mapping.end()) {
-      return getTempType(Type(iter->second, type.getNullability()));
-    }
-    return getTempType(type);
+    return getTempType(type.with(getNewHeapType(type.getHeapType())));
   }
 
   void modifyStruct(HeapType oldType, Struct& struct_) override {
@@ -498,6 +524,10 @@ public:
   }
   void modifyArray(HeapType oldType, Array& array) override {
     array.element.type = getNewType(oldType.getArray().element.type);
+  }
+  void modifyContinuation(HeapType oldType,
+                          Continuation& continuation) override {
+    continuation.type = getNewHeapType(oldType.getContinuation().type);
   }
   void modifySignature(HeapType oldSignatureType, Signature& sig) override {
     auto getUpdatedTypeList = [&](Type type) {
@@ -526,10 +556,6 @@ public:
 
 namespace TypeUpdating {
 
-// Checks whether a type is valid as a local, or whether
-// handleNonDefaultableLocals() can handle it if not.
-bool canHandleAsLocal(Type type);
-
 // Finds non-nullable locals, which are currently not supported, and handles
 // them. Atm this turns them into nullable ones, and adds ref.as_non_null on
 // their uses (which keeps the type of the users identical).
@@ -548,11 +574,11 @@ Expression* fixLocalGet(LocalGet* get, Module& wasm);
 // Applies new types of parameters to a function. This does all the necessary
 // changes aside from altering the function type, which the caller is expected
 // to do after we run (the caller might simply change the type, but in other
-// cases the caller  might be rewriting the types and need to preserve their
-// identity in terms of nominal typing, so we don't change the type here). The
-// specific things this function does are to update the types of local.get/tee
-// operations, refinalize, etc., basically all operations necessary to ensure
-// validation with the new types.
+// cases the caller might be rewriting the types and need to preserve their
+// identities, so we don't change the type here). The specific things this
+// function does are to update the types of local.get/tee operations,
+// refinalize, etc., basically all operations necessary to ensure validation
+// with the new types.
 //
 // While doing so, we can either update or not update the types of local.get and
 // local.tee operations. (We do not update them here if we'll be doing an update

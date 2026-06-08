@@ -17,6 +17,8 @@
 #ifndef wasm_tools_wasm_split_options_h
 #define wasm_tools_wasm_split_options_h
 
+#include <optional>
+
 #include "tools/tool-options.h"
 
 namespace wasm {
@@ -26,6 +28,7 @@ const std::string DEFAULT_PROFILE_EXPORT("__write_profile");
 struct WasmSplitOptions : ToolOptions {
   enum class Mode : unsigned {
     Split,
+    MultiSplit,
     Instrument,
     MergeProfiles,
     PrintProfile,
@@ -41,12 +44,13 @@ struct WasmSplitOptions : ToolOptions {
   };
   StorageKind storageKind = StorageKind::InGlobals;
 
+  bool usePlaceholders = true;
   bool unescape = false;
   bool verbose = false;
   bool emitBinary = true;
   bool symbolMap = false;
   bool placeholderMap = false;
-  bool jspi = false;
+  bool stripDebug = false;
 
   // TODO: Remove this. See the comment in wasm-binary.h.
   bool emitModuleNames = false;
@@ -56,16 +60,21 @@ struct WasmSplitOptions : ToolOptions {
 
   std::set<Name> keepFuncs;
   std::set<Name> splitFuncs;
+  bool hasKeepFuncs = false;
+  bool hasSplitFuncs = false;
 
   std::vector<std::string> inputFiles;
   std::string output;
   std::string primaryOutput;
   std::string secondaryOutput;
 
-  std::string importNamespace;
-  std::string placeholderNamespace;
-  std::string secondaryMemoryName;
-  std::string exportPrefix;
+  std::optional<std::string> importNamespace;
+  std::optional<std::string> placeholderNamespacePrefix;
+  std::optional<std::string> secondaryMemoryName;
+  std::optional<std::string> exportPrefix;
+
+  std::string manifestFile;
+  std::string outPrefix;
 
   // A hack to ensure the split and instrumented modules have the same table
   // size when using Emscripten's SPLIT_MODULE mode with dynamic linking. TODO:

@@ -37,7 +37,16 @@
 #include "support/permutations.h"
 #include "support/sparse_square_matrix.h"
 #include "wasm.h"
-#ifdef CFG_PROFILE
+
+#ifndef CFG_PROFILE
+#define CFG_PROFILE 0
+#endif
+
+#ifndef CFG_LEARN_DEBUG
+#define CFG_LEARN_DEBUG 0
+#endif
+
+#if CFG_PROFILE
 #include "support/timing.h"
 #endif
 
@@ -98,17 +107,17 @@ struct CoalesceLocals
     interferences.set(low, high, true);
   }
 
-  void unInterfere(Index i, Index j) {
-    interferences.set(std::min(i, j), std::max(i, j), false);
-  }
-
   bool interferes(Index i, Index j) {
     return interferences.get(std::min(i, j), std::max(i, j));
   }
+
+private:
+  // In some cases we need to refinalize at the end.
+  bool refinalize = false;
 };
 
 void CoalesceLocals::doWalkFunction(Function* func) {
-  super::doWalkFunction(func);
+  Super::doWalkFunction(func);
   // prioritize back edges
   increaseBackEdgePriorities();
   // use liveness to find interference
@@ -118,6 +127,10 @@ void CoalesceLocals::doWalkFunction(Function* func) {
   pickIndices(indices);
   // apply indices
   applyIndices(indices, func->body);
+
+  if (refinalize) {
+    ReFinalize().walkFunctionInModule(func, getModule());
+  }
 }
 
 // A copy on a backedge can be especially costly, forcing us to branch just to
@@ -164,7 +177,7 @@ void CoalesceLocals::calculateInterferences() {
   auto* func = getFunction();
 
   for (auto& curr : basicBlocks) {
-    if (liveBlocks.count(curr.get()) == 0) {
+    if (!liveBlocks.contains(curr.get())) {
       continue; // ignore dead blocks
     }
 
@@ -563,21 +576,13 @@ void CoalesceLocals::applyIndices(std::vector<Index>& indices,
             drop->value = value;
             *action.origin = drop;
           } else {
-            // This is a tee, and so, as earlier in this function, we must be
-            // careful of subtyping. Above we simply avoided the problem by
-            // leaving it for other passes, but we do want to remove ineffective
-            // stores - nothing else does that as well as this pass. Instead,
-            // create a block to cast back to the original type, which avoids
-            // changing types here, and leave it to other passes to refine types
-            // and remove the block.
             auto originalType = (*action.origin)->type;
             if (originalType != set->value->type) {
-              (*action.origin) =
-                Builder(*getModule()).makeBlock({set->value}, originalType);
-            } else {
-              // No special handling, just use the value.
-              *action.origin = set->value;
+              // The value had a more refined type, which we must propagate at
+              // the end.
+              refinalize = true;
             }
+            *action.origin = set->value;
           }
           continue;
         }
@@ -680,7 +685,7 @@ void CoalesceLocalsWithLearning::pickIndices(std::vector<Index>& indices) {
                      noise);
       }
       calculateFitness(ret);
-#ifdef CFG_LEARN_DEBUG
+#if CFG_LEARN_DEBUG
       order->dump("new rando");
 #endif
       return ret;
@@ -711,7 +716,7 @@ void CoalesceLocalsWithLearning::pickIndices(std::vector<Index>& indices) {
         }
       }
       calculateFitness(ret);
-#ifdef CFG_LEARN_DEBUG
+#if CFG_LEARN_DEBUG
       ret->dump("new mixture");
 #endif
       return ret;
@@ -723,7 +728,7 @@ void CoalesceLocalsWithLearning::pickIndices(std::vector<Index>& indices) {
     bool first = true;
   };
 
-#ifdef CFG_LEARN_DEBUG
+#if CFG_LEARN_DEBUG
   std::cout << "[learning for " << getFunction()->name << "]\n";
 #endif
   auto numVars = this->getFunction()->getNumVars();
@@ -731,7 +736,7 @@ void CoalesceLocalsWithLearning::pickIndices(std::vector<Index>& indices) {
     std::min(Index(numVars * (numVars - 1)), Index(20));
   Generator generator(this);
   GeneticLearner<Order, double, Generator> learner(generator, GENERATION_SIZE);
-#ifdef CFG_LEARN_DEBUG
+#if CFG_LEARN_DEBUG
   learner.getBest()->dump("first best");
 #endif
   // keep working while we see improvement
@@ -743,11 +748,11 @@ void CoalesceLocalsWithLearning::pickIndices(std::vector<Index>& indices) {
       break; // unlikely we can improve
     }
     oldBest = newBest;
-#ifdef CFG_LEARN_DEBUG
+#if CFG_LEARN_DEBUG
     learner.getBest()->dump("current best");
 #endif
   }
-#ifdef CFG_LEARN_DEBUG
+#if CFG_LEARN_DEBUG
   learner.getBest()->dump("the best");
 #endif
   // TODO: cache indices in Orders, at the cost of more memory?

@@ -15,24 +15,56 @@
  */
 
 #include "ir/properties.h"
+#include "ir/intrinsics.h"
 #include "wasm-traversal.h"
 
 namespace wasm::Properties {
 
-bool isGenerative(Expression* curr, FeatureSet features) {
-  // Practically no wasm instructions are generative. Exceptions occur only in
-  // GC atm.
-  if (!features.hasGC()) {
-    return false;
-  }
+namespace {
 
-  struct Scanner : public PostWalker<Scanner> {
-    bool generative = false;
-    void visitStructNew(StructNew* curr) { generative = true; }
-    void visitArrayNew(ArrayNew* curr) { generative = true; }
-    void visitArrayNewFixed(ArrayNewFixed* curr) { generative = true; }
-  } scanner;
+struct GenerativityScanner : public PostWalker<GenerativityScanner> {
+  bool generative = false;
+
+  void visitCall(Call* curr) {
+    // If the called function is idempotent, then it does not generate new
+    // values on each call.
+    if (Intrinsics(*getModule())
+          .getCallAnnotations(curr, getFunction())
+          .idempotent) {
+      return;
+    }
+    // TODO: We could look at the called function's contents to see if it is
+    //       generative. To do that we'd need to compute generativity like we
+    //       compute global effects (we can't just peek from here, as the
+    //       other function might be modified in parallel).
+    generative = true;
+  }
+  void visitCallIndirect(CallIndirect* curr) { generative = true; }
+  void visitCallRef(CallRef* curr) { generative = true; }
+  void visitStructNew(StructNew* curr) { generative = true; }
+  void visitArrayNew(ArrayNew* curr) { generative = true; }
+  void visitArrayNewData(ArrayNewData* curr) { generative = true; }
+  void visitArrayNewElem(ArrayNewElem* curr) { generative = true; }
+  void visitArrayNewFixed(ArrayNewFixed* curr) { generative = true; }
+  void visitContNew(ContNew* curr) { generative = true; }
+};
+
+} // anonymous namespace
+
+bool isGenerative(Expression* curr, Function* func, Module& wasm) {
+  GenerativityScanner scanner;
+  scanner.setFunction(func);
+  scanner.setModule(&wasm);
   scanner.walk(curr);
+  return scanner.generative;
+}
+
+// As above, but only checks |curr| and not children.
+bool isShallowlyGenerative(Expression* curr, Function* func, Module& wasm) {
+  GenerativityScanner scanner;
+  scanner.setFunction(func);
+  scanner.setModule(&wasm);
+  scanner.visit(curr);
   return scanner.generative;
 }
 
@@ -46,7 +78,7 @@ static bool isValidInConstantExpression(Module& wasm, Expression* expr) {
   }
 
   if (auto* refAs = expr->dynCast<RefAs>()) {
-    if (refAs->op == ExternExternalize || refAs->op == ExternInternalize) {
+    if (refAs->op == ExternConvertAny || refAs->op == AnyConvertExtern) {
       return true;
     }
   }

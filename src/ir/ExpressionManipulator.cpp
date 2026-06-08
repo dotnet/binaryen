@@ -21,7 +21,7 @@ namespace wasm::ExpressionManipulator {
 
 Expression*
 flexibleCopy(Expression* original, Module& wasm, CustomCopier custom) {
-  // Perform the copy using a stack of tasks (avoiding recusion).
+  // Perform the copy using a stack of tasks (avoiding recursion).
   struct CopyTask {
     // The thing to copy.
     Expression* original;
@@ -62,9 +62,10 @@ flexibleCopy(Expression* original, Module& wasm, CustomCopier custom) {
 #define DELEGATE_FIELD_CHILD(id, field)                                        \
   tasks.push_back({castOriginal->field, &castCopy->field});
 
+// Iterate in reverse order here so we visit children in normal order.
 #define DELEGATE_FIELD_CHILD_VECTOR(id, field)                                 \
   castCopy->field.resize(castOriginal->field.size());                          \
-  for (Index i = 0; i < castOriginal->field.size(); i++) {                     \
+  for (auto i = int64_t(castOriginal->field.size()) - 1; i >= 0; i--) {        \
     tasks.push_back({castOriginal->field[i], &castCopy->field[i]});            \
   }
 

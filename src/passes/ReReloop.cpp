@@ -31,6 +31,10 @@
 #include "wasm-traversal.h"
 #include "wasm.h"
 
+#ifndef RERELOOP_DEBUG
+#define RERELOOP_DEBUG 0
+#endif
+
 namespace wasm {
 
 struct ReReloop final : public Pass {
@@ -235,7 +239,7 @@ struct ReReloop final : public Pass {
       }
       // the default may be among the targets, in which case, we can't add it
       // simply as it would be a duplicate, so create a temp block
-      if (targetValues.count(curr->default_) == 0) {
+      if (!targetValues.contains(curr->default_)) {
         parent.addSwitchBranch(
           before, parent.getBreakTarget(curr->default_), std::set<Index>());
       } else {
@@ -323,7 +327,7 @@ struct ReReloop final : public Pass {
         block->finalize();
       }
     }
-#ifdef RERELOOP_DEBUG
+#if RERELOOP_DEBUG
     std::cout << "rerelooping " << function->name << '\n';
     for (auto* block : relooper->Blocks) {
       std::cout << block << " block:\n" << block->Code << '\n';

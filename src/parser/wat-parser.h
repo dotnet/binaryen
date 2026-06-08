@@ -19,13 +19,158 @@
 
 #include <string_view>
 
+#include "parser/lexer.h"
 #include "support/result.h"
 #include "wasm.h"
 
 namespace wasm::WATParser {
 
 // Parse a single WAT module.
-Result<> parseModule(Module& wasm, std::string_view in);
+Result<> parseModule(Module& wasm,
+                     std::string_view in,
+                     std::optional<std::string> filename = std::nullopt);
+
+// Parse a single WAT module that may have other things after it, as in a wast
+// file.
+Result<> parseModule(Module& wasm, Lexer& lexer);
+
+// Similar to `parseModule`, parse the fields of a single WAT module (after the
+// initial module definition including its name) and stop at the ending right
+// paren.
+Result<> parseModuleBody(Module& wasm, Lexer& lexer);
+
+Result<Literal> parseConst(Lexer& lexer);
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+
+struct InvokeAction {
+  std::optional<Name> base;
+  Name name;
+  Literals args;
+};
+
+#pragma GCC diagnostic pop
+
+struct GetAction {
+  std::optional<Name> base;
+  Name name;
+};
+
+using Action = std::variant<InvokeAction, GetAction>;
+
+struct RefResult {
+  HeapType type;
+};
+
+struct NullRefResult {};
+
+enum class NaNKind { Canonical, Arithmetic };
+
+struct NaNResult {
+  NaNKind kind;
+  Type type;
+};
+
+using LaneResult = std::variant<Literal, NaNResult>;
+
+struct LaneResults {
+  enum class LaneType {
+    Int,
+    Float,
+  };
+  LaneResults(LaneType type, std::vector<LaneResult> lanes = {})
+    : type(type), lanes(std::move(lanes)) {}
+
+  LaneType type;
+  std::vector<LaneResult> lanes;
+};
+
+using ExpectedResult =
+  std::variant<Literal, NullRefResult, RefResult, NaNResult, LaneResults>;
+
+using ResultAlternatives = std::vector<ExpectedResult>;
+
+// The WAST spec states that `either`s maybe be nested arbitrarily e.g.
+// (either (either "a" "b") (either "a" "c"))
+// but we store this flattened since there's no way to tell the difference
+// anyway.
+using ExpectedResults = std::vector<ResultAlternatives>;
+
+struct AssertReturn {
+  Action action;
+  ExpectedResults expected;
+};
+
+enum class ActionAssertionType { Trap, Exhaustion, Exception, Suspension };
+
+struct AssertAction {
+  ActionAssertionType type;
+  Action action;
+};
+
+enum class QuotedModuleType { Text, Binary };
+
+struct QuotedModule {
+  QuotedModuleType type;
+  std::string module;
+};
+
+struct WASTModule {
+  bool isDefinition = false;
+  std::variant<QuotedModule, std::shared_ptr<Module>> module;
+};
+
+enum class ModuleAssertionType { Trap, Malformed, Invalid, Unlinkable };
+
+struct AssertModule {
+  ModuleAssertionType type;
+  WASTModule wasm;
+};
+
+using Assertion = std::variant<AssertReturn, AssertAction, AssertModule>;
+
+struct Register {
+  // TODO: Rename this to distinguish it from instanceName.
+  Name name;
+  std::optional<Name> instanceName = std::nullopt;
+};
+
+struct ModuleInstantiation {
+  // If not specified, instantiate the most recent module definition.
+  std::optional<Name> moduleName;
+
+  // If not specified, use the moduleName
+  std::optional<Name> instanceName;
+};
+
+struct ScriptEntry;
+using WASTScript = std::vector<ScriptEntry>;
+
+struct ThreadBlock {
+  Name name;
+  std::optional<Name> sharedModule;
+  WASTScript commands;
+};
+
+struct Wait {
+  Name thread;
+};
+
+using WASTCommand = std::variant<WASTModule,
+                                 Register,
+                                 Action,
+                                 Assertion,
+                                 ModuleInstantiation,
+                                 ThreadBlock,
+                                 Wait>;
+
+struct ScriptEntry {
+  WASTCommand cmd;
+  size_t line;
+};
+
+Result<WASTScript> parseScript(std::string_view in);
 
 } // namespace wasm::WATParser
 

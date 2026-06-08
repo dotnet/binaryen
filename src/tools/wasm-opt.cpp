@@ -34,7 +34,7 @@
 #include "wasm-binary.h"
 #include "wasm-interpreter.h"
 #include "wasm-io.h"
-#include "wasm-s-parser.h"
+#include "wasm-stack.h"
 #include "wasm-validator.h"
 #include "wasm2c-wrapper.h"
 
@@ -79,26 +79,43 @@ int main(int argc, const char* argv[]) {
   bool converge = false;
   bool fuzzExecBefore = false;
   bool fuzzExecAfter = false;
+  std::string fuzzExecSecond;
   std::string extraFuzzCommand;
   bool translateToFuzz = false;
   std::string initialFuzz;
   bool fuzzPasses = false;
   bool fuzzMemory = true;
   bool fuzzOOB = true;
+  bool fuzzPreserveImportsAndExports = false;
+  std::string fuzzImport;
   std::string emitSpecWrapper;
   std::string emitWasm2CWrapper;
   std::string inputSourceMapFilename;
   std::string outputSourceMapFilename;
   std::string outputSourceMapUrl;
-  bool experimentalNewEH = false;
+  bool emitExnref = false;
 
   const std::string WasmOptOption = "wasm-opt options";
 
-  OptimizationOptions options("wasm-opt", "Read, write, and optimize files");
+  OptimizationOptions options("wasm-opt",
+                              R"(Read, write, and optimize files.
+
+Example usage:
+
+  wasm-opt input.wasm -O3 -o output.wasm
+
+This reads an input wasm file, optimizes with -O3, and writes out the result.
+
+For more on how to optimize effectively, see
+
+  https://github.com/WebAssembly/binaryen/wiki/Optimizer-Cookbook
+  https://github.com/WebAssembly/binaryen/wiki/GC-Optimization-Guidebook
+                            )");
+
   options
     .add("--output",
          "-o",
-         "Output file (stdout if not specified)",
+         "Output file",
          WasmOptOption,
          Options::Arguments::One,
          [](Options* o, const std::string& argument) {
@@ -133,6 +150,15 @@ int main(int argc, const char* argv[]) {
          [&](Options* o, const std::string& arguments) {
            fuzzExecBefore = fuzzExecAfter = true;
          })
+    .add("--fuzz-exec-second",
+         "",
+         "A second module to link with the first, for fuzz-exec-before (only "
+         "before, as optimizations are not applied to it)",
+         WasmOptOption,
+         Options::Arguments::One,
+         [&](Options* o, const std::string& arguments) {
+           fuzzExecSecond = arguments;
+         })
     .add("--extra-fuzz-command",
          "-efc",
          "An extra command to run on the output before and after optimizing. "
@@ -161,8 +187,8 @@ int main(int argc, const char* argv[]) {
          })
     .add("--fuzz-passes",
          "-fp",
-         "Pick a random set of passes to run, useful for fuzzing. this depends "
-         "on translate-to-fuzz (it picks the passes from the input)",
+         "When doing translate-to-fuzz, pick a set of random passes from the "
+         "input to further shape the wasm",
          WasmOptOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& arguments) { fuzzPasses = true; })
@@ -178,6 +204,21 @@ int main(int argc, const char* argv[]) {
          WasmOptOption,
          Options::Arguments::Zero,
          [&](Options* o, const std::string& arguments) { fuzzOOB = false; })
+    .add("--fuzz-preserve-imports-exports",
+         "",
+         "don't add imports and exports in -ttf mode, and keep the start",
+         WasmOptOption,
+         Options::Arguments::Zero,
+         [&](Options* o, const std::string& arguments) {
+           fuzzPreserveImportsAndExports = true;
+         })
+    .add(
+      "--fuzz-import",
+      "",
+      "a module to use as an import in -ttf mode",
+      WasmOptOption,
+      Options::Arguments::One,
+      [&](Options* o, const std::string& arguments) { fuzzImport = arguments; })
     .add("--emit-spec-wrapper",
          "-esw",
          "Emit a wasm spec interpreter wrapper file that can run the wasm with "
@@ -220,12 +261,6 @@ int main(int argc, const char* argv[]) {
          [&outputSourceMapUrl](Options* o, const std::string& argument) {
            outputSourceMapUrl = argument;
          })
-    .add("--new-wat-parser",
-         "",
-         "Use the experimental new WAT parser",
-         WasmOptOption,
-         Options::Arguments::Zero,
-         [](Options*, const std::string&) { useNewWATParser = true; })
     .add_positional("INFILE",
                     Options::Arguments::One,
                     [](Options* o, const std::string& argument) {
@@ -233,19 +268,23 @@ int main(int argc, const char* argv[]) {
                     })
     .add("--experimental-new-eh",
          "",
+         "Deprecated; same as --emit-exnref",
+         WasmOptOption,
+         Options::Arguments::Zero,
+         [&emitExnref](Options*, const std::string&) { emitExnref = true; })
+    .add("--emit-exnref",
+         "",
          "After running all requested transformations / optimizations, "
          "translate the instruction to use the new EH instructions at the end. "
          "Depending on the optimization level specified, this may do some more "
          "post-translation optimizations.",
          WasmOptOption,
          Options::Arguments::Zero,
-         [&experimentalNewEH](Options*, const std::string&) {
-           experimentalNewEH = true;
-         });
+         [&emitExnref](Options*, const std::string&) { emitExnref = true; });
   options.parse(argc, argv);
 
   Module wasm;
-  options.applyFeatures(wasm);
+  options.applyOptionsBeforeParse(wasm);
 
   BYN_TRACE("reading...\n");
 
@@ -296,6 +335,8 @@ int main(int argc, const char* argv[]) {
                  "request for silly amounts of memory)";
     }
 
+    options.applyOptionsAfterParse(wasm);
+
     if (options.passOptions.validate) {
       if (!WasmValidator().validate(wasm, options.passOptions)) {
         exitOnInvalidWasm("error validating input");
@@ -303,12 +344,17 @@ int main(int argc, const char* argv[]) {
     }
   }
   if (translateToFuzz) {
-    TranslateToFuzzReader reader(wasm, options.extra["infile"]);
+    TranslateToFuzzReader reader(
+      wasm, options.extra["infile"], options.passOptions.closedWorld);
+    reader.setAllowMemory(fuzzMemory);
+    reader.setAllowOOB(fuzzOOB);
+    reader.setPreserveImportsAndExports(fuzzPreserveImportsAndExports);
+    if (!fuzzImport.empty()) {
+      reader.setImportedModule(fuzzImport);
+    }
     if (fuzzPasses) {
       reader.pickPasses(options);
     }
-    reader.setAllowMemory(fuzzMemory);
-    reader.setAllowOOB(fuzzOOB);
     reader.build();
     if (options.passOptions.validate) {
       if (!WasmValidator().validate(wasm, options.passOptions)) {
@@ -320,7 +366,16 @@ int main(int argc, const char* argv[]) {
 
   ExecutionResults results;
   if (fuzzExecBefore) {
-    results.get(wasm);
+    if (fuzzExecSecond.empty()) {
+      results.collect(wasm);
+    } else {
+      // Add the second module.
+      Module second;
+      second.features = wasm.features;
+      ModuleReader().read(fuzzExecSecond, second);
+
+      results.collect(wasm, &second);
+    }
   }
 
   if (emitSpecWrapper.size() > 0) {
@@ -338,9 +393,9 @@ int main(int argc, const char* argv[]) {
 
   std::string firstOutput;
 
-  if (extraFuzzCommand.size() > 0 && options.extra.count("output") > 0) {
+  if (extraFuzzCommand.size() > 0 && options.extra.contains("output")) {
     BYN_TRACE("writing binary before opts, for extra fuzz command...\n");
-    ModuleWriter writer;
+    ModuleWriter writer(options.passOptions);
     writer.setBinary(emitBinary);
     writer.setDebugInfo(options.passOptions.debugInfo);
     writer.write(wasm, options.extra["output"]);
@@ -348,11 +403,10 @@ int main(int argc, const char* argv[]) {
     std::cout << "[extra-fuzz-command first output:]\n" << firstOutput << '\n';
   }
 
-  bool translateToNewEH =
-    wasm.features.hasExceptionHandling() && experimentalNewEH;
+  bool translateToExnref = wasm.features.hasExceptionHandling() && emitExnref;
 
   if (!options.runningPasses()) {
-    if (!options.quiet && !translateToNewEH) {
+    if (!options.quiet && !translateToExnref) {
       std::cerr << "warning: no passes specified, not doing any work\n";
     }
   } else {
@@ -372,7 +426,7 @@ int main(int argc, const char* argv[]) {
       // size no longer decreasing.
       auto getSize = [&]() {
         BufferWithRandomAccess buffer;
-        WasmBinaryWriter writer(&wasm, buffer);
+        WasmBinaryWriter writer(&wasm, buffer, options.passOptions);
         writer.write();
         return buffer.size();
       };
@@ -389,17 +443,10 @@ int main(int argc, const char* argv[]) {
     }
   }
 
-  if (translateToNewEH) {
+  if (translateToExnref) {
     BYN_TRACE("translating to new EH instructions...\n");
     PassRunner runner(&wasm, options.passOptions);
-    runner.add("translate-to-new-eh");
-    // Perform Stack IR optimizations here, at the very end of the
-    // optimization pipeline.
-    if (options.passOptions.optimizeLevel >= 2 ||
-        options.passOptions.shrinkLevel >= 1) {
-      runner.addIfNoDWARFIssues("generate-stack-ir");
-      runner.addIfNoDWARFIssues("optimize-stack-ir");
-    }
+    runner.add("translate-to-exnref");
     runner.run();
     if (options.passOptions.validate) {
       bool valid = WasmValidator().validate(wasm, options.passOptions);
@@ -413,22 +460,39 @@ int main(int argc, const char* argv[]) {
     results.check(wasm);
   }
 
-  if (options.extra.count("output") == 0) {
+  if (options.passOptions.printStackIR) {
+    printStackIR(std::cout, &wasm, options.passOptions);
+  }
+
+  if (!options.extra.contains("output")) {
     if (!options.quiet) {
-      std::cerr << "warning: no output file specified, not emitting output\n";
+      bool printsToStdout = std::any_of(
+        options.passes.begin(),
+        options.passes.end(),
+        [](const OptimizationOptions::PassInfo& info) {
+          return info.name == "print" || info.name == "print-function-map";
+        });
+      if (!printsToStdout) {
+        std::cerr << "warning: no output file specified, not emitting output\n";
+      }
     }
+
+    flush_and_quick_exit(0);
     return 0;
   }
 
-  BYN_TRACE("writing...\n");
-  ModuleWriter writer;
-  writer.setBinary(emitBinary);
-  writer.setDebugInfo(options.passOptions.debugInfo);
-  if (outputSourceMapFilename.size()) {
-    writer.setSourceMapFilename(outputSourceMapFilename);
-    writer.setSourceMapUrl(outputSourceMapUrl);
+  // Ensure the destructor of ModuleWriter runs before quick_exit.
+  {
+    BYN_TRACE("writing...\n");
+    ModuleWriter writer(options.passOptions);
+    writer.setBinary(emitBinary);
+    writer.setDebugInfo(options.passOptions.debugInfo);
+    if (outputSourceMapFilename.size()) {
+      writer.setSourceMapFilename(outputSourceMapFilename);
+      writer.setSourceMapUrl(outputSourceMapUrl);
+    }
+    writer.write(wasm, options.extra["output"]);
   }
-  writer.write(wasm, options.extra["output"]);
 
   if (extraFuzzCommand.size() > 0) {
     auto secondOutput = runCommand(extraFuzzCommand);
@@ -437,5 +501,6 @@ int main(int argc, const char* argv[]) {
       Fatal() << "extra fuzz command output differs\n";
     }
   }
-  return 0;
+
+  flush_and_quick_exit(0);
 }

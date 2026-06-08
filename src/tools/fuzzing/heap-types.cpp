@@ -14,13 +14,13 @@
  * limitations under the License.
  */
 
+#include <cassert>
 #include <variant>
 
 #include "ir/gc-type-utils.h"
 #include "ir/subtypes.h"
-#include "support/insert_ordered.h"
+#include "tools/fuzzing.h"
 #include "tools/fuzzing/heap-types.h"
-#include "tools/fuzzing/parameters.h"
 
 namespace wasm {
 
@@ -31,6 +31,9 @@ struct HeapTypeGeneratorImpl {
   TypeBuilder& builder;
   std::vector<std::vector<Index>>& subtypeIndices;
   std::vector<std::optional<Index>> supertypeIndices;
+  std::vector<std::optional<Index>>& descriptorIndices;
+  std::vector<std::optional<Index>> describedIndices;
+  std::vector<size_t> descriptorChainLengths;
   Random& rand;
   FeatureSet features;
 
@@ -43,7 +46,9 @@ struct HeapTypeGeneratorImpl {
   struct SignatureKind {};
   struct StructKind {};
   struct ArrayKind {};
-  using HeapTypeKind = std::variant<SignatureKind, StructKind, ArrayKind>;
+  struct ContinuationKind {};
+  using HeapTypeKind =
+    std::variant<SignatureKind, StructKind, ArrayKind, ContinuationKind>;
   std::vector<HeapTypeKind> typeKinds;
 
   // For each type, the index one past the end of its recursion group, used to
@@ -54,105 +59,314 @@ struct HeapTypeGeneratorImpl {
   // The index of the type we are currently generating.
   Index index = 0;
 
+  FuzzParams params;
+
   HeapTypeGeneratorImpl(Random& rand, FeatureSet features, size_t n)
     : result{TypeBuilder(n),
              std::vector<std::vector<Index>>(n),
              std::vector<std::optional<Index>>(n)},
       builder(result.builder), subtypeIndices(result.subtypeIndices),
-      supertypeIndices(n), rand(rand), features(features) {
+      supertypeIndices(n), descriptorIndices(result.descriptorIndices),
+      describedIndices(n), descriptorChainLengths(n), rand(rand),
+      features(features) {
     // Set up the subtype relationships. Start with some number of root types,
     // then after that start creating subtypes of existing types. Determine the
-    // top-level kind of each type in advance so that we can appropriately use
-    // types we haven't constructed yet.
+    // top-level kind and shareability of each type in advance so that we can
+    // appropriately use types we haven't constructed yet.
     typeKinds.reserve(builder.size());
     supertypeIndices.reserve(builder.size());
-    Index numRoots = 1 + rand.upTo(builder.size());
-    for (Index i = 0; i < builder.size(); ++i) {
-      typeIndices.insert({builder[i], i});
-      // Everything is a subtype of itself.
-      subtypeIndices[i].push_back(i);
-      if (i < numRoots || rand.oneIn(2)) {
-        // This is a root type with no supertype. Choose a kind for this type.
-        typeKinds.emplace_back(generateHeapTypeKind());
-      } else {
-        // This is a subtype. Choose one of the previous types to be the
-        // supertype.
-        Index super = rand.upTo(i);
-        builder[i].subTypeOf(builder[super]);
-        supertypeIndices[i] = super;
-        subtypeIndices[super].push_back(i);
-        typeKinds.push_back(typeKinds[super]);
-      }
-    }
-
-    // Types without nontrivial subtypes may be marked final.
-    for (Index i = 0; i < builder.size(); ++i) {
-      builder[i].setOpen(subtypeIndices[i].size() > 1 || rand.oneIn(2));
-    }
-
-    // Initialize the recursion groups.
     recGroupEnds.reserve(builder.size());
-    // Create isorecursive recursion groups. Choose an expected group size
-    // uniformly at random, then create groups with random sizes on a geometric
-    // distribution based on that expected size.
-    size_t expectedSize = 1 + rand.upTo(builder.size());
-    Index groupStart = 0;
-    for (Index i = 0; i < builder.size(); ++i) {
-      if (i == builder.size() - 1 || rand.oneIn(expectedSize)) {
-        // End the old group and create a new group.
-        Index newGroupStart = i + 1;
-        builder.createRecGroup(groupStart, newGroupStart - groupStart);
-        for (Index j = groupStart; j < newGroupStart; ++j) {
-          recGroupEnds.push_back(newGroupStart);
-        }
-        groupStart = newGroupStart;
-      }
+
+    // The number of root types to generate before we start adding subtypes.
+    size_t numRoots = 1 + rand.upTo(builder.size());
+
+    // The mean expected size of the recursion groups.
+    size_t expectedGroupSize = 1 + rand.upTo(builder.size());
+
+    size_t i = 0;
+    while (i < builder.size()) {
+      i += planGroup(i, numRoots, expectedGroupSize);
     }
     assert(recGroupEnds.size() == builder.size());
 
+    populateTypes();
+  }
+
+  size_t planGroup(size_t start, size_t numRoots, size_t expectedGroupSize) {
+    size_t maxSize = builder.size() - start;
+    size_t size = 1;
+    // Generate the group size according to a geometric distribution.
+    for (; size < maxSize; ++size) {
+      if (rand.oneIn(expectedGroupSize)) {
+        break;
+      }
+    }
+    assert(start + size <= builder.size());
+    builder.createRecGroup(start, size);
+
+    // The indices of types that need descriptors and the total number of
+    // remaining descriptors we have committed to create in this group.
+    std::vector<Index> describees;
+    size_t numPlannedDescriptors = 0;
+
+    size_t end = start + size;
+    for (size_t i = start; i < end; ++i) {
+      recGroupEnds.push_back(end);
+      planType(i, numRoots, end - i, describees, numPlannedDescriptors);
+    }
+    return size;
+  }
+
+  // We can only emit continuations after emitting a valid signature for them,
+  // as the signature must appear first.
+  bool canEmitContinuation = false;
+
+  void planType(size_t i,
+                size_t numRoots,
+                size_t remaining,
+                std::vector<Index>& describees,
+                size_t& numPlannedDescriptors) {
+    assert(remaining >= numPlannedDescriptors);
+    typeIndices.insert({builder[i], i});
+    // Everything is a subtype of itself.
+    subtypeIndices[i].push_back(i);
+
+    // We may pick a supertype. If we have a described type that itself has a
+    // supertype, then we must choose that supertype's descriptor as our
+    // supertype.
+    std::optional<Index> super;
+
+    // Pick a type to describe, or choose not to describe a type by
+    // picking the one-past-the-end index. If all of the remaining types must be
+    // descriptors, then we must choose a describee.
+    Index describee =
+      rand.upTo(describees.size() + (remaining != numPlannedDescriptors));
+
+    bool isDescriptor = false;
+    if (describee != describees.size()) {
+      isDescriptor = true;
+      --numPlannedDescriptors;
+
+      // If the intended described type has a supertype with a descriptor, then
+      // that descriptor must be the supertype of the type we intend to
+      // generate. However, we may not have generated that descriptor yet,
+      // meaning it is unavailable to be the supertype of the current type.
+      // Detect that situation and plan to generate the missing supertype
+      // instead.
+      Index described;
+      while (true) {
+        assert(describee < describees.size());
+        described = describees[describee];
+        auto describedSuper = supertypeIndices[described];
+        if (!describedSuper) {
+          // The described type has no supertype, so there is no problem.
+          break;
+        }
+        if (descriptorChainLengths[*describedSuper] == 0) {
+          // The supertype of the described type will not have a descriptor,
+          // so there is no problem.
+          break;
+        }
+        if ((super = descriptorIndices[*describedSuper])) {
+          // The descriptor of the described type's supertype, which must become
+          // the current type's supertype, has already been generated. There is
+          // no problem.
+          break;
+        }
+        // The necessary supertype does not yet exist. Find its described type
+        // so we can try to generate the missing supertype instead.
+        for (describee = 0; describee < describees.size(); ++describee) {
+          if (describees[describee] == *describedSuper) {
+            break;
+          }
+        }
+        // Go back and check whether the new intended type can be generated.
+        continue;
+      }
+
+      // We have locked in the type we will describe.
+      std::swap(describees[describee], describees.back());
+      describees.pop_back();
+      descriptorIndices[described] = i;
+      describedIndices[i] = described;
+      builder[described].descriptor(builder[i]);
+      builder[i].describes(builder[described]);
+
+      // The length of the descriptor chain from this type is determined by the
+      // planned length of the chain from its described type.
+      descriptorChainLengths[i] = descriptorChainLengths[described] - 1;
+    }
+
+    --remaining;
+    assert(remaining >= numPlannedDescriptors);
+    size_t remainingUncommitted = remaining - numPlannedDescriptors;
+
+    // Possibly choose a supertype. If the current type is a descriptor type,
+    // then either we already determined its supertype based on its described
+    // type, or there is no valid supertype to give it. A valid supertype would
+    // have to describe the supertype of the current described type, but if the
+    // supertype chain had such an entry, we would already have found it above.
+    if (!super && !isDescriptor && i >= numRoots && rand.oneIn(2)) {
+      // Try to pick a supertype. The supertype must not be a descriptor type,
+      // and we must have space left in the rec group to mirror the supertype's
+      // descriptor chain, if it has one.
+      std::vector<Index> candidates;
+      candidates.reserve(i);
+      for (Index candidate = 0; candidate < i; ++candidate) {
+        if (describedIndices[candidate]) {
+          continue;
+        }
+        if (descriptorChainLengths[candidate] <= remainingUncommitted) {
+          candidates.push_back(candidate);
+        }
+      }
+      if (!candidates.empty()) {
+        super = rand.pick(candidates);
+      }
+    }
+
+    // Set up the builder entry and type kind for this type.
+    if (super) {
+      typeKinds.push_back(typeKinds[*super]);
+      builder[i].subTypeOf(builder[*super]);
+      builder[i].setShared(HeapType(builder[*super]).getShared());
+      supertypeIndices[i] = *super;
+      subtypeIndices[*super].push_back(i);
+    } else if (isDescriptor) {
+      // Descriptor types must be structs and their sharedness must match their
+      // described types.
+      typeKinds.push_back(StructKind{});
+      builder[i].setShared(HeapType(builder[*describedIndices[i]]).getShared());
+    } else {
+      // This is a root type with no supertype. Choose a kind for this type.
+      auto kind = generateHeapTypeKind();
+      if (std::get_if<ContinuationKind>(&kind) && !canEmitContinuation) {
+        // No signature for a continuation. Emit a signature so we can emit one
+        // later.
+        kind = SignatureKind{};
+      }
+      typeKinds.emplace_back(kind);
+      // Continuations cannot be shared, but other things can.
+      auto shared = Unshared;
+      if (features.hasSharedEverything() &&
+          !std::get_if<ContinuationKind>(&kind) && rand.oneIn(2)) {
+        shared = Shared;
+      }
+      builder[i].setShared(shared);
+      // Once we emit a non-shared signature, continuations are possible.
+      if (std::get_if<SignatureKind>(&kind) && shared == Unshared) {
+        canEmitContinuation = true;
+      }
+    }
+
+    // Plan this descriptor chain for this type if it is not already determined
+    // by a described type. Only structs may have descriptor chains.
+    if (!isDescriptor && std::get_if<StructKind>(&typeKinds.back()) &&
+        remainingUncommitted && features.hasCustomDescriptors()) {
+      if (super) {
+        // If we have a supertype, our descriptor chain must be at least as
+        // long as the supertype's descriptor chain.
+        size_t length = descriptorChainLengths[*super];
+        if (rand.oneIn(2)) {
+          length += rand.upToSquared(remainingUncommitted - length);
+        }
+        descriptorChainLengths[i] = length;
+        numPlannedDescriptors += length;
+      } else {
+        // We can choose to start a brand new chain at this type.
+        if (rand.oneIn(2)) {
+          size_t length = rand.upToSquared(remainingUncommitted);
+          descriptorChainLengths[i] = length;
+          numPlannedDescriptors += length;
+        }
+      }
+    }
+    // If this type has a descriptor chain, then we need to be able to
+    // choose to generate the next type in the chain in the future.
+    if (descriptorChainLengths[i]) {
+      describees.push_back(i);
+    }
+  }
+
+  void populateTypes() {
     // Create the heap types.
     for (; index < builder.size(); ++index) {
+      // Types without nontrivial subtypes may be marked final.
+      builder[index].setOpen(subtypeIndices[index].size() > 1 || rand.oneIn(2));
       auto kind = typeKinds[index];
+      auto share = HeapType(builder[index]).getShared();
+      bool isDesc = describedIndices[index].has_value();
       if (!supertypeIndices[index]) {
         // No nontrivial supertype, so create a root type.
         if (std::get_if<SignatureKind>(&kind)) {
           builder[index] = generateSignature();
         } else if (std::get_if<StructKind>(&kind)) {
-          builder[index] = generateStruct();
+          builder[index] = generateStruct(share, isDesc);
         } else if (std::get_if<ArrayKind>(&kind)) {
-          builder[index] = generateArray();
+          builder[index] = generateArray(share);
+        } else if (std::get_if<ContinuationKind>(&kind)) {
+          builder[index] = generateContinuation(share);
         } else {
           WASM_UNREACHABLE("unexpected kind");
         }
       } else {
         // We have a supertype, so create a subtype.
         HeapType supertype = builder[*supertypeIndices[index]];
-        if (supertype.isSignature()) {
-          builder[index] = generateSubSignature(supertype.getSignature());
-        } else if (supertype.isStruct()) {
-          builder[index] = generateSubStruct(supertype.getStruct());
-        } else if (supertype.isArray()) {
-          builder[index] = generateSubArray(supertype.getArray());
-        } else {
-          WASM_UNREACHABLE("unexpected kind");
+        switch (supertype.getKind()) {
+          case wasm::HeapTypeKind::Func:
+            builder[index] = generateSubSignature(supertype.getSignature());
+            break;
+          case wasm::HeapTypeKind::Struct:
+            builder[index] = generateSubStruct(supertype.getStruct(), share);
+            break;
+          case wasm::HeapTypeKind::Array:
+            builder[index] = generateSubArray(supertype.getArray());
+            break;
+          case wasm::HeapTypeKind::Cont:
+            builder[index] =
+              generateSubContinuation(supertype.getContinuation());
+            break;
+          case wasm::HeapTypeKind::Basic:
+            WASM_UNREACHABLE("unexpected kind");
         }
       }
     }
   }
 
-  HeapType::BasicHeapType generateBasicHeapType() {
+  HeapType::BasicHeapType generateBasicHeapType(Shareability share) {
     // Choose bottom types more rarely.
-    if (rand.oneIn(16)) {
-      return rand.pick(HeapType::noext, HeapType::nofunc, HeapType::none);
-    }
     // TODO: string types
-    return rand.pick(HeapType::func,
-                     HeapType::ext,
-                     HeapType::any,
-                     HeapType::eq,
-                     HeapType::i31,
-                     HeapType::struct_,
-                     HeapType::array);
+    if (rand.oneIn(16)) {
+      std::vector<HeapType> bottoms{
+        HeapType::noext, HeapType::nofunc, HeapType::none};
+      // Continuations cannot be shared.
+      if (features.hasStackSwitching() && share == Unshared) {
+        bottoms.push_back(HeapType::nocont);
+      }
+      return rand.pick(bottoms).getBasic(share);
+    }
+
+    // Sometimes emit shared in unshared contexts.
+    if (share == Unshared && features.hasSharedEverything() && rand.oneIn(4)) {
+      share = Shared;
+    }
+
+    std::vector<HeapType> options{HeapType::func,
+                                  HeapType::ext,
+                                  HeapType::any,
+                                  HeapType::eq,
+                                  HeapType::i31,
+                                  HeapType::struct_,
+                                  HeapType::array};
+    if (features.hasStackSwitching() && share == Unshared) {
+      options.push_back(HeapType::cont);
+    }
+    // Avoid shared exn, which we cannot generate.
+    if (features.hasExceptionHandling() && share == Unshared) {
+      options.push_back(HeapType::exn);
+    }
+    auto ht = rand.pick(options);
+    return ht.getBasic(share);
   }
 
   Type::BasicType generateBasicType() {
@@ -162,35 +376,55 @@ struct HeapTypeGeneratorImpl {
         .add(FeatureSet::SIMD, Type::v128));
   }
 
-  HeapType generateHeapType() {
+  HeapType generateHeapType(Shareability share) {
     if (rand.oneIn(4)) {
-      return generateBasicHeapType();
-    } else {
-      Index i = rand.upTo(recGroupEnds[index]);
-      return builder[i];
+      return generateBasicHeapType(share);
     }
+    if (share == Shared) {
+      // We can only reference other shared types.
+      std::vector<Index> eligible;
+      for (Index i = 0, n = recGroupEnds[index]; i < n; ++i) {
+        if (HeapType(builder[i]).getShared() == Shared) {
+          eligible.push_back(i);
+        }
+      }
+      if (eligible.empty()) {
+        return generateBasicHeapType(share);
+      }
+      return builder[rand.pick(eligible)];
+    }
+    // Any heap type can be referenced in an unshared context.
+    return builder[rand.upTo(recGroupEnds[index])];
   }
 
-  Type generateRefType() {
-    auto heapType = generateHeapType();
-    auto nullability = rand.oneIn(2) ? Nullable : NonNullable;
+  Type generateRefType(Shareability share) {
+    auto heapType = generateHeapType(share);
+    Nullability nullability;
+    if (heapType.isMaybeShared(HeapType::exn)) {
+      // Do not generate non-nullable exnrefs for now, as we cannot generate
+      // them in global positions (they cannot be created in wasm, nor imported
+      // from JS).
+      nullability = Nullable;
+    } else {
+      nullability = rand.oneIn(2) ? Nullable : NonNullable;
+    }
     return builder.getTempRefType(heapType, nullability);
   }
 
-  Type generateSingleType() {
+  Type generateSingleType(Shareability share) {
     switch (rand.upTo(2)) {
       case 0:
         return generateBasicType();
       case 1:
-        return generateRefType();
+        return generateRefType(share);
     }
     WASM_UNREACHABLE("unexpected");
   }
 
-  Type generateTupleType() {
-    std::vector<Type> types(2 + rand.upTo(MAX_TUPLE_SIZE - 1));
+  Type generateTupleType(Shareability share) {
+    std::vector<Type> types(2 + rand.upTo(params.MAX_TUPLE_SIZE - 1));
     for (auto& type : types) {
-      type = generateSingleType();
+      type = generateSingleType(share);
     }
     return builder.getTempTupleType(Tuple(types));
   }
@@ -199,55 +433,82 @@ struct HeapTypeGeneratorImpl {
     if (rand.oneIn(6)) {
       return Type::none;
     } else if (features.hasMultivalue() && rand.oneIn(5)) {
-      return generateTupleType();
+      return generateTupleType(Unshared);
     } else {
-      return generateSingleType();
+      return generateSingleType(Unshared);
     }
   }
 
   Signature generateSignature() {
-    std::vector<Type> types(rand.upToSquared(MAX_PARAMS));
+    std::vector<Type> types(rand.upToSquared(params.MAX_PARAMS));
     for (auto& type : types) {
-      type = generateSingleType();
+      type = generateSingleType(Unshared);
     }
     auto params = builder.getTempTupleType(types);
     return {params, generateReturnType()};
   }
 
-  Field generateField() {
+  Field generateField(Shareability share, bool isPrototypeField = false) {
+    // If this field could configure a prototype, then we want to give it a type
+    // that lets it do so a significant portion of the time.
+    if (isPrototypeField && share == Unshared && rand.oneIn(2)) {
+      auto nullability = rand.oneIn(2) ? NonNullable : Nullable;
+      return {Type(HeapType::ext, nullability), Immutable};
+    }
     auto mutability = rand.oneIn(2) ? Mutable : Immutable;
     if (rand.oneIn(6)) {
       return {rand.oneIn(2) ? Field::i8 : Field::i16, mutability};
     } else {
-      return {generateSingleType(), mutability};
+      return {generateSingleType(share), mutability};
     }
   }
 
-  Struct generateStruct() {
-    std::vector<Field> fields(rand.upTo(MAX_STRUCT_SIZE + 1));
+  Struct generateStruct(Shareability share, bool isDesc) {
+    std::vector<Field> fields(rand.upTo(params.MAX_STRUCT_SIZE + 1));
+    // Prototypes are configured on the first field of descriptors types.
+    bool isPrototypeField = isDesc;
     for (auto& field : fields) {
-      field = generateField();
+      field = generateField(share, isPrototypeField);
+      isPrototypeField = false;
     }
     return {fields};
   }
 
-  Array generateArray() { return {generateField()}; }
+  Array generateArray(Shareability share) { return {generateField(share)}; }
 
-  template<typename Kind> std::vector<HeapType> getKindCandidates() {
+  Continuation generateContinuation(Shareability share) {
+    auto type = pickKind<SignatureKind>(share);
+    // There must be signatures to pick from.
+    assert(type);
+    return Continuation(*type);
+  }
+
+  Continuation generateSubContinuation(Continuation super) {
+    auto subType = pickSubHeapType(super.type);
+    if (subType.isBasic()) {
+      // We cannot use a bottom type here.
+      subType = super.type;
+    }
+    return Continuation(subType);
+  }
+
+  template<typename Kind>
+  std::vector<HeapType> getKindCandidates(Shareability share) {
     std::vector<HeapType> candidates;
     // Iterate through the top level kinds, finding matches for `Kind`. Since we
     // are constructing a child, we can only look through the end of the current
     // recursion group.
     for (Index i = 0, end = recGroupEnds[index]; i < end; ++i) {
-      if (std::get_if<Kind>(&typeKinds[i])) {
+      if (std::get_if<Kind>(&typeKinds[i]) &&
+          share == HeapType(builder[i]).getShared()) {
         candidates.push_back(builder[i]);
       }
     }
     return candidates;
   }
 
-  template<typename Kind> std::optional<HeapType> pickKind() {
-    auto candidates = getKindCandidates<Kind>();
+  template<typename Kind> std::optional<HeapType> pickKind(Shareability share) {
+    auto candidates = getKindCandidates<Kind>(share);
     if (candidates.size()) {
       return rand.pick(candidates);
     } else {
@@ -255,65 +516,88 @@ struct HeapTypeGeneratorImpl {
     }
   }
 
-  HeapType pickSubFunc() {
+  HeapType pickSubFunc(Shareability share) {
     auto choice = rand.upTo(8);
     switch (choice) {
       case 0:
-        return HeapType::func;
+        return HeapTypes::func.getBasic(share);
       case 1:
-        return HeapType::nofunc;
-      default:
-        if (auto type = pickKind<SignatureKind>()) {
+        return HeapTypes::nofunc.getBasic(share);
+      default: {
+        if (auto type = pickKind<SignatureKind>(share)) {
           return *type;
         }
-        return (choice % 2) ? HeapType::func : HeapType::nofunc;
+        HeapType ht = (choice % 2) ? HeapType::func : HeapType::nofunc;
+        return ht.getBasic(share);
+      }
     }
   }
 
-  HeapType pickSubStruct() {
+  HeapType pickSubStruct(Shareability share) {
     auto choice = rand.upTo(8);
     switch (choice) {
       case 0:
-        return HeapType::struct_;
+        return HeapTypes::struct_.getBasic(share);
       case 1:
-        return HeapType::none;
-      default:
-        if (auto type = pickKind<StructKind>()) {
+        return HeapTypes::none.getBasic(share);
+      default: {
+        if (auto type = pickKind<StructKind>(share)) {
           return *type;
         }
-        return (choice % 2) ? HeapType::struct_ : HeapType::none;
+        HeapType ht = (choice % 2) ? HeapType::struct_ : HeapType::none;
+        return ht.getBasic(share);
+      }
     }
   }
 
-  HeapType pickSubArray() {
+  HeapType pickSubArray(Shareability share) {
     auto choice = rand.upTo(8);
     switch (choice) {
       case 0:
-        return HeapType::array;
+        return HeapTypes::array.getBasic(share);
       case 1:
-        return HeapType::none;
-      default:
-        if (auto type = pickKind<ArrayKind>()) {
+        return HeapTypes::none.getBasic(share);
+      default: {
+        if (auto type = pickKind<ArrayKind>(share)) {
           return *type;
         }
-        return (choice % 2) ? HeapType::array : HeapType::none;
+        HeapType ht = (choice % 2) ? HeapType::array : HeapType::none;
+        return ht.getBasic(share);
+      }
     }
   }
 
-  HeapType pickSubEq() {
+  HeapType pickSubCont(Shareability share) {
+    auto choice = rand.upTo(8);
+    switch (choice) {
+      case 0:
+        return HeapTypes::cont.getBasic(share);
+      case 1:
+        return HeapTypes::nocont.getBasic(share);
+      default: {
+        if (auto type = pickKind<ContinuationKind>(share)) {
+          return *type;
+        }
+        HeapType ht = (choice % 2) ? HeapType::cont : HeapType::nocont;
+        return ht.getBasic(share);
+      }
+    }
+  }
+
+  HeapType pickSubEq(Shareability share) {
     auto choice = rand.upTo(16);
     switch (choice) {
       case 0:
-        return HeapType::eq;
+        return HeapTypes::eq.getBasic(share);
       case 1:
-        return HeapType::array;
+        return HeapTypes::array.getBasic(share);
       case 2:
-        return HeapType::struct_;
+        return HeapTypes::struct_.getBasic(share);
       case 3:
-        return HeapType::none;
+        return HeapTypes::none.getBasic(share);
       default: {
-        auto candidates = getKindCandidates<StructKind>();
-        auto arrayCandidates = getKindCandidates<ArrayKind>();
+        auto candidates = getKindCandidates<StructKind>(share);
+        auto arrayCandidates = getKindCandidates<ArrayKind>(share);
         candidates.insert(
           candidates.end(), arrayCandidates.begin(), arrayCandidates.end());
         if (candidates.size()) {
@@ -321,13 +605,13 @@ struct HeapTypeGeneratorImpl {
         }
         switch (choice >> 2) {
           case 0:
-            return HeapType::eq;
+            return HeapTypes::eq.getBasic(share);
           case 1:
-            return HeapType::array;
+            return HeapTypes::array.getBasic(share);
           case 2:
-            return HeapType::struct_;
+            return HeapTypes::struct_.getBasic(share);
           case 3:
-            return HeapType::none;
+            return HeapTypes::none.getBasic(share);
           default:
             WASM_UNREACHABLE("unexpected index");
         }
@@ -335,19 +619,20 @@ struct HeapTypeGeneratorImpl {
     }
   }
 
-  HeapType pickSubAny() {
+  HeapType pickSubAny(Shareability share) {
     switch (rand.upTo(8)) {
       case 0:
-        return HeapType::any;
+        return HeapTypes::any.getBasic(share);
       case 1:
-        return HeapType::none;
+        return HeapTypes::none.getBasic(share);
       default:
-        return pickSubEq();
+        return pickSubEq(share);
     }
     WASM_UNREACHABLE("unexpected index");
   }
 
   HeapType pickSubHeapType(HeapType type) {
+    auto share = type.getShared();
     auto it = typeIndices.find(type);
     if (it != typeIndices.end()) {
       // This is a constructed type, so we know where its subtypes are, but we
@@ -365,11 +650,16 @@ struct HeapTypeGeneratorImpl {
       if (rand.oneIn(candidates.size() * 8)) {
         auto* kind = &typeKinds[it->second];
         if (std::get_if<SignatureKind>(kind)) {
-          return HeapType::nofunc;
+          return HeapTypes::nofunc.getBasic(share);
+        } else if (std::get_if<ContinuationKind>(kind)) {
+          return HeapTypes::nocont.getBasic(share);
         } else {
-          return HeapType::none;
+          return HeapTypes::none.getBasic(share);
         }
       }
+      // If we had no candidates then the oneIn() above us should have returned
+      // true, since oneIn(0) => true.
+      assert(!candidates.empty());
       return rand.pick(candidates);
     } else {
       // This is not a constructed type, so it must be a basic type.
@@ -377,28 +667,28 @@ struct HeapTypeGeneratorImpl {
       if (rand.oneIn(8)) {
         return type.getBottom();
       }
-      switch (type.getBasic()) {
+      switch (type.getBasic(Unshared)) {
         case HeapType::func:
-          return pickSubFunc();
+          return pickSubFunc(share);
+        case HeapType::cont:
+          return pickSubCont(share);
         case HeapType::any:
-          return pickSubAny();
+          return pickSubAny(share);
         case HeapType::eq:
-          return pickSubEq();
+          return pickSubEq(share);
         case HeapType::i31:
-          return HeapType::i31;
+          return HeapTypes::i31.getBasic(share);
         case HeapType::struct_:
-          return pickSubStruct();
+          return pickSubStruct(share);
         case HeapType::array:
-          return pickSubArray();
+          return pickSubArray(share);
         case HeapType::ext:
         case HeapType::exn:
         case HeapType::string:
-        case HeapType::stringview_wtf8:
-        case HeapType::stringview_wtf16:
-        case HeapType::stringview_iter:
         case HeapType::none:
         case HeapType::noext:
         case HeapType::nofunc:
+        case HeapType::nocont:
         case HeapType::noexn:
           return type;
       }
@@ -407,6 +697,7 @@ struct HeapTypeGeneratorImpl {
   }
 
   HeapType pickSuperHeapType(HeapType type) {
+    auto share = type.getShared();
     std::vector<HeapType> candidates;
     auto it = typeIndices.find(type);
     if (it != typeIndices.end()) {
@@ -419,17 +710,20 @@ struct HeapTypeGeneratorImpl {
       }
       auto* kind = &typeKinds[it->second];
       if (std::get_if<StructKind>(kind)) {
-        candidates.push_back(HeapType::struct_);
-        candidates.push_back(HeapType::eq);
-        candidates.push_back(HeapType::any);
+        candidates.push_back(HeapTypes::struct_.getBasic(share));
+        candidates.push_back(HeapTypes::eq.getBasic(share));
+        candidates.push_back(HeapTypes::any.getBasic(share));
         return rand.pick(candidates);
       } else if (std::get_if<ArrayKind>(kind)) {
-        candidates.push_back(HeapType::array);
-        candidates.push_back(HeapType::eq);
-        candidates.push_back(HeapType::any);
+        candidates.push_back(HeapTypes::array.getBasic(share));
+        candidates.push_back(HeapTypes::eq.getBasic(share));
+        candidates.push_back(HeapTypes::any.getBasic(share));
         return rand.pick(candidates);
       } else if (std::get_if<SignatureKind>(kind)) {
-        candidates.push_back(HeapType::func);
+        candidates.push_back(HeapTypes::func.getBasic(share));
+        return rand.pick(candidates);
+      } else if (std::get_if<ContinuationKind>(kind)) {
+        candidates.push_back(HeapTypes::cont.getBasic(share));
         return rand.pick(candidates);
       } else {
         WASM_UNREACHABLE("unexpected kind");
@@ -438,36 +732,36 @@ struct HeapTypeGeneratorImpl {
     // This is not a constructed type, so it must be a basic type.
     assert(type.isBasic());
     candidates.push_back(type);
-    switch (type.getBasic()) {
+    switch (type.getBasic(Unshared)) {
       case HeapType::ext:
       case HeapType::func:
       case HeapType::exn:
+      case HeapType::cont:
       case HeapType::any:
         break;
       case HeapType::eq:
-        candidates.push_back(HeapType::any);
+        candidates.push_back(HeapTypes::any.getBasic(share));
         break;
       case HeapType::i31:
       case HeapType::struct_:
       case HeapType::array:
-        candidates.push_back(HeapType::eq);
-        candidates.push_back(HeapType::any);
+        candidates.push_back(HeapTypes::eq.getBasic(share));
+        candidates.push_back(HeapTypes::any.getBasic(share));
         break;
       case HeapType::string:
-      case HeapType::stringview_wtf8:
-      case HeapType::stringview_wtf16:
-      case HeapType::stringview_iter:
-        candidates.push_back(HeapType::any);
+        candidates.push_back(HeapTypes::ext.getBasic(share));
         break;
       case HeapType::none:
-        return pickSubAny();
+        return pickSubAny(share);
       case HeapType::nofunc:
-        return pickSubFunc();
+        return pickSubFunc(share);
+      case HeapType::nocont:
+        return pickSubCont(share);
       case HeapType::noext:
-        candidates.push_back(HeapType::ext);
+        candidates.push_back(HeapTypes::ext.getBasic(share));
         break;
       case HeapType::noexn:
-        candidates.push_back(HeapType::exn);
+        candidates.push_back(HeapTypes::exn.getBasic(share));
         break;
     }
     assert(!candidates.empty());
@@ -481,9 +775,15 @@ struct HeapTypeGeneratorImpl {
   };
 
   Ref generateSubRef(Ref super) {
-    auto nullability = super.nullability == NonNullable
-                         ? NonNullable
-                         : rand.oneIn(2) ? Nullable : NonNullable;
+    if (super.type.isMaybeShared(HeapType::exn)) {
+      // Do not generate non-nullable exnrefs for now, as we cannot generate
+      // them in global positions (they cannot be created in wasm, nor imported
+      // from JS). There are also no subtypes to consider, so just return.
+      return super;
+    }
+    auto nullability = super.nullability == NonNullable ? NonNullable
+                       : rand.oneIn(2)                  ? Nullable
+                                                        : NonNullable;
     return {pickSubHeapType(super.type), nullability};
   }
 
@@ -550,16 +850,16 @@ struct HeapTypeGeneratorImpl {
     return {generateSubtype(super.type), Immutable};
   }
 
-  Struct generateSubStruct(const Struct& super) {
+  Struct generateSubStruct(const Struct& super, Shareability share) {
     std::vector<Field> fields;
     // Depth subtyping
     for (auto field : super.fields) {
       fields.push_back(generateSubField(field));
     }
     // Width subtyping
-    Index extra = rand.upTo(MAX_STRUCT_SIZE + 1 - fields.size());
+    Index extra = rand.upTo(params.MAX_STRUCT_SIZE + 1 - fields.size());
     for (Index i = 0; i < extra; ++i) {
-      fields.push_back(generateField());
+      fields.push_back(generateField(share));
     }
     return {fields};
   }
@@ -569,13 +869,21 @@ struct HeapTypeGeneratorImpl {
   }
 
   HeapTypeKind generateHeapTypeKind() {
-    switch (rand.upTo(3)) {
+    // Emit continuations less frequently, as we need fewer of them to get
+    // interesting results.
+    uint32_t numKinds = features.hasStackSwitching() ? 7 : 6;
+    switch (rand.upTo(numKinds)) {
       case 0:
-        return SignatureKind{};
       case 1:
-        return StructKind{};
+        return SignatureKind{};
       case 2:
+      case 3:
+        return StructKind{};
+      case 4:
+      case 5:
         return ArrayKind{};
+      case 6:
+        return ContinuationKind{};
     }
     WASM_UNREACHABLE("unexpected index");
   }
@@ -642,7 +950,7 @@ struct Inhabitator {
 
 Inhabitator::Variance Inhabitator::getVariance(FieldPos fieldPos) {
   auto [type, idx] = fieldPos;
-  assert(!type.isBasic() && !type.isSignature());
+  assert(!type.isBasic() && !type.isSignature() && !type.isContinuation());
   auto field = GCTypeUtils::getField(type, idx);
   assert(field);
   if (field->mutable_ == Mutable) {
@@ -660,9 +968,13 @@ void Inhabitator::markNullable(FieldPos field) {
   switch (getVariance(field)) {
     case Covariant:
       // Mark the field null in all supertypes. If the supertype field is
-      // already nullable or does not exist, that's ok and this will have no
-      // effect.
+      // already nullable, that's ok and this will have no effect.
       while (auto super = curr.getDeclaredSuperType()) {
+        if (super->isStruct() && idx >= super->getStruct().fields.size()) {
+          // Do not mark fields that don't exist as nullable; this index may be
+          // used by a descriptor.
+          break;
+        }
         nullables.insert({*super, idx});
         curr = *super;
       }
@@ -690,6 +1002,7 @@ void Inhabitator::markNullable(FieldPos field) {
       const size_t index = idx;
       subtypes.iterSubTypes(curr, [&](HeapType type, Index) {
         nullables.insert({type, index});
+        return true;
       });
       break;
   }
@@ -697,9 +1010,9 @@ void Inhabitator::markNullable(FieldPos field) {
 
 void Inhabitator::markBottomRefsNullable() {
   for (auto type : types) {
-    if (type.isSignature()) {
-      // Functions can always be instantiated, even if their types refer to
-      // uninhabitable types.
+    if (type.isSignature() || type.isContinuation()) {
+      // Functions/continuations can always be instantiated, even if their types
+      // refer to uninhabitable types.
       continue;
     }
     auto children = type.getTypeChildren();
@@ -719,15 +1032,15 @@ void Inhabitator::markExternRefsNullable() {
   // TODO: Remove this once the fuzzer imports externref globals or gets some
   // other way to instantiate externrefs.
   for (auto type : types) {
-    if (type.isSignature()) {
-      // Functions can always be instantiated, even if their types refer to
-      // uninhabitable types.
+    if (type.isSignature() || type.isContinuation()) {
+      // Functions/continuations can always be instantiated, even if their types
+      // refer to uninhabitable types.
       continue;
     }
     auto children = type.getTypeChildren();
     for (size_t i = 0; i < children.size(); ++i) {
       auto child = children[i];
-      if (child.isRef() && child.getHeapType() == HeapType::ext &&
+      if (child.isRef() && child.getHeapType().isMaybeShared(HeapType::ext) &&
           child.isNonNullable()) {
         markNullable({type, i});
       }
@@ -735,87 +1048,132 @@ void Inhabitator::markExternRefsNullable() {
   }
 }
 
-// Use a depth-first search to find cycles, marking the last found reference in
-// the cycle to be made non-nullable.
+// Break cycles of non-nullable references. Doing this optimally (i.e. by
+// changing the fewest possible references) is NP-complete[1], so use a simple
+// depth-first search rather than anything fancy. When we find a back edge
+// forming a cycle, mark the reference forming the edge as nullable.
+//
+// [1]: https://en.wikipedia.org/wiki/Feedback_arc_set
 void Inhabitator::breakNonNullableCycles() {
+  // The types reachable from each heap type. Descriptors are modeled as
+  // additional non-nullable reference types appended to the other children.
+  std::unordered_map<HeapType, std::vector<Type>> children;
+
+  auto getChildren = [&children](HeapType type) {
+    auto [it, inserted] = children.insert({type, {}});
+    if (inserted) {
+      it->second = type.getTypeChildren();
+      if (auto desc = type.getDescriptorType()) {
+        it->second.push_back(Type(*desc, NonNullable, Exact));
+      }
+    }
+    return it->second;
+  };
+
+  // The sequence of visited types and edge indices comprising the current DFS
+  // search path.
+  std::vector<std::pair<HeapType, Index>> path;
+
+  // Track how many times each heap type appears on the current path.
+  std::unordered_map<HeapType, Index> visiting;
+
   // Types we've finished visiting. We don't need to visit them again.
   std::unordered_set<HeapType> visited;
 
-  // The path of types we are currently visiting. If one of them comes back up,
-  // we've found a cycle. Map the types to the other types they reference and
-  // our current index into that list so we can track where we are in each level
-  // of the search.
-  InsertOrderedMap<HeapType, std::pair<std::vector<Type>, Index>> visiting;
+  auto visitType = [&](HeapType type) {
+    path.push_back({type, 0});
+    ++visiting[type];
+  };
+
+  auto finishType = [&]() {
+    auto type = path.back().first;
+    path.pop_back();
+    auto it = visiting.find(type);
+    assert(it != visiting.end());
+    if (--it->second == 0) {
+      visiting.erase(it);
+    }
+    visited.insert(type);
+  };
 
   for (auto root : types) {
-    if (visited.count(root)) {
+    if (visited.contains(root)) {
       continue;
     }
     assert(visiting.size() == 0);
-    visiting.insert({root, {root.getTypeChildren(), 0}});
+    visitType(root);
 
-    while (visiting.size()) {
-      auto& [curr, state] = *std::prev(visiting.end());
-      auto& [children, idx] = state;
+    while (path.size()) {
+      auto& [curr, index] = path.back();
+      // We may have visited this type again after searching through a
+      // descriptor backedge. If we've already finished visiting this type on
+      // that later visit, we don't need to continue this earlier visit.
+      if (visited.contains(curr)) {
+        finishType();
+        continue;
+      }
+      const auto& children = getChildren(curr);
 
-      while (idx < children.size()) {
+      while (index < children.size()) {
         // Skip non-reference children because they cannot refer to other types.
-        if (!children[idx].isRef()) {
-          ++idx;
+        if (!children[index].isRef()) {
+          ++index;
           continue;
         }
         // Skip nullable references because they don't cause uninhabitable
         // cycles.
-        if (children[idx].isNullable()) {
-          ++idx;
+        if (children[index].isNullable()) {
+          ++index;
           continue;
         }
         // Skip references that we have already marked nullable to satisfy
-        // subtyping constraints. TODO: We could take such nullable references
-        // into account when detecting cycles by tracking where in the current
-        // search path we have made references nullable.
-        if (nullables.count({curr, idx})) {
-          ++idx;
+        // subtyping constraints.
+        if (nullables.contains({curr, index})) {
+          ++index;
           continue;
         }
         // Skip references to types that we have finished visiting. We have
         // visited the full graph reachable from such references, so we know
         // they cannot cycle back to anything we are currently visiting.
-        auto heapType = children[idx].getHeapType();
-        if (visited.count(heapType)) {
-          ++idx;
+        auto heapType = children[index].getHeapType();
+        if (visited.contains(heapType)) {
+          ++index;
           continue;
         }
         // Skip references to function types. Functions types can always be
         // instantiated since functions can be created even with uninhabitable
         // params or results. Function references therefore break cycles that
-        // would otherwise produce uninhabitability.
-        if (heapType.isSignature()) {
-          ++idx;
+        // would otherwise produce uninhabitability. (Continuations are
+        // similar.)
+        if (heapType.isSignature() || heapType.isContinuation()) {
+          ++index;
           continue;
         }
         // If this ref forms a cycle, break the cycle by marking it nullable and
-        // continue.
-        if (auto it = visiting.find(heapType); it != visiting.end()) {
-          markNullable({curr, idx});
-          ++idx;
-          continue;
+        // continue. We can't do this for descriptors, though. For those we will
+        // continue searching as if for any other non-nullable reference and
+        // eventually find a non-descriptor backedge.
+        if (!curr.getDescriptorType() || index != children.size() - 1) {
+          if (auto it = visiting.find(heapType); it != visiting.end()) {
+            markNullable({curr, index});
+            ++index;
+            continue;
+          }
         }
         break;
       }
 
       // If we've finished the DFS on the current type, pop it off the search
       // path and continue searching the previous type.
-      if (idx == children.size()) {
-        visited.insert(curr);
-        visiting.erase(std::prev(visiting.end()));
+      if (index == children.size()) {
+        finishType();
         continue;
       }
 
       // Otherwise we have a non-nullable reference we need to search.
-      assert(children[idx].isRef() && children[idx].isNonNullable());
-      auto next = children[idx++].getHeapType();
-      visiting.insert({next, {next.getTypeChildren(), 0}});
+      assert(children[index].isRef() && children[index].isNonNullable());
+      auto next = children[index++].getHeapType();
+      visitType(next);
     }
   }
 }
@@ -836,49 +1194,63 @@ std::vector<HeapType> Inhabitator::build() {
     }
     auto heapType = type.getHeapType();
     auto nullability = type.getNullability();
+    auto exactness = type.getExactness();
     if (auto it = typeIndices.find(heapType); it != typeIndices.end()) {
       heapType = builder[it->second];
     }
-    if (nullables.count(pos)) {
+    if (nullables.contains(pos)) {
       nullability = Nullable;
     }
-    type = builder.getTempRefType(heapType, nullability);
+    type = builder.getTempRefType(heapType, nullability, exactness);
   };
 
   for (size_t i = 0; i < types.size(); ++i) {
     auto type = types[i];
-    if (type.isStruct()) {
-      Struct copy = type.getStruct();
-      for (size_t j = 0; j < copy.fields.size(); ++j) {
-        updateType({type, j}, copy.fields[j].type);
+    switch (type.getKind()) {
+      case HeapTypeKind::Func: {
+        auto sig = type.getSignature();
+        size_t j = 0;
+        std::vector<Type> params;
+        for (auto param : sig.params) {
+          params.push_back(param);
+          updateType({type, j++}, params.back());
+        }
+        std::vector<Type> results;
+        for (auto result : sig.results) {
+          results.push_back(result);
+          updateType({type, j++}, results.back());
+        }
+        builder[i] = Signature(builder.getTempTupleType(params),
+                               builder.getTempTupleType(results));
+        continue;
       }
-      builder[i] = copy;
-      continue;
-    }
-    if (type.isArray()) {
-      Array copy = type.getArray();
-      updateType({type, 0}, copy.element.type);
-      builder[i] = copy;
-      continue;
-    }
-    if (type.isSignature()) {
-      auto sig = type.getSignature();
-      size_t j = 0;
-      std::vector<Type> params;
-      for (auto param : sig.params) {
-        params.push_back(param);
-        updateType({type, j++}, params.back());
+      case HeapTypeKind::Struct: {
+        Struct copy = type.getStruct();
+        for (size_t j = 0; j < copy.fields.size(); ++j) {
+          updateType({type, j}, copy.fields[j].type);
+        }
+        builder[i] = copy;
+        continue;
       }
-      std::vector<Type> results;
-      for (auto result : sig.results) {
-        results.push_back(result);
-        updateType({type, j++}, results.back());
+      case HeapTypeKind::Array: {
+        Array copy = type.getArray();
+        updateType({type, 0}, copy.element.type);
+        builder[i] = copy;
+        continue;
       }
-      builder[i] = Signature(builder.getTempTupleType(params),
-                             builder.getTempTupleType(results));
-      continue;
+      case HeapTypeKind::Cont: {
+        Continuation copy = type.getContinuation();
+        auto heapType = copy.type;
+        if (auto it = typeIndices.find(heapType); it != typeIndices.end()) {
+          copy.type = builder.getTempHeapType(it->second);
+        }
+        builder[i] = copy;
+        continue;
+      }
+      case HeapTypeKind::Basic:
+        break;
     }
-    WASM_UNREACHABLE("unexpected type kind");
+    WASM_UNREACHABLE("unexpected kind");
   }
 
   // Establish rec groups.
@@ -888,7 +1260,7 @@ std::vector<HeapType> Inhabitator::build() {
     start += size;
   }
 
-  // Establish supertypes and finality.
+  // Establish supertypes, descriptors, and finality.
   for (size_t i = 0; i < types.size(); ++i) {
     if (auto super = types[i].getDeclaredSuperType()) {
       if (auto it = typeIndices.find(*super); it != typeIndices.end()) {
@@ -897,12 +1269,22 @@ std::vector<HeapType> Inhabitator::build() {
         builder[i].subTypeOf(*super);
       }
     }
+    if (auto desc = types[i].getDescriptorType()) {
+      auto it = typeIndices.find(*desc);
+      assert(it != typeIndices.end());
+      builder[i].descriptor(builder[it->second]);
+      builder[it->second].describes(builder[i]);
+    }
     builder[i].setOpen(types[i].isOpen());
+    builder[i].setShared(types[i].getShared());
   }
 
-  auto built = builder.build();
-  assert(!built.getError() && "unexpected build error");
-  return *built;
+  auto result = builder.build();
+  if (auto* err = result.getError()) {
+    Fatal() << "Failed to build heap types: " << err->reason << " at index "
+            << err->index;
+  }
+  return *result;
 }
 
 } // anonymous namespace
@@ -961,35 +1343,48 @@ bool isUninhabitable(Type type,
 bool isUninhabitable(HeapType type,
                      std::unordered_set<HeapType>& visited,
                      std::unordered_set<HeapType>& visiting) {
-  if (type.isBasic()) {
+  switch (type.getKind()) {
+    case HeapTypeKind::Basic:
+      return false;
+    case HeapTypeKind::Func:
+    case HeapTypeKind::Cont:
+      // Function types are always inhabitable.
+      return false;
+    case HeapTypeKind::Struct:
+    case HeapTypeKind::Array:
+      break;
+  }
+  if (visited.contains(type)) {
     return false;
   }
-  if (type.isSignature()) {
-    // Function types are always inhabitable.
-    return false;
-  }
-  if (visited.count(type)) {
-    return false;
-  }
-
-  if (!visiting.insert(type).second) {
+  auto [it, inserted] = visiting.insert(type);
+  if (!inserted) {
     return true;
   }
-
-  if (type.isStruct()) {
-    for (auto& field : type.getStruct().fields) {
-      if (isUninhabitable(field.type, visited, visiting)) {
-        return true;
-      }
-    }
-  } else if (type.isArray()) {
-    if (isUninhabitable(type.getArray().element.type, visited, visiting)) {
+  if (auto desc = type.getDescriptorType()) {
+    if (isUninhabitable(Type(*desc, NonNullable, Exact), visited, visiting)) {
       return true;
     }
-  } else {
-    WASM_UNREACHABLE("unexpected type kind");
   }
-  visiting.erase(type);
+  switch (type.getKind()) {
+    case HeapTypeKind::Struct:
+      for (auto& field : type.getStruct().fields) {
+        if (isUninhabitable(field.type, visited, visiting)) {
+          return true;
+        }
+      }
+      break;
+    case HeapTypeKind::Array:
+      if (isUninhabitable(type.getArray().element.type, visited, visiting)) {
+        return true;
+      }
+      break;
+    case HeapTypeKind::Basic:
+    case HeapTypeKind::Func:
+    case HeapTypeKind::Cont:
+      WASM_UNREACHABLE("unexpected kind");
+  }
+  visiting.erase(it);
   visited.insert(type);
   return false;
 }
@@ -998,7 +1393,8 @@ bool isUninhabitable(Type type,
                      std::unordered_set<HeapType>& visited,
                      std::unordered_set<HeapType>& visiting) {
   if (type.isRef() && type.isNonNullable()) {
-    if (type.getHeapType().isBottom() || type.getHeapType() == HeapType::ext) {
+    if (type.getHeapType().isBottom() ||
+        type.getHeapType().isMaybeShared(HeapType::ext)) {
       return true;
     }
     return isUninhabitable(type.getHeapType(), visited, visiting);

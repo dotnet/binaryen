@@ -150,20 +150,11 @@ struct GUFAOptimizer
       return;
     }
 
-    if (contents.isNull() && curr->type.isNullable()) {
-      // Null values are all identical, so just fix up the type here if we need
-      // to (the null's type might not fit in this expression, if it passed
-      // through casts).
-      if (!Type::isSubType(contents.getType(), curr->type)) {
-        contents = PossibleContents::literal(
-          Literal::makeNull(curr->type.getHeapType()));
-      }
-
-      // Note that if curr's type is *not* nullable, then the code will trap at
-      // runtime (the null must arrive through a cast that will trap). We handle
-      // that below, so we don't need to think about it here.
-
-      // TODO: would emitting a more specific null be useful when valid?
+    if (Properties::getMemoryOrder(curr) != MemoryOrder::Unordered) {
+      // This load might synchronize with some store, and if we replaced the
+      // load with a constant or with a load from a global, it would not
+      // synchronize with that store anymore.
+      return;
     }
 
     auto* c = contents.makeExpression(wasm);
@@ -182,16 +173,9 @@ struct GUFAOptimizer
     } else {
       // The type is not compatible: we cannot place |c| in this location, even
       // though we have proven it is the only value possible here.
-      if (Properties::isConstantExpression(c)) {
-        // The type is not compatible and this is a simple constant expression
-        // like a ref.func. That means this code must be unreachable. (See below
-        // for the case of a non-constant.)
-        replaceCurrent(getDroppedChildrenAndAppend(
-          curr, wasm, options, builder.makeUnreachable()));
-        optimized = true;
-      } else {
+      if (c->is<GlobalGet>() || c->is<RefFunc>()) {
         // This is not a constant expression, but we are certain it is the right
-        // value. Atm the only such case we handle is a global.get of an
+        // value. One such case that can happen is a global.get of an
         // immutable global. We don't know what the value will be, nor its
         // specific type, but we do know that a global.get will get that value
         // properly. However, in this case it does not have the right type for
@@ -213,9 +197,24 @@ struct GUFAOptimizer
         // non-nullable type like a ref.as_non_null must have, so we cannot
         // simply replace it.
         //
+        // Similarly, an imported function can cause this: imagine
+        //
+        //  (ref.cast (exact ..)
+        //    (ref.func $imported)
+        //  )
+        //
+        // The output of the cast is exact, but |c| is a RefFunc of inexact
+        // type. (In practice this will either trap at runtime or not.)
+        //
         // For now, do nothing here, but in some cases we could probably
-        // optimize (e.g. by adding a ref.as_non_null in the example) TODO
-        assert(c->is<GlobalGet>());
+        // optimize (e.g. by adding a ref.as_non_null in the first example) TODO
+      } else {
+        // Otherwise, the type is not compatible and this is a simple constant
+        // expression. That means this code must be unreachable.
+        assert(Properties::isConstantExpression(c));
+        replaceCurrent(getDroppedChildrenAndAppend(
+          curr, wasm, options, builder.makeUnreachable()));
+        optimized = true;
       }
     }
   }
@@ -255,7 +254,7 @@ struct GUFAOptimizer
       // We have some knowledge of the type here. Use that to optimize: RefTest
       // returns 1 if the input is of a subtype of the intended type, that is,
       // we are looking for a type in that cone of types.
-      auto intendedContents = PossibleContents::fullConeType(curr->castType);
+      auto intendedContents = PossibleContents::coneType(curr->castType);
 
       auto optimize = [&](int32_t result) {
         auto* last = Builder(*getModule()).makeConst(Literal(int32_t(result)));
@@ -275,6 +274,9 @@ struct GUFAOptimizer
   void visitRefCast(RefCast* curr) {
     auto currType = curr->type;
     auto inferredType = getContents(curr).getType();
+    // Do not refine to an invalid exact cast.
+    inferredType =
+      inferredType.withInexactIfNoCustomDescs(getModule()->features);
     if (inferredType.isRef() && inferredType != currType &&
         Type::isSubType(inferredType, currType)) {
       // We have inferred that this will only contain something of a more
@@ -377,12 +379,15 @@ struct GUFAOptimizer
       bool optimized = false;
 
       void visitExpression(Expression* curr) {
-        if (!curr->type.isRef()) {
-          // Ignore anything we cannot infer a type for.
+        // Ignore anything we cannot emit a cast for.
+        if (!curr->type.isCastable()) {
           return;
         }
 
         auto oracleType = parent.getContents(curr).getType();
+        // Exact casts are only allowed when custom descriptors is enabled.
+        oracleType =
+          oracleType.withInexactIfNoCustomDescs(getModule()->features);
         if (oracleType.isRef() && oracleType != curr->type &&
             Type::isSubType(oracleType, curr->type)) {
           replaceCurrent(Builder(*getModule()).makeRefCast(curr, oracleType));

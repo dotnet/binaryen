@@ -81,7 +81,10 @@ void Instrumenter::addSecondaryMemory(size_t numFuncs) {
   secondaryMemory =
     Names::getValidMemoryName(*wasm, config.secondaryMemoryName);
   // Create a memory with enough pages to write into
-  size_t pages = (numFuncs + Memory::kPageSize - 1) / Memory::kPageSize;
+  // The memory uses the default page size to avoid issues in case custom page
+  // sizes are not supported.
+  size_t pages =
+    (numFuncs + Memory::kDefaultPageSize - 1) / Memory::kDefaultPageSize;
   auto mem = Builder::makeMemory(secondaryMemory, pages, pages, true);
   mem->module = config.importNamespace;
   mem->base = config.secondaryMemoryName;
@@ -151,7 +154,8 @@ void Instrumenter::instrumentFuncs() {
                                   builder.makeConstPtr(0, Type::i32),
                                   builder.makeConst(uint32_t(1)),
                                   Type::i32,
-                                  memoryName),
+                                  memoryName,
+                                  MemoryOrder::SeqCst),
           func->body,
           func->body->type);
         ++funcIdx;
@@ -183,19 +187,24 @@ void Instrumenter::addProfileExport(size_t numFuncs) {
   const size_t profileSize = 8 + 4 * numFuncs;
 
   // Make sure there is a memory with enough pages to write into
-  size_t pages = (profileSize + Memory::kPageSize - 1) / Memory::kPageSize;
   if (wasm->memories.empty()) {
+    size_t pages =
+      (profileSize + Memory::kDefaultPageSize - 1) / Memory::kDefaultPageSize;
     wasm->addMemory(Builder::makeMemory("0"));
     wasm->memories[0]->initial = pages;
     wasm->memories[0]->max = pages;
-  } else if (wasm->memories[0]->initial < pages) {
-    wasm->memories[0]->initial = pages;
-    if (wasm->memories[0]->max < pages) {
-      wasm->memories[0]->max = pages;
+  } else {
+    size_t pages = (profileSize + (1 << wasm->memories[0]->pageSizeLog2) - 1) /
+                   (1 << wasm->memories[0]->pageSizeLog2);
+    if (wasm->memories[0]->initial < pages) {
+      wasm->memories[0]->initial = pages;
+      if (wasm->memories[0]->max < pages) {
+        wasm->memories[0]->max = pages;
+      }
     }
   }
 
-  auto ptrType = wasm->memories[0]->indexType;
+  auto ptrType = wasm->memories[0]->addressType;
 
   // Create and export a function to dump the profile into a given memory
   // buffer. The function takes the available address and buffer size as
@@ -287,8 +296,12 @@ void Instrumenter::addProfileExport(size_t numFuncs) {
                   getAddr(),
                   builder.makeBinary(
                     MulInt32, getFuncIdx(), builder.makeConst(uint32_t(4)))),
-                builder.makeAtomicLoad(
-                  1, 0, getFuncIdx(), Type::i32, loadMemoryName),
+                builder.makeAtomicLoad(1,
+                                       0,
+                                       getFuncIdx(),
+                                       Type::i32,
+                                       loadMemoryName,
+                                       MemoryOrder::SeqCst),
                 Type::i32,
                 wasm->memories[0]->name),
               builder.makeLocalSet(
