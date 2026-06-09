@@ -78,9 +78,9 @@
       <_BuildArgs Include="-DCMAKE_BUILD_TYPE=RelWithDebInfo" />
       <_BuildArgs Include="-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON" />
       <_BuildArgs Include="-DCMAKE_INSTALL_PREFIX=$(BinaryenInstallDir)" />
-      <_BuildArgs Include="-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0" />
-      <_BuildArgs Condition="'$(TargetArchitecture)' == 'x64'" Include="-DCMAKE_OSX_ARCHITECTURES=x86_64" />
-      <_BuildArgs Condition="'$(TargetArchitecture)' == 'arm64'" Include="-DCMAKE_OSX_ARCHITECTURES=arm64" />
+      <_BuildArgs Condition="'$(BuildOS)' == 'OSX'" Include="-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0" />
+      <_BuildArgs Condition="'$(BuildOS)' == 'OSX' and '$(TargetArchitecture)' == 'x64'" Include="-DCMAKE_OSX_ARCHITECTURES=x86_64" />
+      <_BuildArgs Condition="'$(BuildOS)' == 'OSX' and '$(TargetArchitecture)' == 'arm64'" Include="-DCMAKE_OSX_ARCHITECTURES=arm64" />
       <_BuildArgs Include='-DCMAKE_C_FLAGS="$(_CrossCFlags)"' />
       <_BuildArgs Include='-DCMAKE_CXX_FLAGS="$(_CrossCXXFlags)"' />
       <_BuildArgs Include='-DCMAKE_EXE_LINKER_FLAGS="$(_ExeLinkerFlags)"' />
