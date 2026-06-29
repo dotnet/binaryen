@@ -36,18 +36,6 @@ void ParseException::dump(std::ostream& o) const {
   Colors::normal(o);
 }
 
-void MapParseException::dump(std::ostream& o) const {
-  Colors::magenta(o);
-  o << "[";
-  Colors::red(o);
-  o << "map parse exception: ";
-  Colors::green(o);
-  o << text;
-  Colors::magenta(o);
-  o << "]";
-  Colors::normal(o);
-}
-
 // UniqueNameMapper
 
 Name UniqueNameMapper::getPrefixedName(Name prefix) {
@@ -127,7 +115,7 @@ struct DuplicateNameScanner
       // TODO: This could be done in a single insert operation that checks
       //       whether we actually inserted, if we improved
       //       SmallSetBase::insert to return a value like std::set does.
-      if (seen.count(name)) {
+      if (seen.contains(name)) {
         // A name has been defined more than once; we'll need to fix that.
         ok = false;
       } else {

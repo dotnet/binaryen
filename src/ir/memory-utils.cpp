@@ -20,9 +20,19 @@
 
 namespace wasm::MemoryUtils {
 
+bool isSubType(const Memory& a, const Memory& b) {
+  return a.shared == b.shared && a.addressType == b.addressType &&
+         a.initial >= b.initial && a.max <= b.max &&
+         a.pageSizeLog2 == b.pageSizeLog2;
+}
+
 bool flatten(Module& wasm) {
+  // If there are no memories then they are already flat, in the empty sense.
+  if (wasm.memories.empty()) {
+    return true;
+  }
   // Flatten does not currently have support for multimemory
-  if (wasm.memories.size() > 1) {
+  if (wasm.memories.size() != 1) {
     return false;
   }
   // The presence of any instruction that cares about segment identity is a
@@ -105,7 +115,8 @@ bool flatten(Module& wasm) {
     }
     std::copy(segment->data.begin(), segment->data.end(), data.begin() + start);
   }
-  dataSegments[0]->offset->cast<Const>()->value = Literal(int32_t(0));
+  dataSegments[0]->offset->cast<Const>()->value =
+    Literal::makeFromInt32(0, wasm.memories[0]->addressType);
   dataSegments[0]->data.swap(data);
   wasm.removeDataSegments(
     [&](DataSegment* curr) { return curr->name != dataSegments[0]->name; });

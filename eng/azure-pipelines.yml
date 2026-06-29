@@ -4,7 +4,7 @@ variables:
 - name: Codeql.Enabled  # TODO: split codeql into separate pipeline
   value: true
 - name: LinuxImage
-  value: 1es-ubuntu-2204
+  value: build.azurelinux.3.amd64
 - name: WindowsImage
   value: 1es-windows-2022
 - name: MacImage
@@ -44,13 +44,13 @@ extends:
       os: windows
     containers:
       mariner2crossamd64:
-        image: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-amd64
+        image: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net11.0-cross-amd64
       mariner2crossarm64:
-        image: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-arm64
+        image: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net11.0-cross-arm64
       mariner2crossamd64alpine:
-        image: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-amd64-alpine
+        image: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net11.0-cross-amd64-musl
       mariner2crossarm64alpine:
-        image: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-arm64-alpine
+        image: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net11.0-cross-arm64-musl
     stages:
     - stage: build
       displayName: Build
@@ -59,11 +59,12 @@ extends:
         parameters:
           enablePublishBuildArtifacts: true
           enablePublishBuildAssets: true
-          enablePublishUsingPipelines: true
+          publishingVersion: 4
           jobs:
 
           ############ LINUX X64 BUILD ############
           - job: Build_Linux_x64
+            enablePublishing: true
             displayName: Linux_x64
             timeoutInMinutes: 360
             variables:
@@ -96,6 +97,7 @@ extends:
 
           ############ LINUX ARM64 BUILD ############
           - job: Build_Linux_arm64
+            enablePublishing: true
             displayName: Linux_arm64
             timeoutInMinutes: 360
             variables:
@@ -128,6 +130,7 @@ extends:
 
           ############ LINUX MUSL X64 BUILD ############
           - job: Build_Linux_musl_x64
+            enablePublishing: true
             displayName: Linux_musl_x64
             timeoutInMinutes: 360
             variables:
@@ -160,6 +163,7 @@ extends:
 
           ############ LINUX MUSL ARM64 BUILD ############
           - job: Build_Linux_musl_arm64
+            enablePublishing: true
             displayName: Linux_musl_arm64
             timeoutInMinutes: 360
             variables:
@@ -192,6 +196,7 @@ extends:
 
           ############ MACOS X64 BUILD ############
           - job: Build_macOS_x64
+            enablePublishing: true
             displayName: macOS_x64
             timeoutInMinutes: 360
             variables:
@@ -218,6 +223,7 @@ extends:
 
           ############ MACOS ARM64 BUILD ############
           - job: Build_macOS_ARM64
+            enablePublishing: true
             displayName: macOS_arm64
             timeoutInMinutes: 360
             variables:
@@ -244,6 +250,7 @@ extends:
 
           ############ WINDOWS X64 BUILD ############
           - job: Build_Windows_x64
+            enablePublishing: true
             displayName: Windows_x64
             timeoutInMinutes: 120
             variables:
@@ -268,6 +275,7 @@ extends:
 
           ############ WINDOWS ARM64 BUILD ############
           - job: Build_Windows_arm64
+            enablePublishing: true
             displayName: Windows_arm64
             timeoutInMinutes: 120
             variables:
@@ -293,6 +301,7 @@ extends:
     ############ POST BUILD ARCADE LOGIC ############
     - template: /eng/common/templates-official/post-build/post-build.yml@self
       parameters:
+        publishingInfraVersion: 4
         enableSourceLinkValidation: false
         enableSigningValidation: false
         enableSymbolValidation: false

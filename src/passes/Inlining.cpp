@@ -30,15 +30,19 @@
 
 #include <atomic>
 
+#include "ir/branch-hints.h"
 #include "ir/branch-utils.h"
-#include "ir/debug.h"
 #include "ir/drop.h"
 #include "ir/eh-utils.h"
 #include "ir/element-utils.h"
 #include "ir/find_all.h"
 #include "ir/literal-utils.h"
+#include "ir/localize.h"
+#include "ir/metadata.h"
 #include "ir/module-utils.h"
 #include "ir/names.h"
+#include "ir/properties.h"
+#include "ir/return-utils.h"
 #include "ir/type-updating.h"
 #include "ir/utils.h"
 #include "parsing.h"
@@ -46,6 +50,10 @@
 #include "passes/opt-utils.h"
 #include "wasm-builder.h"
 #include "wasm.h"
+
+#ifndef INLINING_DEBUG
+#define INLINING_DEBUG 0
+#endif
 
 namespace wasm {
 
@@ -55,7 +63,7 @@ enum class InliningMode {
   // We do not know yet if this function can be inlined, as that has
   // not been computed yet.
   Unknown,
-  // This function cannot be inlinined in any way.
+  // This function cannot be inlined in any way.
   Uninlineable,
   // This function can be inlined fully, that is, normally: the entire function
   // can be inlined. This is in contrast to split/partial inlining, see below.
@@ -66,7 +74,35 @@ enum class InliningMode {
   SplitPatternB
 };
 
-// Useful into on a function, helping us decide if we can inline it
+// Whether a function is just one instruction that always shrinks when inlined.
+enum class TrivialInstruction {
+  // Function is not a single instruction, or it may not shrink when inlined.
+  NotTrivial,
+
+  // Function is just one instruction, with `local.get`s as arguments, and with
+  // each `local` is used exactly once, and in the order they appear in the
+  // argument list.
+  //
+  // In this case, inlining the function generates smaller code, and it is also
+  // good for runtime. (Note that in theory inlining an instruction might grow
+  // the size, if before we had a call - one byte+LEB - and after we have
+  // something like a prefixed instruction - two bytes - with some other LEB
+  // like a type index. Figuring out when the LEBs will cause growth here is
+  // hard, and probably not worth it, since doing a call to run a single
+  // instruction is almost always going to be larger and slower.)
+  Shrinks,
+
+  // Function is a single instruction, but maybe with constant arguments, or
+  // maybe some locals are used more than once. In these cases code size does
+  // not always shrink: at the call sites, omitted locals can create `drop`
+  // instructions, a local used multiple times can create new locals, and
+  // encoding of constants may be larger than just a `local.get` with a small
+  // index. In these cases we still want to inline with `-O3`, but the code size
+  // may increase when inlined.
+  MayNotShrink,
+};
+
+// Useful info on a function, helping us decide if we can inline it.
 struct FunctionInfo {
   std::atomic<Index> refs;
   Index size;
@@ -76,16 +112,7 @@ struct FunctionInfo {
   // Something is used globally if there is a reference to it in a table or
   // export etc.
   bool usedGlobally;
-  // We consider a function to be a trivial call if the body is just a call with
-  // trivial arguments, like this:
-  //
-  //  (func $forward (param $x) (param $y)
-  //    (call $target (local.get $x) (local.get $y))
-  //  )
-  //
-  // Specifically the body must be a call, and the operands to the call must be
-  // of size 1 (generally, LocalGet or Const).
-  bool isTrivialCall;
+  TrivialInstruction trivialInstruction;
   InliningMode inliningMode;
 
   FunctionInfo() { clear(); }
@@ -97,19 +124,19 @@ struct FunctionInfo {
     hasLoops = false;
     hasTryDelegate = false;
     usedGlobally = false;
-    isTrivialCall = false;
+    trivialInstruction = TrivialInstruction::NotTrivial;
     inliningMode = InliningMode::Unknown;
   }
 
   // Provide an explicit = operator as the |refs| field lacks one by default.
-  FunctionInfo& operator=(FunctionInfo& other) {
+  FunctionInfo& operator=(const FunctionInfo& other) {
     refs = other.refs.load();
     size = other.size;
     hasCalls = other.hasCalls;
     hasLoops = other.hasLoops;
     hasTryDelegate = other.hasTryDelegate;
     usedGlobally = other.usedGlobally;
-    isTrivialCall = other.isTrivialCall;
+    trivialInstruction = other.trivialInstruction;
     inliningMode = other.inliningMode;
     return *this;
   }
@@ -131,6 +158,11 @@ struct FunctionInfo {
         size <= options.inlining.oneCallerInlineMaxSize) {
       return true;
     }
+    // If the function calls another one in a way that always shrinks when
+    // inlined, inline it in all optimization and shrink modes.
+    if (trivialInstruction == TrivialInstruction::Shrinks) {
+      return true;
+    }
     // If it's so big that we have no flexible options that could allow it,
     // do not inline.
     if (size > options.inlining.flexibleInlineMaxSize) {
@@ -142,41 +174,25 @@ struct FunctionInfo {
     if (options.shrinkLevel > 0 || options.optimizeLevel < 3) {
       return false;
     }
-    if (hasCalls) {
-      // This has calls. If it is just a trivial call itself then inline, as we
-      // will save a call that way - basically we skip a trampoline in the
-      // middle - but if it is something more complex, leave it alone, as we may
-      // not help much (and with recursion we may end up with a wasteful
-      // increase in code size).
-      //
-      // Note that inlining trivial calls may increase code size, e.g. if they
-      // use a parameter more than once (forcing us after inlining to save that
-      // value to a local, etc.), but here we are optimizing for speed and not
-      // size, so we risk it.
-      return isTrivialCall;
+    // The function is just one instruction, but the code size may increase when
+    // inlined. We only inline it fully with `-O3`.
+    if (trivialInstruction == TrivialInstruction::MayNotShrink) {
+      return true;
     }
-    // This doesn't have calls. Inline if loops do not prevent us (normally, a
-    // loop suggests a lot of work and so inlining is less useful).
-    return !hasLoops || options.inlining.allowFunctionsWithLoops;
+    // Trivial instructions are already handled. Inline if
+    // 1. The function doesn't have calls, and
+    // 2. The function doesn't have loops, or we allow inlining with loops.
+    return !hasCalls && (!hasLoops || options.inlining.allowFunctionsWithLoops);
   }
 };
-
-static bool canHandleParams(Function* func) {
-  // We cannot inline a function if we cannot handle placing its params in a
-  // locals, as all params become locals.
-  for (auto param : func->getParams()) {
-    if (!TypeUpdating::canHandleAsLocal(param)) {
-      return false;
-    }
-  }
-  return true;
-}
 
 using NameInfoMap = std::unordered_map<Name, FunctionInfo>;
 
 struct FunctionInfoScanner
   : public WalkerPass<PostWalker<FunctionInfoScanner>> {
   bool isFunctionParallel() override { return true; }
+
+  bool modifiesBinaryenIR() override { return false; }
 
   FunctionInfoScanner(NameInfoMap& infos) : infos(infos) {}
 
@@ -191,7 +207,7 @@ struct FunctionInfoScanner
 
   void visitCall(Call* curr) {
     // can't add a new element in parallel
-    assert(infos.count(curr->target) > 0);
+    assert(infos.contains(curr->target));
     infos[curr->target].refs++;
     // having a call
     infos[getFunction()->name].hasCalls = true;
@@ -212,24 +228,56 @@ struct FunctionInfoScanner
   }
 
   void visitRefFunc(RefFunc* curr) {
-    assert(infos.count(curr->func) > 0);
+    assert(infos.contains(curr->func));
     infos[curr->func].refs++;
   }
 
   void visitFunction(Function* curr) {
     auto& info = infos[curr->name];
 
-    if (!canHandleParams(curr)) {
-      info.inliningMode = InliningMode::Uninlineable;
-    }
-
     info.size = Measurer::measure(curr->body);
 
-    if (auto* call = curr->body->dynCast<Call>()) {
-      if (info.size == call->operands.size() + 1) {
-        // This function body is a call with some trivial (size 1) operands like
-        // LocalGet or Const, so it is a trivial call.
-        info.isTrivialCall = true;
+    // If the body is a simple instruction with roughly the same encoded size as
+    // a `call` instruction, and arguments are function locals read in order,
+    // then the code size always shrinks when the call is inlined.
+    //
+    // Note that skipping arguments can create `drop` instructions, and using
+    // arguments multiple times can create new locals, at the call sites. So we
+    // don't consider the function as "always shrinks" in these cases.
+    // TODO: Consider allowing drops, as at least in traps-never-happen mode
+    //       they can usually be removed.
+    auto* body = curr->body;
+    // Skip control flow as those can be substantially larger (middle and end
+    // bytes in an If), or no situation exists where we can optimize them (a
+    // Block with only LocalGets would have been removed by other passes).
+    if (!Properties::isControlFlowStructure(body)) {
+      bool shrinks = true;
+      Index nextLocalGetIndex = 0;
+      for (auto* operand : ChildIterator(body)) {
+        if (auto* localGet = operand->dynCast<LocalGet>()) {
+          if (localGet->index == nextLocalGetIndex) {
+            nextLocalGetIndex++;
+          } else {
+            shrinks = false;
+            break;
+          }
+        } else {
+          shrinks = false;
+          break;
+        }
+      }
+
+      if (shrinks) {
+        info.trivialInstruction = TrivialInstruction::Shrinks;
+        return;
+      }
+
+      // If the operands are trivial (size 1) like LocalGet or Const, we still
+      // consider this as trivial instruction, but the size may not shrink when
+      // inlined.
+      uint32_t numOperands = ChildIterator(body).children.size();
+      if (info.size == numOperands + 1) {
+        info.trivialInstruction = TrivialInstruction::MayNotShrink;
       }
     }
   }
@@ -241,9 +289,20 @@ private:
 struct InliningAction {
   Expression** callSite;
   Function* contents;
+  bool insideATry;
 
-  InliningAction(Expression** callSite, Function* contents)
-    : callSite(callSite), contents(contents) {}
+  // An optional name hint can be provided, which will then be used in the name
+  // of the block we put the inlined code in. Using a unique name hint in each
+  // inlining can reduce the risk of name overlaps (which cause fixup work in
+  // UniqueNameMapper::uniquify).
+  Index nameHint = 0;
+
+  InliningAction(Expression** callSite,
+                 Function* contents,
+                 bool insideATry,
+                 Index nameHint = 0)
+    : callSite(callSite), contents(contents), insideATry(insideATry),
+      nameHint(nameHint) {}
 };
 
 struct InliningState {
@@ -253,8 +312,10 @@ struct InliningState {
   std::unordered_map<Name, std::vector<InliningAction>> actionsForFunction;
 };
 
-struct Planner : public WalkerPass<PostWalker<Planner>> {
+struct Planner : public WalkerPass<TryDepthWalker<Planner>> {
   bool isFunctionParallel() override { return true; }
+
+  bool modifiesBinaryenIR() override { return false; }
 
   Planner(InliningState* state) : state(state) {}
 
@@ -276,17 +337,14 @@ struct Planner : public WalkerPass<PostWalker<Planner>> {
     } else {
       isUnreachable = curr->type == Type::unreachable;
     }
-    if (state->inlinableFunctions.count(curr->target) && !isUnreachable &&
+    if (state->inlinableFunctions.contains(curr->target) && !isUnreachable &&
         curr->target != getFunction()->name) {
-      // nest the call in a block. that way the location of the pointer to the
-      // call will not change even if we inline multiple times into the same
-      // function, otherwise call1(call2()) might be a problem
-      auto* block = Builder(*getModule()).makeBlock(curr);
-      replaceCurrent(block);
       // can't add a new element in parallel
-      assert(state->actionsForFunction.count(getFunction()->name) > 0);
+      assert(state->actionsForFunction.contains(getFunction()->name));
       state->actionsForFunction[getFunction()->name].emplace_back(
-        &block->list[0], getModule()->getFunction(curr->target));
+        getCurrentPointer(),
+        getModule()->getFunction(curr->target),
+        tryDepth > 0);
     }
   }
 
@@ -294,26 +352,38 @@ private:
   InliningState* state;
 };
 
-struct Updater : public PostWalker<Updater> {
+struct Updater : public TryDepthWalker<Updater> {
   Module* module;
   std::map<Index, Index> localMapping;
   Name returnName;
+  Type resultType;
   bool isReturn;
   Builder* builder;
   PassOptions& options;
+
+  struct ReturnCallInfo {
+    // The original `return_call` or `return_call_indirect` or `return_call_ref`
+    // with its operands replaced with `local.get`s.
+    Expression* call;
+    // The branch that is serving as the "return" part of the original
+    // `return_call`.
+    Break* branch;
+  };
+
+  // Collect information on return_calls in the inlined body. Each will be
+  // turned into branches out of the original inlined body followed by
+  // non-return version of the original `return_call`, followed by a branch out
+  // to the caller. The branch labels will be filled in at the end of the walk.
+  std::vector<ReturnCallInfo> returnCallInfos;
 
   Updater(PassOptions& options) : options(options) {}
 
   void visitReturn(Return* curr) {
     replaceCurrent(builder->makeBreak(returnName, curr->value));
   }
-  // Return calls in inlined functions should only break out of the scope of
-  // the inlined code, not the entire function they are being inlined into. To
-  // achieve this, make the call a non-return call and add a break. This does
-  // not cause unbounded stack growth because inlining and return calling both
-  // avoid creating a new stack frame.
-  template<typename T> void handleReturnCall(T* curr, Type results) {
-    if (isReturn) {
+
+  template<typename T> void handleReturnCall(T* curr, Signature sig) {
+    if (isReturn || !curr->isReturn) {
       // If the inlined callsite was already a return_call, then we can keep
       // return_calls in the inlined function rather than downgrading them.
       // That is, if A->B and B->C and both those calls are return_calls
@@ -321,70 +391,129 @@ struct Updater : public PostWalker<Updater> {
       // return_call.
       return;
     }
-    curr->isReturn = false;
-    curr->type = results;
-    // There might still be unreachable children causing this to be unreachable.
-    curr->finalize();
-    if (results.isConcrete()) {
-      replaceCurrent(builder->makeBreak(returnName, curr));
+
+    if (tryDepth == 0) {
+      // Return calls in inlined functions should only break out of
+      // the scope of the inlined code, not the entire function they
+      // are being inlined into. To achieve this, make the call a
+      // non-return call and add a break. This does not cause
+      // unbounded stack growth because inlining and return calling
+      // both avoid creating a new stack frame.
+      curr->isReturn = false;
+      curr->type = sig.results;
+      // There might still be unreachable children causing this to be
+      // unreachable.
+      curr->finalize();
+      if (sig.results.isConcrete()) {
+        replaceCurrent(builder->makeBreak(returnName, curr));
+      } else {
+        replaceCurrent(builder->blockify(curr, builder->makeBreak(returnName)));
+      }
     } else {
-      replaceCurrent(builder->blockify(curr, builder->makeBreak(returnName)));
+      // Set the children to locals as necessary, then add a branch out of the
+      // inlined body. The branch label will be set later when we create branch
+      // targets for the calls.
+      Block* childBlock = ChildLocalizer(curr, getFunction(), *module, options)
+                            .getChildrenReplacement();
+      Break* branch = builder->makeBreak(Name());
+      childBlock->list.push_back(branch);
+      childBlock->type = Type::unreachable;
+      replaceCurrent(childBlock);
+
+      curr->isReturn = false;
+      curr->type = sig.results;
+      returnCallInfos.push_back({curr, branch});
     }
   }
+
   void visitCall(Call* curr) {
-    if (curr->isReturn) {
-      handleReturnCall(curr, module->getFunction(curr->target)->getResults());
-    }
+    handleReturnCall(curr, module->getFunction(curr->target)->getSig());
   }
+
   void visitCallIndirect(CallIndirect* curr) {
-    if (curr->isReturn) {
-      handleReturnCall(curr, curr->heapType.getSignature().results);
-    }
+    handleReturnCall(curr, curr->heapType.getSignature());
   }
+
   void visitCallRef(CallRef* curr) {
     Type targetType = curr->target->type;
-    if (targetType.isNull()) {
-      // We don't know what type the call should return, but we can't leave it
-      // as a potentially-invalid return_call_ref, either.
-      replaceCurrent(getDroppedChildrenAndAppend(
-        curr, *module, options, Builder(*module).makeUnreachable()));
+    if (!targetType.isSignature()) {
+      // We don't know what type the call should return, but it will also never
+      // be reached, so we don't need to do anything here.
       return;
     }
-    if (curr->isReturn) {
-      handleReturnCall(curr, targetType.getHeapType().getSignature().results);
-    }
+    handleReturnCall(curr, targetType.getHeapType().getSignature());
   }
+
   void visitLocalGet(LocalGet* curr) {
     curr->index = localMapping[curr->index];
   }
+
   void visitLocalSet(LocalSet* curr) {
     curr->index = localMapping[curr->index];
+  }
+
+  void walk(Expression*& curr) {
+    PostWalker<Updater>::walk(curr);
+    if (returnCallInfos.empty()) {
+      return;
+    }
+
+    Block* body = builder->blockify(curr);
+    curr = body;
+    auto blockNames = BranchUtils::BranchAccumulator::get(body);
+
+    for (Index i = 0; i < returnCallInfos.size(); ++i) {
+      auto& info = returnCallInfos[i];
+
+      // Add a block containing the previous body and a branch up to the caller.
+      // Give the block a name that will allow this return_call's original
+      // callsite to branch out of it then execute the call before returning to
+      // the caller.
+      auto name = Names::getValidName(
+        "__return_call",
+        [&](Name test) { return !blockNames.contains(test); },
+        i);
+      blockNames.insert(name);
+      info.branch->name = name;
+      Block* oldBody = builder->makeBlock(body->list, body->type);
+      body->list.clear();
+
+      if (resultType.isConcrete()) {
+        body->list.push_back(builder->makeBlock(
+          name, {builder->makeBreak(returnName, oldBody)}, Type::none));
+      } else {
+        oldBody->list.push_back(builder->makeBreak(returnName));
+        oldBody->name = name;
+        oldBody->type = Type::none;
+        body->list.push_back(oldBody);
+      }
+      body->list.push_back(info.call);
+      body->finalize(resultType);
+    }
   }
 };
 
 // Core inlining logic. Modifies the outside function (adding locals as
-// needed), and returns the inlined code.
-//
-// An optional name hint can be provided, which will then be used in the name of
-// the block we put the inlined code in. Using a unique name hint in each call
-// of this function can reduce the risk of name overlaps (which cause fixup work
-// in UniqueNameMapper::uniquify).
-static Expression* doInlining(Module* module,
-                              Function* into,
-                              const InliningAction& action,
-                              PassOptions& options,
-                              Index nameHint = 0) {
+// needed) by copying the inlined code into it.
+static void doCodeInlining(Module* module,
+                           Function* into,
+                           const InliningAction& action,
+                           PassOptions& options) {
   Function* from = action.contents;
   auto* call = (*action.callSite)->cast<Call>();
+
   // Works for return_call, too
   Type retType = module->getFunction(call->target)->getResults();
+
+  // Build the block that will contain the inlined contents.
   Builder builder(*module);
   auto* block = builder.makeBlock();
   auto name = std::string("__inlined_func$") + from->name.toString();
-  if (nameHint) {
-    name += '$' + std::to_string(nameHint);
+  if (action.nameHint) {
+    name += '$' + std::to_string(action.nameHint);
   }
   block->name = Name(name);
+
   // In the unlikely event that the function already has a branch target with
   // this name, fix that up, as otherwise we can get unexpected capture of our
   // branches, that is, we could end up with this:
@@ -407,27 +536,25 @@ static Expression* doInlining(Module* module,
   //
   // (In this case we could use a second block and define the named block $X
   // after the call's parameters, but that adds work for an extremely rare
-  // situation.)
+  // situation.) The latter case does not apply if the call is a
+  // return_call inside a try, because in that case the call's
+  // children do not appear inside the same block as the inlined body.
+  bool hoistCall = call->isReturn && action.insideATry;
   if (BranchUtils::hasBranchTarget(from->body, block->name) ||
-      BranchUtils::BranchSeeker::has(call, block->name)) {
+      (!hoistCall && BranchUtils::BranchSeeker::has(call, block->name))) {
     auto fromNames = BranchUtils::getBranchTargets(from->body);
-    auto callNames = BranchUtils::BranchAccumulator::get(call);
+    auto callNames = hoistCall ? BranchUtils::NameSet{}
+                               : BranchUtils::BranchAccumulator::get(call);
     block->name = Names::getValidName(block->name, [&](Name test) {
-      return !fromNames.count(test) && !callNames.count(test);
+      return !fromNames.contains(test) && !callNames.contains(test);
     });
   }
-  if (call->isReturn) {
-    if (retType.isConcrete()) {
-      *action.callSite = builder.makeReturn(block);
-    } else {
-      *action.callSite = builder.makeSequence(block, builder.makeReturn());
-    }
-  } else {
-    *action.callSite = block;
-  }
+
   // Prepare to update the inlined code's locals and other things.
   Updater updater(options);
+  updater.setFunction(into);
   updater.module = module;
+  updater.resultType = from->getResults();
   updater.returnName = block->name;
   updater.isReturn = call->isReturn;
   updater.builder = &builder;
@@ -435,33 +562,80 @@ static Expression* doInlining(Module* module,
   for (Index i = 0; i < from->getNumLocals(); i++) {
     updater.localMapping[i] = builder.addVar(into, from->getLocalType(i));
   }
-  // Assign the operands into the params
-  for (Index i = 0; i < from->getParams().size(); i++) {
-    block->list.push_back(
-      builder.makeLocalSet(updater.localMapping[i], call->operands[i]));
-  }
-  // Zero out the vars (as we may be in a loop, and may depend on their
-  // zero-init value
-  for (Index i = 0; i < from->vars.size(); i++) {
-    auto type = from->vars[i];
-    if (!LiteralUtils::canMakeZero(type)) {
-      // Non-zeroable locals do not need to be zeroed out. As they have no zero
-      // value they by definition should not be used before being written to, so
-      // any value we set here would not be observed anyhow.
-      continue;
+
+  if (hoistCall) {
+    // Wrap the existing function body in a block we can branch out of before
+    // entering the inlined function body. This block must have a name that is
+    // different from any other block name above the branch.
+    auto intoNames = BranchUtils::BranchAccumulator::get(into->body);
+    auto bodyName =
+      Names::getValidName(Name("__original_body"),
+                          [&](Name test) { return !intoNames.contains(test); });
+    if (retType.isConcrete()) {
+      into->body = builder.makeBlock(
+        bodyName, {builder.makeReturn(into->body)}, Type::none);
+    } else {
+      into->body = builder.makeBlock(
+        bodyName, {into->body, builder.makeReturn()}, Type::none);
     }
-    block->list.push_back(
-      builder.makeLocalSet(updater.localMapping[from->getVarIndexBase() + i],
-                           LiteralUtils::makeZero(type, *module)));
+
+    // Sequence the inlined function body after the original caller body.
+    into->body = builder.makeSequence(into->body, block, retType);
+
+    // Replace the original callsite with an expression that assigns the
+    // operands into the params and branches out of the original body.
+    auto numParams = from->getParams().size();
+    if (numParams) {
+      auto* branchBlock = builder.makeBlock();
+      for (Index i = 0; i < numParams; i++) {
+        branchBlock->list.push_back(
+          builder.makeLocalSet(updater.localMapping[i], call->operands[i]));
+      }
+      branchBlock->list.push_back(builder.makeBreak(bodyName));
+      branchBlock->finalize(Type::unreachable);
+      *action.callSite = branchBlock;
+    } else {
+      *action.callSite = builder.makeBreak(bodyName);
+    }
+  } else {
+    // Assign the operands into the params
+    for (Index i = 0; i < from->getParams().size(); i++) {
+      block->list.push_back(
+        builder.makeLocalSet(updater.localMapping[i], call->operands[i]));
+    }
+    // Zero out the vars (as we may be in a loop, and may depend on their
+    // zero-init value
+    for (Index i = 0; i < from->vars.size(); i++) {
+      auto type = from->vars[i];
+      if (!LiteralUtils::canMakeZero(type)) {
+        // Non-zeroable locals do not need to be zeroed out. As they have no
+        // zero value they by definition should not be used before being written
+        // to, so any value we set here would not be observed anyhow.
+        continue;
+      }
+      block->list.push_back(
+        builder.makeLocalSet(updater.localMapping[from->getVarIndexBase() + i],
+                             LiteralUtils::makeZero(type, *module)));
+    }
+    if (call->isReturn) {
+      assert(!action.insideATry);
+      if (retType.isConcrete()) {
+        *action.callSite = builder.makeReturn(block);
+      } else {
+        *action.callSite = builder.makeSequence(block, builder.makeReturn());
+      }
+    } else {
+      *action.callSite = block;
+    }
   }
+
   // Generate and update the inlined contents
   auto* contents = ExpressionManipulator::copy(from->body, *module);
-  if (!from->debugLocations.empty()) {
-    debug::copyDebugInfo(from->body, contents, from, into);
-  }
+  metadata::copyBetweenFunctions(from->body, contents, from, into);
   updater.walk(contents);
   block->list.push_back(contents);
   block->type = retType;
+
   // The ReFinalize below will handle propagating unreachability if we need to
   // do so, that is, if the call was reachable but now the inlined content we
   // replaced it with was unreachable. The opposite case requires special
@@ -496,6 +670,12 @@ static Expression* doInlining(Module* module,
     }
     *action.callSite = builder.makeSequence(old, builder.makeUnreachable());
   }
+}
+
+// Updates the outer function after we inline into it. This is a general
+// operation that does not depend on what we inlined, it just makes sure that we
+// refinalize everything, have no duplicate break labels, etc.
+static void updateAfterInlining(Module* module, Function* into) {
   // Anything we inlined into may now have non-unique label names, fix it up.
   // Note that we must do this before refinalization, as otherwise duplicate
   // block labels can lead to errors (the IR must be valid before we
@@ -504,11 +684,57 @@ static Expression* doInlining(Module* module,
   // Inlining unreachable contents can make things in the function we inlined
   // into unreachable.
   ReFinalize().walkFunctionInModule(into, module);
-  // New locals we added may require fixups for nondefaultability.
-  // FIXME Is this not done automatically?
+  // New locals we added may require fixups for nondefaultability. We do this
+  // here and not in the main pass (or its subpasses) so that we only do it
+  // where needed.
   TypeUpdating::handleNonDefaultableLocals(into, *module);
-  return block;
 }
+
+static void doInlining(Module* module,
+                       Function* into,
+                       const InliningAction& action,
+                       PassOptions& options) {
+  doCodeInlining(module, into, action, options);
+  updateAfterInlining(module, into);
+}
+
+// A map of function names to the inlining actions we've decided to actually
+// perform in them.
+using ChosenActions = std::unordered_map<Name, std::vector<InliningAction>>;
+
+// A pass that calls doInlining() on a bunch of actions that were chosen to
+// perform.
+struct DoInlining : public Pass {
+  bool isFunctionParallel() override { return true; }
+
+  // We do this only where we inline, inside updateAfterInlining().
+  bool requiresNonNullableLocalFixups() override { return false; }
+
+  std::unique_ptr<Pass> create() override {
+    return std::make_unique<DoInlining>(chosenActions);
+  }
+
+  DoInlining(const ChosenActions& chosenActions)
+    : chosenActions(chosenActions) {}
+
+  void runOnFunction(Module* module, Function* func) override {
+    auto iter = chosenActions.find(func->name);
+    // We must be called on a function that we actually want to inline into.
+    assert(iter != chosenActions.end());
+    const auto& actions = iter->second;
+    assert(!actions.empty());
+
+    // Inline all the code first, then update func once at the end (which saves
+    // e.g. running ReFinalize after each action, of which there might be many).
+    for (auto action : actions) {
+      doCodeInlining(module, func, action, getPassOptions());
+    }
+    updateAfterInlining(module, func);
+  }
+
+private:
+  const ChosenActions& chosenActions;
+};
 
 //
 // Function splitting / partial inlining / inlining of conditions.
@@ -752,7 +978,19 @@ struct FunctionSplitter {
     if (finalItem && getItem(body, numIfs + 1)) {
       return InliningMode::Uninlineable;
     }
-    // This has the general shape we seek. Check each if.
+    // This has the general shape we seek. Check each if: it must be in the
+    // form mentioned above (simple condition, no returns in body). We must also
+    // have no sets of locals that the final item notices, as then we could
+    // have this:
+    //
+    //  if (A) {
+    //    x = 10;
+    //  }
+    //  return x;
+    //
+    // We cannot split out the if in such a case because of the local
+    // dependency.
+    std::unordered_set<Index> writtenLocals;
     for (Index i = 0; i < numIfs; i++) {
       auto* iff = getIf(body, i);
       // The if must have a simple condition and no else arm.
@@ -761,7 +999,7 @@ struct FunctionSplitter {
       }
       if (iff->ifTrue->type == Type::none) {
         // This must have no returns.
-        if (!FindAll<Return>(iff->ifTrue).list.empty()) {
+        if (ReturnUtils::getInfo(iff->ifTrue).hasReturn) {
           return InliningMode::Uninlineable;
         }
       } else {
@@ -769,7 +1007,21 @@ struct FunctionSplitter {
         // unreachable, and we ruled out none before.
         assert(iff->ifTrue->type == Type::unreachable);
       }
+      if (finalItem) {
+        for (auto* set : FindAll<LocalSet>(iff).list) {
+          writtenLocals.insert(set->index);
+        }
+      }
     }
+    // Finish the locals check mentioned above.
+    if (finalItem) {
+      for (auto* get : FindAll<LocalGet>(finalItem).list) {
+        if (writtenLocals.contains(get->index)) {
+          return InliningMode::Uninlineable;
+        }
+      }
+    }
+
     // Success, this matches the pattern.
 
     // If the outlined function will be worth inlining normally, skip the
@@ -872,6 +1124,7 @@ private:
       auto* inlineableIf = getIf(inlineable->body);
       inlineableIf->condition =
         builder.makeUnary(EqZInt32, inlineableIf->condition);
+      BranchHints::flip(inlineableIf, inlineable);
       inlineableIf->ifTrue = builder.makeCall(
         outlined->name, getForwardedArgs(func, builder), Type::none);
       inlineable->body = inlineableIf;
@@ -1001,10 +1254,13 @@ struct Inlining : public Pass {
   // FIXME DWARF updating does not handle local changes yet.
   bool invalidatesDWARF() override { return true; }
 
+  // We do this only where we inline, inside updateAfterInlining().
+  bool requiresNonNullableLocalFixups() override { return false; }
+
   // whether to optimize where we inline
   bool optimize = false;
 
-  // the information for each function. recomputed in each iteraction
+  // the information for each function. recomputed in each interaction
   NameInfoMap infos;
 
   std::unique_ptr<FunctionSplitter> functionSplitter;
@@ -1046,7 +1302,7 @@ struct Inlining : public Pass {
     const size_t MaxIterationsForFunc = 5;
 
     while (iterationNumber <= numOriginalFunctions) {
-#ifdef INLINING_DEBUG
+#if INLINING_DEBUG
       std::cout << "inlining loop iter " << iterationNumber
                 << " (numFunctions: " << module->functions.size() << ")\n";
 #endif
@@ -1061,7 +1317,7 @@ struct Inlining : public Pass {
         return;
       }
 
-#ifdef INLINING_DEBUG
+#if INLINING_DEBUG
       std::cout << "  inlined into " << inlinedInto.size() << " funcs.\n";
 #endif
 
@@ -1091,7 +1347,7 @@ struct Inlining : public Pass {
     // fill in info, as we operate on it in parallel (each function to its own
     // entry)
     for (auto& func : module->functions) {
-      infos[func->name];
+      infos.try_emplace(func->name);
     }
     {
       FunctionInfoScanner scanner(infos);
@@ -1100,7 +1356,7 @@ struct Inlining : public Pass {
     }
     for (auto& ex : module->exports) {
       if (ex->kind == ExternalKind::Function) {
-        infos[ex->value].usedGlobally = true;
+        infos[*ex->getInternalName()].usedGlobally = true;
       }
     }
     if (module->start.is()) {
@@ -1135,21 +1391,30 @@ struct Inlining : public Pass {
     // without iterator invalidation.
     std::vector<Name> funcNames;
     for (auto& func : module->functions) {
-      state.actionsForFunction[func->name];
+      state.actionsForFunction.try_emplace(func->name);
       funcNames.push_back(func->name);
     }
-    // find and plan inlinings
+
+    // Find and plan inlinings in parallel. This discovers inlining
+    // opportunities, by themselves, but does not yet take into account
+    // interactions between them (e.g. we don't want to both inline into a
+    // function and then inline it as well).
     Planner(&state).run(getPassRunner(), module);
-    // perform inlinings TODO: parallelize
-    std::unordered_map<Name, Index> inlinedUses; // how many uses we inlined
-    // which functions were inlined into
+
+    // Choose which inlinings to perform. We do this sequentially so that we
+    // can consider interactions between them, and avoid nondeterminism.
+    ChosenActions chosenActions;
+
+    // How many uses (calls of the function) we inlined.
+    std::unordered_map<Name, Index> inlinedUses;
+
     for (auto name : funcNames) {
       auto* func = module->getFunction(name);
       // if we've inlined a function, don't inline into it in this iteration,
       // avoid risk of races
       // note that we do not risk stalling progress, as each iteration() will
       // inline at least one call before hitting this
-      if (inlinedUses.count(func->name)) {
+      if (inlinedUses.contains(func->name)) {
         continue;
       }
       for (auto& action : state.actionsForFunction[name]) {
@@ -1158,7 +1423,7 @@ struct Inlining : public Pass {
         // avoid risk of races
         // note that we do not risk stalling progress, as each iteration() will
         // inline at least one call before hitting this
-        if (inlinedInto.count(inlinedFunction)) {
+        if (inlinedInto.contains(inlinedFunction)) {
           continue;
         }
         Name inlinedName = inlinedFunction->name;
@@ -1167,38 +1432,54 @@ struct Inlining : public Pass {
         }
 
         // Success - we can inline.
-#ifdef INLINING_DEBUG
+#if INLINING_DEBUG
         std::cout << "inline " << inlinedName << " into " << func->name << '\n';
 #endif
 
-        // Update the action for the actual inlining we are about to perform
+        // Update the action for the actual inlining we have chosen to perform
         // (when splitting, we will actually inline one of the split pieces and
         // not the original function itself; note how even if we do that then
         // we are still removing a call to the original function here, and so
         // we do not need to change anything else lower down - we still want to
         // note that we got rid of one use of the original function).
         action.contents = getActuallyInlinedFunction(action.contents);
-
-        // Perform the inlining and update counts.
-        doInlining(module, func, action, getPassOptions(), inlinedNameHint++);
+        action.nameHint = inlinedNameHint++;
+        chosenActions[func->name].push_back(action);
         inlinedUses[inlinedName]++;
         inlinedInto.insert(func);
         assert(inlinedUses[inlinedName] <= infos[inlinedName].refs);
       }
     }
-    if (optimize && inlinedInto.size() > 0) {
-      OptUtils::optimizeAfterInlining(inlinedInto, module, getPassRunner());
+
+    if (chosenActions.empty()) {
+      // We found nothing to do.
+      return;
     }
+
+    // Perform the inlinings in parallel (sequentially inside each function we
+    // inline into, but in parallel between them). If we are optimizing, do so
+    // as well.
+    {
+      PassUtils::FilteredPassRunner runner(
+        module, inlinedInto, getPassRunner()->options);
+      runner.setIsNested(true);
+      runner.add(std::make_unique<DoInlining>(chosenActions));
+      if (optimize) {
+        OptUtils::addUsefulPassesAfterInlining(runner);
+      }
+      runner.run();
+    }
+
     // remove functions that we no longer need after inlining
     module->removeFunctions([&](Function* func) {
       auto name = func->name;
       auto& info = infos[name];
-      return inlinedUses.count(name) && inlinedUses[name] == info.refs &&
+      return inlinedUses.contains(name) && inlinedUses[name] == info.refs &&
              !info.usedGlobally;
     });
   }
 
-  // See explanation in doInlining() for the parameter nameHint.
+  // See explanation in InliningAction.
   Index inlinedNameHint = 0;
 
   // Decide for a given function whether to inline, and if so in what mode.
@@ -1249,21 +1530,13 @@ struct Inlining : public Pass {
   }
 
   // Checks if the combined size of the code after inlining is under the
-  // absolute size limit. We have an absolute limit in order to avoid
-  // extremely-large sizes after inlining, as they may hit limits in VMs and/or
-  // slow down startup (measurements there indicate something like ~1 second to
-  // optimize a 100K function). See e.g.
-  // https://github.com/WebAssembly/binaryen/pull/3730#issuecomment-867939138
-  // https://github.com/emscripten-core/emscripten/issues/13899#issuecomment-825073344
+  // absolute size limit.
   bool isUnderSizeLimit(Name target, Name source) {
     // Estimate the combined binary size from the number of instructions.
     auto combinedSize = infos[target].size + infos[source].size;
     auto estimatedBinarySize = Measurer::BytesPerExpr * combinedSize;
-    // The limit is arbitrary, but based on the links above. It is a very high
-    // value that should appear very rarely in practice (for example, it does
-    // not occur on the Emscripten benchmark suite of real-world codebases).
-    const Index MaxCombinedBinarySize = 400 * 1024;
-    return estimatedBinarySize < MaxCombinedBinarySize;
+    auto& options = getPassRunner()->options;
+    return estimatedBinarySize < options.inlining.maxCombinedBinarySize;
   }
 };
 
@@ -1304,8 +1577,10 @@ struct InlineMainPass : public Pass {
       // No call at all.
       return;
     }
-    doInlining(
-      module, main, InliningAction(callSite, originalMain), getPassOptions());
+    doInlining(module,
+               main,
+               InliningAction(callSite, originalMain, true),
+               getPassOptions());
   }
 };
 

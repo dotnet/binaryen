@@ -37,13 +37,14 @@
 #include "support/stdckdint.h"
 #include "wasm-binary.h"
 #include "wasm-builder.h"
+#include "wasm-limits.h"
 #include "wasm.h"
 
 namespace wasm {
 
 namespace {
 
-// A subsection of an orginal memory segment. If `isZero` is true, memory.fill
+// A subsection of an original memory segment. If `isZero` is true, memory.fill
 // will be used instead of memory.init for this range.
 struct Range {
   bool isZero;
@@ -91,7 +92,7 @@ makeGtShiftedMemorySize(Builder& builder, Module& module, MemoryInit* curr) {
     curr->dest,
     builder.makeBinary(mem->is64() ? ShlInt64 : ShlInt32,
                        builder.makeMemorySize(mem->name),
-                       builder.makeConstPtr(16, mem->indexType)));
+                       builder.makeConstPtr(16, mem->addressType)));
 }
 
 } // anonymous namespace
@@ -314,7 +315,7 @@ void MemoryPacking::calculateRanges(Module* module,
     // Check if we can rule out a trap by it being in bounds.
     if (auto* c = segment->offset->dynCast<Const>()) {
       auto* memory = module->getMemory(segment->memory);
-      auto memorySize = memory->initial * Memory::kPageSize;
+      auto memorySize = memory->initial << memory->pageSizeLog2;
       Index start = c->value.getUnsigned();
       Index size = segment->data.size();
       Index end;
@@ -454,15 +455,15 @@ void MemoryPacking::optimizeSegmentOps(Module* module) {
       bool mustTrap = false;
       auto* offset = curr->offset->dynCast<Const>();
       auto* size = curr->size->dynCast<Const>();
-      if (offset && uint32_t(offset->value.geti32()) > maxRuntimeSize) {
+      if (offset && offset->value.getUnsigned() > maxRuntimeSize) {
         mustTrap = true;
       }
-      if (size && uint32_t(size->value.geti32()) > maxRuntimeSize) {
+      if (size && size->value.getUnsigned() > maxRuntimeSize) {
         mustTrap = true;
       }
       if (offset && size) {
-        uint64_t offsetVal(offset->value.geti32());
-        uint64_t sizeVal(size->value.geti32());
+        auto offsetVal = offset->value.getUnsigned();
+        auto sizeVal = size->value.getUnsigned();
         if (offsetVal + sizeVal > maxRuntimeSize) {
           mustTrap = true;
         } else if (offsetVal == 0 && sizeVal == 0) {
@@ -499,7 +500,7 @@ void MemoryPacking::optimizeSegmentOps(Module* module) {
     }
     void doWalkFunction(Function* func) {
       needsRefinalizing = false;
-      super::doWalkFunction(func);
+      Super::doWalkFunction(func);
       if (needsRefinalizing) {
         ReFinalize().walkFunctionInModule(func, getModule());
       }
@@ -650,7 +651,7 @@ void MemoryPacking::createSplitSegments(
     if (segment->name.is()) {
       // Name the first range after the original segment and all following
       // ranges get numbered accordingly.  This means that for segments that
-      // canot be split (segments that contains a single range) the input and
+      // cannot be split (segments that contains a single range) the input and
       // output segment have the same name.
       if (!segmentCount) {
         name = segment->name;
@@ -709,8 +710,8 @@ void MemoryPacking::createReplacements(Module* module,
     }
 
     // Nonconstant offsets or sizes will have inhibited splitting
-    size_t start = init->offset->cast<Const>()->value.geti32();
-    size_t end = start + init->size->cast<Const>()->value.geti32();
+    size_t start = init->offset->cast<Const>()->value.getUnsigned();
+    size_t end = start + init->size->cast<Const>()->value.getUnsigned();
 
     // Index in `segments` of the segment used in emitted memory.init
     // instructions
@@ -780,7 +781,7 @@ void MemoryPacking::createReplacements(Module* module,
 
       // Calculate dest, either as a const or as an addition to the dest local
       Expression* dest;
-      Type ptrType = module->getMemory(init->memory)->indexType;
+      Type ptrType = module->getMemory(init->memory)->addressType;
       if (auto* c = init->dest->dynCast<Const>()) {
         dest =
           builder.makeConstPtr(c->value.getInteger() + bytesWritten, ptrType);
@@ -818,8 +819,8 @@ void MemoryPacking::createReplacements(Module* module,
     replacements[init] =
       [module, init, setVar, getVars, result](Function* function) {
         if (setVar != nullptr) {
-          auto indexType = module->getMemory(init->memory)->indexType;
-          Index destVar = Builder(*module).addVar(function, indexType);
+          auto addressType = module->getMemory(init->memory)->addressType;
+          Index destVar = Builder(*module).addVar(function, addressType);
           *setVar = destVar;
           for (auto* getVar : getVars) {
             *getVar = destVar;
@@ -868,7 +869,7 @@ void MemoryPacking::replaceSegmentOps(Module* module,
 
     Replacements& replacements;
 
-    Replacer(Replacements& replacements) : replacements(replacements){};
+    Replacer(Replacements& replacements) : replacements(replacements) {};
     std::unique_ptr<Pass> create() override {
       return std::make_unique<Replacer>(replacements);
     }

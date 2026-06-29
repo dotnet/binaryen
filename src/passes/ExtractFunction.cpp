@@ -22,6 +22,7 @@
 
 #include <cctype>
 
+#include "ir/utils.h"
 #include "pass.h"
 #include "wasm-builder.h"
 #include "wasm.h"
@@ -37,6 +38,7 @@ static void extract(PassRunner* runner, Module* module, Name name) {
       func->module = "env";
       func->base = func->name;
       func->vars.clear();
+      func->type = func->type.with(Inexact);
       func->body = nullptr;
     } else {
       found = true;
@@ -45,6 +47,12 @@ static void extract(PassRunner* runner, Module* module, Name name) {
   if (!found) {
     Fatal() << "could not find the function to extract\n";
   }
+
+  // Update function references after making things imports.
+  ReFinalize().run(runner, module);
+  ReFinalize().walkModuleCode(module);
+  // TODO: Add casts when needed for exactness, like wasm-split, to handle
+  //       places that need the type remain exact.
 
   // Leave just one export, for the thing we want.
   module->exports.clear();
@@ -62,7 +70,7 @@ struct ExtractFunction : public Pass {
   bool addsEffects() override { return true; }
 
   void run(Module* module) override {
-    Name name = getPassOptions().getArgument(
+    Name name = getArgument(
       "extract-function",
       "ExtractFunction usage:  wasm-opt --extract-function=FUNCTION_NAME");
     extract(getPassRunner(), module, name);
@@ -74,10 +82,9 @@ struct ExtractFunctionIndex : public Pass {
   bool addsEffects() override { return true; }
 
   void run(Module* module) override {
-    std::string index =
-      getPassOptions().getArgument("extract-function-index",
-                                   "ExtractFunctionIndex usage: wasm-opt "
-                                   "--extract-function-index=FUNCTION_INDEX");
+    std::string index = getArgument("extract-function-index",
+                                    "ExtractFunctionIndex usage: wasm-opt "
+                                    "--extract-function-index=FUNCTION_INDEX");
     for (char c : index) {
       if (!std::isdigit(c)) {
         Fatal() << "Expected numeric function index";

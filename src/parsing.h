@@ -22,7 +22,6 @@
 #include <sstream>
 #include <string>
 
-#include "mixed_arena.h"
 #include "shared-constants.h"
 #include "support/colors.h"
 #include "support/utilities.h"
@@ -39,15 +38,6 @@ struct ParseException {
   ParseException(std::string text) : text(text), line(-1), col(-1) {}
   ParseException(std::string text, size_t line, size_t col)
     : text(text), line(line), col(col) {}
-
-  void dump(std::ostream& o) const;
-};
-
-struct MapParseException {
-  std::string text;
-
-  MapParseException() : text("unknown parse error") {}
-  MapParseException(std::string text) : text(text) {}
 
   void dump(std::ostream& o) const;
 };

@@ -18,7 +18,22 @@
 #include "wasm.h"
 
 #ifdef BUILD_LLVM_DWARF
+
+#ifdef __clang__
+// DWARFEmitter.h transitively includes llvm/ADT/iterator.h, which uses
+// std::iterator, which is deprecated in C++17. This can trigger a deprecation
+// warning which if -Werror is enabled can cause the build to fail. That warning
+// is suppressed while including DWARFEmitter.h to allow the build to succeed.
+#pragma clang diagnostic push
+#pragma clang diagnostic warning "-Wdeprecated-declarations"
+#endif
+
 #include "llvm/ObjectYAML/DWARFEmitter.h"
+
+#ifdef __clang__
+#pragma clang diagnostic pop
+#endif
+
 #include "llvm/ObjectYAML/DWARFYAML.h"
 #include "llvm/include/llvm/DebugInfo/DWARFContext.h"
 
@@ -180,6 +195,10 @@ struct LineState {
         prologueEnd = true;
         break;
       }
+      case llvm::dwarf::DW_LNS_set_epilogue_begin: {
+        epilogueBegin = true;
+        break;
+      }
       case llvm::dwarf::DW_LNS_copy: {
         return true;
       }
@@ -316,8 +335,8 @@ struct LineState {
     if (prologueEnd) {
       newOpcodes.push_back(makeItem(llvm::dwarf::DW_LNS_set_prologue_end));
     }
-    if (epilogueBegin != old.epilogueBegin) {
-      Fatal() << "eb";
+    if (epilogueBegin) {
+      newOpcodes.push_back(makeItem(llvm::dwarf::DW_LNS_set_epilogue_begin));
     }
     if (useSpecial) {
       // Emit a special, which emits a line automatically.
@@ -334,7 +353,10 @@ struct LineState {
   }
 
   // Some flags are automatically reset after each debug line.
-  void resetAfterLine() { prologueEnd = false; }
+  void resetAfterLine() {
+    prologueEnd = false;
+    epilogueBegin = false;
+  }
 
 private:
   llvm::DWARFYAML::LineTableOpcode
@@ -693,7 +715,7 @@ struct LocationUpdater {
 
   // Given an offset in .debug_loc, get the old and new compile unit bases.
   OldToNew getCompileUnitBasesForLoc(size_t offset) const {
-    if (locToUnitMap.count(offset) == 0) {
+    if (!locToUnitMap.contains(offset)) {
       // There is no compile unit for this loc. It doesn't matter what we set
       // here.
       return OldToNew{0, 0};
@@ -769,7 +791,7 @@ static void updateDebugLines(llvm::DWARFYAML::Data& data,
         if (newAddr && state.needToEmit()) {
           // LLVM sometimes emits the same address more than once. We should
           // probably investigate that.
-          if (newAddrInfo.count(newAddr)) {
+          if (newAddrInfo.contains(newAddr)) {
             continue;
           }
           newAddrs.push_back(newAddr);

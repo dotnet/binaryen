@@ -15,7 +15,6 @@
  */
 
 #include "analysis/cfg.h"
-#include "analysis/lattice.h"
 #include "analysis/lattices/inverted.h"
 #include "analysis/lattices/shared.h"
 #include "analysis/lattices/stack.h"
@@ -28,7 +27,9 @@
 #include "wasm-traversal.h"
 #include "wasm.h"
 
+#ifndef TYPE_GENERALIZING_DEBUG
 #define TYPE_GENERALIZING_DEBUG 0
+#endif
 
 #if TYPE_GENERALIZING_DEBUG
 #define DBG(statement) statement
@@ -58,7 +59,7 @@ using TypeRequirement = Inverted<ValType>;
 
 // Record a type requirement for each local variable. Shared the requirements
 // across basic blocks.
-using LocalTypeRequirements = Shared<Vector<TypeRequirement>>;
+using LocalTypeRequirements = SharedPath<Vector<TypeRequirement>>;
 
 // The type requirements for each reference-typed value on the stack at a
 // particular location.
@@ -75,7 +76,8 @@ struct State : StateLattice {
   static constexpr int LocalsIndex = 0;
   static constexpr int StackIndex = 1;
 
-  State(Function* func) : StateLattice{Shared{initLocals(func)}, initStack()} {}
+  State(Function* func)
+    : StateLattice{SharedPath{initLocals(func)}, initStack()} {}
 
   void push(Element& elem, Type type) const noexcept {
     stackLattice().push(stack(elem), std::move(type));
@@ -109,7 +111,7 @@ struct State : StateLattice {
 
 private:
   static LocalTypeRequirements initLocals(Function* func) noexcept {
-    return Shared{Vector{Inverted{ValType{}}, func->getNumLocals()}};
+    return SharedPath{Vector{Inverted{ValType{}}, func->getNumLocals()}};
   }
 
   static ValueStackTypeRequirements initStack() noexcept {
@@ -416,6 +418,7 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
   void visitAtomicWait(AtomicWait* curr) {}
   void visitAtomicNotify(AtomicNotify* curr) {}
   void visitAtomicFence(AtomicFence* curr) {}
+  void visitPause(Pause* curr) {}
   void visitSIMDExtract(SIMDExtract* curr) {}
   void visitSIMDReplace(SIMDReplace* curr) {}
   void visitSIMDShuffle(SIMDShuffle* curr) {}
@@ -498,6 +501,10 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
     // Cannot generalize table types yet.
   }
 
+  void visitTableInit(TableInit* curr) {}
+
+  void visitElemDrop(ElemDrop* curr) {}
+
   void visitTry(Try* curr) { WASM_UNREACHABLE("TODO"); }
   void visitTryTable(TryTable* curr) { WASM_UNREACHABLE("TODO"); }
   void visitThrow(Throw* curr) { WASM_UNREACHABLE("TODO"); }
@@ -553,7 +560,7 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
       for (size_t i = 0; i < numParams; ++i) {
         if (candidateSig.params[i] != sig.params[i]) {
           // Generalizing further would restrict how much we could generalize
-          // this argument, so we choose not to generalize futher.
+          // this argument, so we choose not to generalize further.
           // TODO: Experiment with making the opposite choice.
           goto done;
         }
@@ -591,6 +598,8 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
     pop();
     push(Type::none);
   }
+
+  void visitRefGetDesc(RefGetDesc* curr) { WASM_UNREACHABLE("TODO"); }
 
   void visitBrOn(BrOn* curr) {
     // Like br_if, these instructions do different things to the stack depending
@@ -679,8 +688,19 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
     }
     auto generalized = generalizeStructType(type, curr->index);
     push(Type(generalized, Nullable));
-    push(generalized.getStruct().fields[curr->index].type);
+    auto fieldType = generalized.getStruct().fields[curr->index].type;
+    if (fieldType.isRef()) {
+      push(fieldType);
+    }
   }
+
+  void visitStructRMW(StructRMW* curr) { WASM_UNREACHABLE("TODO"); }
+
+  void visitStructCmpxchg(StructCmpxchg* curr) { WASM_UNREACHABLE("TODO"); }
+
+  void visitStructWait(StructWait* curr) { WASM_UNREACHABLE("TODO"); }
+
+  void visitStructNotify(StructNotify* curr) { WASM_UNREACHABLE("TODO"); }
 
   void visitArrayNew(ArrayNew* curr) {
     // We cannot yet generalize allocations. Push a requirement for the
@@ -717,6 +737,10 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
       }
     }
   }
+
+  void visitArrayRMW(ArrayRMW* curr) { WASM_UNREACHABLE("TODO"); }
+
+  void visitArrayCmpxchg(ArrayCmpxchg* curr) { WASM_UNREACHABLE("TODO"); }
 
   HeapType
   generalizeArrayType(HeapType type,
@@ -778,6 +802,9 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
     }
   }
 
+  void visitArrayLoad(ArrayLoad* curr) { WASM_UNREACHABLE("TODO"); }
+  void visitArrayStore(ArrayStore* curr) { WASM_UNREACHABLE("TODO"); }
+
   void visitArrayLen(ArrayLen* curr) {
     // The input must be an array.
     push(Type(HeapType::array, Nullable));
@@ -788,7 +815,7 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
     auto srcType = curr->srcRef->type.getHeapType();
     if (destType.isBottom() || srcType.isBottom()) {
       // This will be emitted as unreachable. Do not require anything of the
-      // input, exept that the bottom refs remain bottom.
+      // input, except that the bottom refs remain bottom.
       clearStack();
       auto nullref = Type(HeapType::none, Nullable);
       push(destType.isBottom() ? nullref : Type::none);
@@ -845,14 +872,19 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
 
   void visitRefAs(RefAs* curr) {
     auto type = pop();
+    if (type == Type::none) {
+      // No downstream requirement, so no requirement for the input either.
+      push(Type::none);
+      return;
+    }
     switch (curr->op) {
       case RefAsNonNull:
         push(Type(type.getHeapType(), Nullable));
         return;
-      case ExternInternalize:
+      case AnyConvertExtern:
         push(Type(HeapType::ext, type.getNullability()));
         return;
-      case ExternExternalize:
+      case ExternConvertAny:
         push(Type(HeapType::any, type.getNullability()));
         return;
     }
@@ -865,18 +897,16 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
   void visitStringEncode(StringEncode* curr) { WASM_UNREACHABLE("TODO"); }
   void visitStringConcat(StringConcat* curr) { WASM_UNREACHABLE("TODO"); }
   void visitStringEq(StringEq* curr) { WASM_UNREACHABLE("TODO"); }
-  void visitStringAs(StringAs* curr) { WASM_UNREACHABLE("TODO"); }
-  void visitStringWTF8Advance(StringWTF8Advance* curr) {
-    WASM_UNREACHABLE("TODO");
-  }
+  void visitStringTest(StringTest* curr) { WASM_UNREACHABLE("TODO"); }
   void visitStringWTF16Get(StringWTF16Get* curr) { WASM_UNREACHABLE("TODO"); }
-  void visitStringIterNext(StringIterNext* curr) { WASM_UNREACHABLE("TODO"); }
-  void visitStringIterMove(StringIterMove* curr) { WASM_UNREACHABLE("TODO"); }
   void visitStringSliceWTF(StringSliceWTF* curr) { WASM_UNREACHABLE("TODO"); }
-  void visitStringSliceIter(StringSliceIter* curr) { WASM_UNREACHABLE("TODO"); }
 
   void visitContNew(ContNew* curr) { WASM_UNREACHABLE("TODO"); }
+  void visitContBind(ContBind* curr) { WASM_UNREACHABLE("TODO"); }
+  void visitSuspend(Suspend* curr) { WASM_UNREACHABLE("TODO"); }
   void visitResume(Resume* curr) { WASM_UNREACHABLE("TODO"); }
+  void visitResumeThrow(ResumeThrow* curr) { WASM_UNREACHABLE("TODO"); }
+  void visitStackSwitch(StackSwitch* curr) { WASM_UNREACHABLE("TODO"); }
 };
 
 struct TypeGeneralizing : WalkerPass<PostWalker<TypeGeneralizing>> {
@@ -910,7 +940,7 @@ struct TypeGeneralizing : WalkerPass<PostWalker<TypeGeneralizing>> {
     }
 
     // Update gets and sets accordingly.
-    super::runOnFunction(wasm, func);
+    Super::runOnFunction(wasm, func);
 
     if (refinalize) {
       ReFinalize().walkFunctionInModule(func, wasm);

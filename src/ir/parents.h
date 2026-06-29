@@ -17,21 +17,32 @@
 #ifndef wasm_ir_parents_h
 #define wasm_ir_parents_h
 
-#include "parsing.h"
+#include "wasm-traversal.h"
+#include "wasm.h"
 
 namespace wasm {
 
 struct Parents {
   Parents(Expression* expr) { inner.walk(expr); }
 
-  Expression* getParent(Expression* curr) { return inner.parentMap[curr]; }
+  Expression* getParent(Expression* curr) const {
+    auto iter = inner.parentMap.find(curr);
+    if (iter != inner.parentMap.end()) {
+      return iter->second;
+    }
+    return nullptr;
+  }
+
+  void setParent(Expression* child, Expression* parent) {
+    inner.parentMap[child] = parent;
+  }
 
 private:
   struct Inner
     : public ExpressionStackWalker<Inner, UnifiedExpressionVisitor<Inner>> {
     void visitExpression(Expression* curr) { parentMap[curr] = getParent(); }
 
-    std::map<Expression*, Expression*> parentMap;
+    std::unordered_map<Expression*, Expression*> parentMap;
   } inner;
 };
 

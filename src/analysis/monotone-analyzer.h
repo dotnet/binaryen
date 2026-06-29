@@ -22,7 +22,7 @@ template<Lattice L, TransferFunction TxFn> class MonotoneCFGAnalyzer {
   std::vector<Element> states;
 
 public:
-  // Will constuct BlockState objects corresponding to BasicBlocks from the
+  // Will construct BlockState objects corresponding to BasicBlocks from the
   // given CFG.
   MonotoneCFGAnalyzer(L& lattice, TxFn& txfn, CFG& cfg);
 
@@ -34,6 +34,11 @@ public:
   // entry block depends on no other blocks, and hence cannot be changed by
   // them.
   void evaluateFunctionEntry(Function* func);
+  // This modifies the state of the CFG's exit block, with function
+  // information. This cannot be done otherwise in a backward analysis, as the
+  // exit block depends on no other blocks, and hence cannot be changed by
+  // them.
+  void evaluateFunctionExit(Function* func);
 
   // Iterates over all of the BlockStates after evaluate() is completed for the
   // transfer function to collect the finalized intermediate states from each

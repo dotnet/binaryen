@@ -29,11 +29,11 @@
 #include "asmjs/shared-constants.h"
 #include "ir/element-utils.h"
 #include "ir/module-utils.h"
+#include "optimization-options.h"
 #include "pass.h"
 #include "support/colors.h"
 #include "support/file.h"
 #include "support/json.h"
-#include "tool-options.h"
 #include "wasm-builder.h"
 #include "wasm-io.h"
 #include "wasm-validator.h"
@@ -89,6 +89,12 @@ struct MetaDCEGraph {
   // import module.base => DCE name
   std::unordered_map<Name, Name> importIdToDCENode;
 
+  // import DCE name => items in the wasm { kind, internal name }
+  // (a vector is needed here as an import from the outside may be imported
+  // multiple times inside the wasm, and we can only remove it from the
+  // outside if all wasm uses go away)
+  std::unordered_map<Name, std::vector<KindName>> DCENodeToImports;
+
   Module& wasm;
 
   MetaDCEGraph(Module& wasm) : wasm(wasm) {}
@@ -112,9 +118,16 @@ struct MetaDCEGraph {
     ModuleUtils::iterModuleItems(wasm, [&](ModuleItemKind kind, Named* item) {
       if (auto* import = wasm.getImportOrNull(kind, item->name)) {
         auto id = getImportId(import->module, import->base);
-        if (importIdToDCENode.find(id) == importIdToDCENode.end()) {
+        auto iter = importIdToDCENode.find(id);
+        if (iter == importIdToDCENode.end()) {
+          // This is a new import, not mentioned in the graph we were given
+          // (i.e., this import was not referred to from outside the wasm).
           auto dceName = getName("importId", import->name.toString());
           importIdToDCENode[id] = dceName;
+          DCENodeToImports[dceName].push_back({kind, item->name});
+        } else {
+          // This is an existing import, mentioned in the outside graph.
+          DCENodeToImports[iter->second].push_back({kind, item->name});
         }
         return;
       }
@@ -123,14 +136,18 @@ struct MetaDCEGraph {
       nodes[dceName] = DCENode(dceName);
     });
     for (auto& exp : wasm.exports) {
-      if (exportToDCENode.find(exp->name) == exportToDCENode.end()) {
-        auto dceName = getName("export", exp->name.toString());
-        exportToDCENode[exp->name] = dceName;
-        nodes[dceName] = DCENode(dceName);
+      // skip type exports
+      // TODO: shall we keep track of type dependencies?
+      if (auto* name = exp->getInternalName()) {
+        if (exportToDCENode.find(exp->name) == exportToDCENode.end()) {
+          auto dceName = getName("export", exp->name.toString());
+          exportToDCENode[exp->name] = dceName;
+          nodes[dceName] = DCENode(dceName);
+        }
+        // we can also link the export to the thing being exported
+        auto& node = nodes[exportToDCENode[exp->name]];
+        node.reaches.push_back(getDCEName(ModuleItemKind(exp->kind), *name));
       }
-      // we can also link the export to the thing being exported
-      auto& node = nodes[exportToDCENode[exp->name]];
-      node.reaches.push_back(getDCEName(ModuleItemKind(exp->kind), exp->value));
     }
     // Add initializer dependencies
     // if we provide a parent DCE name, that is who can reach what we see
@@ -315,6 +332,46 @@ public:
     // removing functions may alter the optimum order, as # of calls can change
     passRunner.add("reorder-functions");
     passRunner.run();
+
+    // Standard optimizations might succeed in removing even more than our own
+    // analysis found. That is, we build a graph of connections between things
+    // and find which are not reached, but --remove-unused-module-elements can
+    // use detailed understanding of wasm semantics (like how call_indirect
+    // signatures work, traps-never-happen, etc.) which can lead to even more
+    // things vanishing. Anything it removes, we can remove from our graph.
+    //
+    // The only things of interest are imports: exports are not removed by that
+    // pass, but imports might no longer have any uses. To find imports that
+    // were removed, scan the nodes and see what is no longer in the module.
+    for (auto& [_, dceName] : importIdToDCENode) {
+      auto iter = DCENodeToImports.find(dceName);
+      if (iter == DCENodeToImports.end()) {
+        // This appears in the graph, but did not even begin in the wasm. That
+        // is, the outside was sending it to the wasm, but the wasm never
+        // imported it, which means the graph was not very optimized. Just
+        // ignore this.
+        continue;
+      }
+
+      // If all uses of this import went away, we can remove it.
+      bool used = false;
+      for (auto [kind, internalName] : iter->second) {
+        // Only function imports are important here, as we do things like
+        // generate minification maps for them, etc., but we could add others as
+        // well.
+        // TODO: use something like iterImportable, abstracted over
+        //       ExternalKind, to get*OrNull(), and to remove*().
+        if (kind != ModuleItemKind::Function ||
+            wasm.getFunctionOrNull(internalName)) {
+          used = true;
+          break;
+        }
+      }
+      if (!used) {
+        // This was removed from the wasm. Remove it from the graph.
+        reached.erase(dceName);
+      }
+    }
   }
 
   // Print out everything we found is not used, and so can be
@@ -332,7 +389,7 @@ public:
   }
 
   // A debug utility, prints out the graph
-  void dump() {
+  void dump() const {
     std::cout << "=== graph ===\n";
     for (auto root : roots) {
       std::cout << "root: " << root << '\n';
@@ -365,10 +422,13 @@ int main(int argc, const char* argv[]) {
   bool debugInfo = false;
   std::string graphFile;
   bool dump = false;
+  std::string inputSourceMapFilename;
+  std::string outputSourceMapFilename;
+  std::string outputSourceMapUrl;
 
   const std::string WasmMetaDCEOption = "wasm-opt options";
 
-  ToolOptions options(
+  OptimizationOptions options(
     "wasm-metadce",
     "This tool performs dead code elimination (DCE) on a larger space "
     "that the wasm module is just a part of. For example, if you have "
@@ -416,12 +476,36 @@ int main(int argc, const char* argv[]) {
   options
     .add("--output",
          "-o",
-         "Output file (stdout if not specified)",
+         "Output file",
          WasmMetaDCEOption,
          Options::Arguments::One,
          [](Options* o, const std::string& argument) {
            o->extra["output"] = argument;
            Colors::setEnabled(false);
+         })
+    .add("--input-source-map",
+         "-ism",
+         "Consume source map from the specified file",
+         WasmMetaDCEOption,
+         Options::Arguments::One,
+         [&inputSourceMapFilename](Options* o, const std::string& argument) {
+           inputSourceMapFilename = argument;
+         })
+    .add("--output-source-map",
+         "-osm",
+         "Emit source map to the specified file",
+         WasmMetaDCEOption,
+         Options::Arguments::One,
+         [&outputSourceMapFilename](Options* o, const std::string& argument) {
+           outputSourceMapFilename = argument;
+         })
+    .add("--output-source-map-url",
+         "-osu",
+         "Emit specified string as source map URL",
+         WasmMetaDCEOption,
+         Options::Arguments::One,
+         [&outputSourceMapUrl](Options* o, const std::string& argument) {
+           outputSourceMapUrl = argument;
          })
     .add("--emit-text",
          "-S",
@@ -458,10 +542,8 @@ int main(int argc, const char* argv[]) {
     Fatal() << "no graph file provided.";
   }
 
-  auto input(read_file<std::string>(options.extra["infile"], Flags::Text));
-
   Module wasm;
-  options.applyFeatures(wasm);
+  options.applyOptionsBeforeParse(wasm);
 
   {
     if (options.debug) {
@@ -470,12 +552,14 @@ int main(int argc, const char* argv[]) {
     ModuleReader reader;
     reader.setDWARF(debugInfo);
     try {
-      reader.read(options.extra["infile"], wasm);
+      reader.read(options.extra["infile"], wasm, inputSourceMapFilename);
     } catch (ParseException& p) {
       p.dump(std::cerr);
       Fatal() << "error in parsing wasm input";
     }
   }
+
+  options.applyOptionsAfterParse(wasm);
 
   if (options.passOptions.validate) {
     if (!WasmValidator().validate(wasm)) {
@@ -487,7 +571,7 @@ int main(int argc, const char* argv[]) {
   auto graphInput(read_file<std::string>(graphFile, Flags::Text));
   auto* copy = strdup(graphInput.c_str());
   json::Value outside;
-  outside.parse(copy);
+  outside.parse(copy, json::Value::ASCII);
 
   // parse the JSON into our graph, doing all the JSON parsing here, leaving
   // the abstract computation for the class itself
@@ -574,10 +658,14 @@ int main(int argc, const char* argv[]) {
   // Apply to the wasm
   graph.apply();
 
-  if (options.extra.count("output") > 0) {
-    ModuleWriter writer;
+  if (options.extra.contains("output")) {
+    ModuleWriter writer(options.passOptions);
     writer.setBinary(emitBinary);
     writer.setDebugInfo(debugInfo);
+    if (outputSourceMapFilename.size()) {
+      writer.setSourceMapFilename(outputSourceMapFilename);
+      writer.setSourceMapUrl(outputSourceMapUrl);
+    }
     writer.write(wasm, options.extra["output"]);
   }
 
@@ -586,4 +674,6 @@ int main(int argc, const char* argv[]) {
 
   // Clean up
   free(copy);
+
+  flush_and_quick_exit(0);
 }

@@ -17,14 +17,11 @@
 #ifndef wasm_passes_stringify_walker_h
 #define wasm_passes_stringify_walker_h
 
+#include <queue>
+
 #include "ir/iteration.h"
 #include "ir/module-utils.h"
-#include "ir/stack-utils.h"
-#include "ir/utils.h"
-#include "support/suffix_tree.h"
-#include "wasm-ir-builder.h"
 #include "wasm-traversal.h"
-#include <queue>
 
 namespace wasm {
 
@@ -88,9 +85,19 @@ struct StringifyWalker
       Loop* loop;
     };
 
-    struct TryBodyStart {};
+    struct TryStart {
+      Try* tryy;
+    };
 
-    struct TryCatchStart {};
+    struct CatchStart {
+      Name tag;
+    };
+
+    struct CatchAllStart {};
+
+    struct TryTableStart {
+      TryTable* tryt;
+    };
 
     struct End {
       Expression* curr;
@@ -100,8 +107,10 @@ struct StringifyWalker
                                    IfStart,
                                    ElseStart,
                                    LoopStart,
-                                   TryBodyStart,
-                                   TryCatchStart,
+                                   TryStart,
+                                   CatchStart,
+                                   CatchAllStart,
+                                   TryTableStart,
                                    End>;
 
     Separator reason;
@@ -123,11 +132,17 @@ struct StringifyWalker
     static SeparatorReason makeLoopStart(Loop* loop) {
       return SeparatorReason(LoopStart{loop});
     }
-    static SeparatorReason makeTryCatchStart() {
-      return SeparatorReason(TryCatchStart{});
+    static SeparatorReason makeTryStart(Try* tryy) {
+      return SeparatorReason(TryStart{tryy});
     }
-    static SeparatorReason makeTryBodyStart() {
-      return SeparatorReason(TryBodyStart{});
+    static SeparatorReason makeCatchStart(Name tag) {
+      return SeparatorReason(CatchStart{tag});
+    }
+    static SeparatorReason makeCatchAllStart() {
+      return SeparatorReason(CatchAllStart{});
+    }
+    static SeparatorReason makeTryTableStart(TryTable* tryt) {
+      return SeparatorReason(TryTableStart{tryt});
     }
     static SeparatorReason makeEnd() { return SeparatorReason(End{}); }
     FuncStart* getFuncStart() { return std::get_if<FuncStart>(&reason); }
@@ -135,11 +150,13 @@ struct StringifyWalker
     IfStart* getIfStart() { return std::get_if<IfStart>(&reason); }
     ElseStart* getElseStart() { return std::get_if<ElseStart>(&reason); }
     LoopStart* getLoopStart() { return std::get_if<LoopStart>(&reason); }
-    TryBodyStart* getTryBodyStart() {
-      return std::get_if<TryBodyStart>(&reason);
+    TryStart* getTryStart() { return std::get_if<TryStart>(&reason); }
+    CatchStart* getCatchStart() { return std::get_if<CatchStart>(&reason); }
+    CatchAllStart* getCatchAllStart() {
+      return std::get_if<CatchAllStart>(&reason);
     }
-    TryCatchStart* getTryCatchStart() {
-      return std::get_if<TryCatchStart>(&reason);
+    TryTableStart* getTryTableStart() {
+      return std::get_if<TryTableStart>(&reason);
     }
     End* getEnd() { return std::get_if<End>(&reason); }
   };
@@ -157,10 +174,14 @@ struct StringifyWalker
       return o << "Else Start";
     } else if (reason.getLoopStart()) {
       return o << "Loop Start";
-    } else if (reason.getTryBodyStart()) {
-      return o << "Try Body Start";
-    } else if (reason.getTryCatchStart()) {
-      return o << "Try Catch Start";
+    } else if (reason.getTryStart()) {
+      return o << "Try Start";
+    } else if (reason.getCatchStart()) {
+      return o << "Catch Start";
+    } else if (reason.getCatchAllStart()) {
+      return o << "Catch All Start";
+    } else if (reason.getTryTableStart()) {
+      return o << "Try Table Start";
     } else if (reason.getEnd()) {
       return o << "End";
     }
@@ -190,93 +211,131 @@ struct StringifyWalker
   static void scan(SubType* self, Expression** currp);
   static void doVisitExpression(SubType* self, Expression** currp);
 
-private:
+  void flushControlFlowQueue() {
+    while (!controlFlowQueue.empty()) {
+      dequeueControlFlow();
+    }
+  }
   void dequeueControlFlow();
 };
 
-} // namespace wasm
+// Implementation follows
 
-#include "stringify-walker-impl.h"
+// This walker supplies its own doWalkModule because it does not make sense to
+// walk anything besides defined functions.
+template<typename SubType>
+inline void StringifyWalker<SubType>::doWalkModule(Module* module) {
+  ModuleUtils::iterDefinedFunctions(
+    *module, [&](Function* func) { this->walkFunction(func); });
+}
 
-namespace wasm {
+template<typename SubType>
+inline void StringifyWalker<SubType>::doWalkFunction(Function* func) {
+  addUniqueSymbol(SeparatorReason::makeFuncStart(func));
+  Super::walk(func->body);
+  addUniqueSymbol(SeparatorReason::makeEnd());
+  flushControlFlowQueue();
+}
 
-// This custom hasher conforms to std::hash<Key>. Its purpose is to provide
-// a custom hash for if expressions, so the if-condition of the if expression is
-// not included in the hash for the if expression. This is needed because in the
-// binary format, the if-condition comes before and is consumed by the if. To
-// match the binary format, we hash the if condition before and separately from
-// the rest of the if expression.
-struct StringifyHasher {
-  size_t operator()(Expression* curr) const;
-};
+template<typename SubType>
+inline void StringifyWalker<SubType>::scan(SubType* self, Expression** currp) {
+  Expression* curr = *currp;
+  if (Properties::isControlFlowStructure(curr)) {
+    self->pushTask(doVisitExpression, currp);
+    // The if-condition is a value child consumed by the if control flow, which
+    // makes the if-condition a true sibling rather than part of its contents in
+    // the binary format
+    for (auto*& child : ValueChildIterator(curr)) {
+      scan(self, &child);
+    }
+    self->controlFlowQueue.push(curr);
+  } else {
+    Super::scan(self, currp);
+  }
+}
 
-// This custom equator conforms to std::equal_to<Key>. Similar to
-// StringifyHasher, it's purpose is to not include the if-condition when
-// evaluating the equality of two if expressions.
-struct StringifyEquator {
-  bool operator()(Expression* lhs, Expression* rhs) const;
-};
+// This dequeueControlFlow is responsible for visiting the children expressions
+// of control flow.
+template<typename SubType> void StringifyWalker<SubType>::dequeueControlFlow() {
+  auto& queue = controlFlowQueue;
+  Expression* curr = queue.front();
+  queue.pop();
 
-struct HashStringifyWalker : public StringifyWalker<HashStringifyWalker> {
-  // After calling walkModule, this vector contains the result of encoding a
-  // wasm module as a string of uint32_t values. Each value represents either an
-  // Expression or a separator to mark the end of control flow.
-  std::vector<uint32_t> hashString;
-  // A monotonic counter used to ensure that unique expressions in the
-  // module are assigned a unique value in the hashString.
-  uint32_t nextVal = 0;
-  // A monotonic counter used to ensure that each separator in the
-  // module is assigned a unique value in the hashString.
-  int32_t nextSeparatorVal = -1;
-  // Contains a mapping of expression pointer to value to ensure we
-  // use the same value for matching expressions. A custom hasher and
-  // equator is provided in order to separate out evaluation of the if-condition
-  // when evaluating if expressions.
-  std::unordered_map<Expression*, uint32_t, StringifyHasher, StringifyEquator>
-    exprToCounter;
-  std::vector<Expression*> exprs;
+  // TODO: Issue #5796, Make a ControlChildIterator
+  switch (curr->_id) {
+    case Expression::Id::BlockId: {
+      auto* block = curr->cast<Block>();
+      addUniqueSymbol(SeparatorReason::makeBlockStart(block));
+      for (auto& child : block->list) {
+        Super::walk(child);
+      }
+      addUniqueSymbol(SeparatorReason::makeEnd());
+      break;
+    }
+    case Expression::Id::IfId: {
+      auto* iff = curr->cast<If>();
+      addUniqueSymbol(SeparatorReason::makeIfStart(iff));
+      Super::walk(iff->ifTrue);
+      if (iff->ifFalse) {
+        addUniqueSymbol(SeparatorReason::makeElseStart());
+        Super::walk(iff->ifFalse);
+      }
+      addUniqueSymbol(SeparatorReason::makeEnd());
+      break;
+    }
+    case Expression::Id::TryId: {
+      auto* tryy = curr->cast<Try>();
+      assert(!tryy->isDelegate() && "TODO: try-delegate");
+      addUniqueSymbol(SeparatorReason::makeTryStart(tryy));
+      Super::walk(tryy->body);
+      for (size_t i = 0; i < tryy->catchBodies.size(); i++) {
+        if (tryy->hasCatchAll() && i == tryy->catchBodies.size() - 1) {
+          addUniqueSymbol(SeparatorReason::makeCatchAllStart());
+        } else {
+          addUniqueSymbol(SeparatorReason::makeCatchStart(tryy->catchTags[i]));
+        }
+        Super::walk(tryy->catchBodies[i]);
+      }
+      addUniqueSymbol(SeparatorReason::makeEnd());
+      break;
+    }
+    case Expression::Id::LoopId: {
+      auto* loop = curr->cast<Loop>();
+      addUniqueSymbol(SeparatorReason::makeLoopStart(loop));
+      Super::walk(loop->body);
+      addUniqueSymbol(SeparatorReason::makeEnd());
+      break;
+    }
+    case Expression::Id::TryTableId: {
+      auto* tryt = curr->cast<TryTable>();
+      addUniqueSymbol(SeparatorReason::makeTryTableStart(tryt));
+      Super::walk(tryt->body);
+      addUniqueSymbol(SeparatorReason::makeEnd());
+      break;
+    }
+    default: {
+      assert(Properties::isControlFlowStructure(curr));
+      WASM_UNREACHABLE("unexpected expression");
+    }
+  }
+}
 
-  void addUniqueSymbol(SeparatorReason reason);
-  void visitExpression(Expression* curr);
-  // Converts the idx from relative to the beginning of the program to
-  // relative to its enclosing function, and returns the name of its function.
-  std::pair<uint32_t, Name> makeRelative(uint32_t idx) const;
+template<typename SubType>
+void StringifyWalker<SubType>::doVisitExpression(SubType* self,
+                                                 Expression** currp) {
+  Expression* curr = *currp;
+  self->visit(curr);
+}
 
-private:
-  // Contains the indices that mark the start of each function.
-  std::set<uint32_t> funcIndices;
-  // Maps the start idx of each function to the function name.
-  std::map<uint32_t, Name> idxToFuncName;
-};
-
-struct OutliningSequence {
-  unsigned startIdx;
-  unsigned endIdx;
-  Name func;
-
-  OutliningSequence(unsigned startIdx, unsigned endIdx, Name func)
-    : startIdx(startIdx), endIdx(endIdx), func(func) {}
-};
-
-using Substrings = std::vector<SuffixTree::RepeatedSubstring>;
-
-// Functions that filter vectors of SuffixTree::RepeatedSubstring
-struct StringifyProcessor {
-  static Substrings repeatSubstrings(std::vector<uint32_t>& hashString);
-  static Substrings dedupe(const Substrings& substrings);
-  // Filter is the general purpose function backing subsequent filter functions.
-  // It can be used directly, but generally prefer a wrapper function
-  // to encapsulate your condition and make it available for tests.
-  static Substrings filter(const Substrings& substrings,
-                           const std::vector<Expression*>& exprs,
-                           std::function<bool(const Expression*)> condition);
-  static Substrings filterLocalSets(const Substrings& substrings,
-                                    const std::vector<Expression*>& exprs);
-  static Substrings filterLocalGets(const Substrings& substrings,
-                                    const std::vector<Expression*>& exprs);
-  static Substrings filterBranches(const Substrings& substrings,
-                                   const std::vector<Expression*>& exprs);
-};
+template<typename SubType>
+inline void StringifyWalker<SubType>::addUniqueSymbol(SeparatorReason reason) {
+  // TODO: Add the following static_assert when the compilers running our GitHub
+  // actions are updated enough to know that this is a constant condition:
+  // static_assert(&StringifyWalker<SubType>::addUniqueSymbol !=
+  // &SubType::addUniqueSymbol);
+  auto self = static_cast<SubType*>(this);
+  self->addUniqueSymbol(reason);
+}
 
 } // namespace wasm
 

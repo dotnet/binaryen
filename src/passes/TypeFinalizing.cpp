@@ -50,6 +50,8 @@ struct TypeFinalizing : public Pass {
       subTypes = SubTypes(*module);
     }
 
+    // Note we don't need to worry about signature-called functions here
+    // (configureAll) because such calls don't care about finality.
     auto privateTypes = ModuleUtils::getPrivateHeapTypes(*module);
     for (auto type : privateTypes) {
       // If we are finalizing types then we can only do that to leaf types. If
@@ -69,7 +71,7 @@ struct TypeFinalizing : public Pass {
       void modifyTypeBuilderEntry(TypeBuilder& typeBuilder,
                                   Index i,
                                   HeapType oldType) override {
-        if (parent.modifiableTypes.count(oldType)) {
+        if (parent.modifiableTypes.contains(oldType)) {
           typeBuilder[i].setOpen(!parent.finalize);
         }
       }

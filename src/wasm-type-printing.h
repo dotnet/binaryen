@@ -32,10 +32,9 @@ namespace wasm {
 // ability to use the generator as a function to print Types and HeapTypes to
 // streams.
 template<typename Subclass> struct TypeNameGeneratorBase {
+  TypeNameGeneratorBase() { assertValidUsage(); }
+
   TypeNames getNames(HeapType type) {
-    static_assert(&TypeNameGeneratorBase<Subclass>::getNames !=
-                    &Subclass::getNames,
-                  "Derived class must implement getNames");
     WASM_UNREACHABLE("Derived class must implement getNames");
   }
   HeapType::Printed operator()(HeapType type) {
@@ -45,6 +44,20 @@ template<typename Subclass> struct TypeNameGeneratorBase {
   Type::Printed operator()(Type type) {
     return type.print(
       [&](HeapType ht) { return static_cast<Subclass*>(this)->getNames(ht); });
+  }
+
+private:
+  constexpr void assertValidUsage() {
+    // This check current causes a crash on MSVC
+    // TODO: Convert to C++20 requires check
+#if !defined(_MSC_VER) && (!defined(__GNUC__) || __GNUC__ >= 14)
+    // Check that the subclass provides `getNames` with the correct type.
+    using Self = TypeNameGeneratorBase<Subclass>;
+    static_assert(
+      static_cast<TypeNames (Self::*)(HeapType)>(&Self::getNames) !=
+        static_cast<TypeNames (Self::*)(HeapType)>(&Subclass::getNames),
+      "Derived class must implement getNames");
+#endif
   }
 };
 

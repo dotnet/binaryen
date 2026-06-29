@@ -145,6 +145,7 @@ struct ReFinalize
   void visitMemory(Memory* curr);
   void visitDataSegment(DataSegment* curr);
   void visitTag(Tag* curr);
+  void visitFunction(Function* curr);
   void visitModule(Module* curr);
 
 private:
@@ -153,6 +154,10 @@ private:
   // Replace an untaken branch/switch with an unreachable value.
   // A condition may also exist and may or may not be unreachable.
   void replaceUntaken(Expression* value, Expression* condition);
+
+  // If we see a pop and also add a block, we need to do EH fixups.
+  bool seenPop = false;
+  bool addedBlock = false;
 };
 
 // Re-finalize a single node. This is slow, if you want to refinalize
@@ -178,94 +183,6 @@ struct ReFinalizeNode : public OverriddenVisitor<ReFinalizeNode> {
       auto* curr = expressionStack[i];
       ReFinalizeNode().visit(curr);
     }
-  }
-};
-
-// Adds drop() operations where necessary. This lets you not worry about adding
-// drop when generating code. This also refinalizes before and after, as
-// dropping can change types, and depends on types being cleaned up - no
-// unnecessary block/if/loop types (see refinalize)
-// TODO: optimize that, interleave them
-struct AutoDrop : public WalkerPass<ExpressionStackWalker<AutoDrop>> {
-  bool isFunctionParallel() override { return true; }
-
-  std::unique_ptr<Pass> create() override {
-    return std::make_unique<AutoDrop>();
-  }
-
-  AutoDrop() { name = "autodrop"; }
-
-  bool maybeDrop(Expression*& child) {
-    bool acted = false;
-    if (child->type.isConcrete()) {
-      expressionStack.push_back(child);
-      if (!ExpressionAnalyzer::isResultUsed(expressionStack, getFunction()) &&
-          !ExpressionAnalyzer::isResultDropped(expressionStack)) {
-        child = Builder(*getModule()).makeDrop(child);
-        acted = true;
-      }
-      expressionStack.pop_back();
-    }
-    return acted;
-  }
-
-  void reFinalize() { ReFinalizeNode::updateStack(expressionStack); }
-
-  void visitBlock(Block* curr) {
-    if (curr->list.size() == 0) {
-      return;
-    }
-    for (Index i = 0; i < curr->list.size() - 1; i++) {
-      auto* child = curr->list[i];
-      if (child->type.isConcrete()) {
-        curr->list[i] = Builder(*getModule()).makeDrop(child);
-      }
-    }
-    if (maybeDrop(curr->list.back())) {
-      reFinalize();
-      assert(curr->type == Type::none || curr->type == Type::unreachable);
-    }
-  }
-
-  void visitIf(If* curr) {
-    bool acted = false;
-    if (maybeDrop(curr->ifTrue)) {
-      acted = true;
-    }
-    if (curr->ifFalse) {
-      if (maybeDrop(curr->ifFalse)) {
-        acted = true;
-      }
-    }
-    if (acted) {
-      reFinalize();
-      assert(curr->type == Type::none);
-    }
-  }
-
-  void visitTry(Try* curr) {
-    bool acted = false;
-    if (maybeDrop(curr->body)) {
-      acted = true;
-    }
-    for (auto* catchBody : curr->catchBodies) {
-      if (maybeDrop(catchBody)) {
-        acted = true;
-      }
-    }
-    if (acted) {
-      reFinalize();
-      assert(curr->type == Type::none);
-    }
-  }
-
-  void doWalkFunction(Function* curr) {
-    ReFinalize().walkFunctionInModule(curr, getModule());
-    walk(curr->body);
-    if (curr->getResults() == Type::none && curr->body->type.isConcrete()) {
-      curr->body = Builder(*getModule()).makeDrop(curr->body);
-    }
-    ReFinalize().walkFunctionInModule(curr, getModule());
   }
 };
 

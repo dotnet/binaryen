@@ -42,10 +42,10 @@
 #include "ir/literal-utils.h"
 #include "ir/memory-utils.h"
 #include "ir/module-utils.h"
+#include "parser/wat-parser.h"
 #include "passes/intrinsics-module.h"
 #include "support/insert_ordered.h"
 #include "wasm-builder.h"
-#include "wasm-s-parser.h"
 
 namespace wasm {
 
@@ -79,11 +79,9 @@ struct RemoveNonJSOpsPass : public WalkerPass<PostWalker<RemoveNonJSOpsPass>> {
     //
     // TODO: only do this once per invocation of wasm2asm
     Module intrinsicsModule;
-    std::string input(IntrinsicsModuleWast);
-    SExpressionParser parser(const_cast<char*>(input.c_str()));
-    Element& root = *parser.root;
-    SExpressionWasmBuilder builder(
-      intrinsicsModule, *root[0], IRProfile::Normal);
+    [[maybe_unused]] auto parsed =
+      WATParser::parseModule(intrinsicsModule, IntrinsicsModuleWast);
+    assert(!parsed.getErr());
 
     std::set<Name> neededFunctions;
 
@@ -339,11 +337,6 @@ struct RemoveNonJSOpsPass : public WalkerPass<PostWalker<RemoveNonJSOpsPass>> {
 
 struct StubUnsupportedJSOpsPass
   : public WalkerPass<PostWalker<StubUnsupportedJSOpsPass>> {
-  bool isFunctionParallel() override { return true; }
-
-  std::unique_ptr<Pass> create() override {
-    return std::make_unique<StubUnsupportedJSOpsPass>();
-  }
 
   void visitUnary(Unary* curr) {
     switch (curr->op) {
@@ -387,6 +380,20 @@ struct StubUnsupportedJSOpsPass
         value, LiteralUtils::makeZero(outputType, *getModule()));
     }
     replaceCurrent(replacement);
+  }
+
+  void visitModule(Module* module) {
+    // We remove global exports, as wasm2js doesn't emit them in a fully
+    // compatible form yet (they aren't instances of WebAssembly.Global).
+    std::vector<Name> badExports;
+    for (auto& exp : module->exports) {
+      if (exp->kind == ExternalKind::Global) {
+        badExports.push_back(exp->name);
+      }
+    }
+    for (auto name : badExports) {
+      module->removeExport(name);
+    }
   }
 };
 

@@ -23,7 +23,10 @@
 //
 // StringLowering does the same, and also replaces those new globals with
 // imported globals of type externref, for use with the string imports proposal.
-// String operations will likewise need to be lowered. TODO
+//
+// A pass argument allows customizing the module name for string constants:
+//
+//   --pass-arg=string-constants-module@MODULE_NAME
 //
 // Specs:
 // https://github.com/WebAssembly/stringref/blob/main/proposals/stringref/Overview.md
@@ -34,12 +37,13 @@
 
 #include "ir/module-utils.h"
 #include "ir/names.h"
-#include "ir/subtype-exprs.h"
 #include "ir/type-updating.h"
 #include "ir/utils.h"
 #include "pass.h"
+#include "passes/string-utils.h"
 #include "support/string.h"
 #include "wasm-builder.h"
+#include "wasm-type.h"
 #include "wasm.h"
 
 namespace wasm {
@@ -111,22 +115,20 @@ struct StringGathering : public Pass {
   // then we can just use that as the global for that string. This avoids
   // repeated executions of the pass adding more and more globals.
   //
-  // Note that we don't note these in newNames: They are already in the right
-  // sorted position, before any uses, as we use the first of them for each
-  // string. Only actually new names need sorting.
-  //
   // Any time we reuse a global, we must not modify its body (or else we'd
   // replace the global that all others read from); we note them here and
   // avoid them in replaceStrings later to avoid such trampling.
   std::unordered_set<Expression**> stringPtrsToPreserve;
 
   void addGlobals(Module* module) {
-    // Note all the new names we create for the sorting later.
-    std::unordered_set<Name> newNames;
+    // The names of the globals that define a string. Such globals may be
+    // referred to by others, and so we will need to sort them, later.
+    std::unordered_set<Name> definingNames;
 
     // Find globals to reuse (see comment on stringPtrsToPreserve for context).
     for (auto& global : module->globals) {
-      if (global->type == nnstringref && !global->imported()) {
+      if (global->type == nnstringref && !global->imported() &&
+          !global->mutable_) {
         if (auto* stringConst = global->init->dynCast<StringConst>()) {
           auto& globalName = stringToGlobalName[stringConst->string];
           if (!globalName.is()) {
@@ -142,22 +144,32 @@ struct StringGathering : public Pass {
     for (Index i = 0; i < strings.size(); i++) {
       auto& globalName = stringToGlobalName[strings[i]];
       if (globalName.is()) {
-        // We are reusing a global for this one.
+        // We are reusing a global for this one, with its existing name.
+        definingNames.insert(globalName);
         continue;
       }
 
       auto& string = strings[i];
+      // Re-encode from WTF-16 to WTF-8 to make the name easier to read.
+      std::stringstream wtf8;
+      [[maybe_unused]] bool valid =
+        String::convertWTF16ToWTF8(wtf8, string.str);
+      assert(valid);
+      // Then escape it because identifiers must be valid UTF-8.
+      // TODO: Use wtf8.view() and escaped.view() once we have C++20.
+      std::stringstream escaped;
+      String::printEscaped(escaped, wtf8.str());
       auto name = Names::getValidGlobalName(
-        *module, std::string("string.const_") + std::string(string.str));
+        *module, std::string("string.const_") + std::string(escaped.str()));
       globalName = name;
-      newNames.insert(name);
+      definingNames.insert(name);
       auto* stringConst = builder.makeStringConst(string);
       auto global =
         builder.makeGlobal(name, nnstringref, stringConst, Builder::Immutable);
       module->addGlobal(std::move(global));
     }
 
-    // Sort our new globals to the start, as other global initializers may use
+    // Sort defining globals to the start, as other global initializers may use
     // them (and it would be invalid for us to appear after a use). This sort is
     // a simple way to ensure that we validate, but it may be unoptimal (we
     // leave that for reorder-globals).
@@ -165,14 +177,15 @@ struct StringGathering : public Pass {
       module->globals.begin(),
       module->globals.end(),
       [&](const std::unique_ptr<Global>& a, const std::unique_ptr<Global>& b) {
-        return newNames.count(a->name) && !newNames.count(b->name);
+        return definingNames.contains(a->name) &&
+               !definingNames.contains(b->name);
       });
   }
 
   void replaceStrings(Module* module) {
     Builder builder(*module);
     for (auto** stringPtr : stringPtrs) {
-      if (stringPtrsToPreserve.count(stringPtr)) {
+      if (stringPtrsToPreserve.contains(stringPtr)) {
         continue;
       }
       auto* stringConst = (*stringPtr)->cast<StringConst>();
@@ -183,6 +196,21 @@ struct StringGathering : public Pass {
 };
 
 struct StringLowering : public StringGathering {
+  // If true, then encode well-formed strings as (import "'" "string...")
+  // instead of emitting them into the JSON custom section.
+  bool useMagicImports;
+
+  // Whether to throw a fatal error on non-UTF8 strings that would not be able
+  // to use the "magic import" mechanism. Only usable in conjunction with magic
+  // imports.
+  bool assertUTF8;
+
+  StringLowering(bool useMagicImports = false, bool assertUTF8 = false)
+    : useMagicImports(useMagicImports), assertUTF8(assertUTF8) {
+    // If we are asserting valid UTF-8, we must be using magic imports.
+    assert(!assertUTF8 || useMagicImports);
+  }
+
   void run(Module* module) override {
     if (!module->features.has(FeatureSet::Strings)) {
       return;
@@ -200,9 +228,6 @@ struct StringLowering : public StringGathering {
     // Replace string.* etc. operations with imported ones.
     replaceInstructions(module);
 
-    // Replace ref.null types as needed.
-    replaceNulls(module);
-
     // ReFinalize to apply all the above changes.
     ReFinalize().run(getPassRunner(), module);
 
@@ -211,95 +236,122 @@ struct StringLowering : public StringGathering {
   }
 
   void makeImports(Module* module) {
-    Index importIndex = 0;
+    Name stringConstsModule =
+      getArgumentOrDefault("string-constants-module", WasmStringConstsModule);
+    Index jsonImportIndex = 0;
     std::stringstream json;
-    json << '[';
     bool first = true;
-    std::vector<Name> importedStrings;
     for (auto& global : module->globals) {
       if (global->init) {
         if (auto* c = global->init->dynCast<StringConst>()) {
-          global->module = "string.const";
-          global->base = std::to_string(importIndex);
-          importIndex++;
-          global->init = nullptr;
-
-          if (first) {
-            first = false;
+          std::stringstream utf8;
+          if (useMagicImports &&
+              String::convertUTF16ToUTF8(utf8, c->string.str)) {
+            global->module = stringConstsModule;
+            global->base = Name(utf8.str());
           } else {
-            json << ',';
+            if (assertUTF8) {
+              std::stringstream escaped;
+              String::printEscaped(escaped, utf8.str());
+              Fatal() << "Cannot lower non-UTF-16 string " << escaped.str()
+                      << '\n';
+            }
+            global->module = "string.const";
+            global->base = std::to_string(jsonImportIndex);
+            if (first) {
+              first = false;
+            } else {
+              json << ',';
+            }
+            String::printEscapedJSON(json, c->string.str);
+            jsonImportIndex++;
           }
-          String::printEscapedJSON(json, c->string.str);
+          global->init = nullptr;
         }
       }
     }
 
-    // Add a custom section with the JSON.
-    json << ']';
-    auto str = json.str();
-    auto vec = std::vector<char>(str.begin(), str.end());
-    module->customSections.emplace_back(
-      CustomSection{"string.consts", std::move(vec)});
+    auto jsonString = json.str();
+    if (!jsonString.empty()) {
+      // If we are asserting UTF8, then we shouldn't be generating any JSON.
+      assert(!assertUTF8);
+      // Add a custom section with the JSON.
+      auto str = '[' + jsonString + ']';
+      auto vec = std::vector<char>(str.begin(), str.end());
+      module->customSections.emplace_back(
+        CustomSection{"string.consts", std::move(vec)});
+    }
   }
 
   // Common types used in imports.
-  Type nullArray16 = Type(Array(Field(Field::i16, Mutable)), Nullable);
+  Type nullArray16 = Type(HeapTypes::getMutI16Array(), Nullable);
   Type nullExt = Type(HeapType::ext, Nullable);
   Type nnExt = Type(HeapType::ext, NonNullable);
 
   void updateTypes(Module* module) {
     TypeMapper::TypeUpdates updates;
 
-    // There is no difference between strings and views with imported strings:
-    // they are all just JS strings, so they all turn into externref.
+    // TypeMapper will not handle public types, but we do want to modify them as
+    // well: we are modifying the public ABI here. We can't simply tell
+    // TypeMapper to consider them private, as then they'd end up in the new big
+    // rec group with the private types (and as they are public, that would make
+    // the entire rec group public, and all types in the module with it).
+    // Instead, manually handle singleton-rec groups of function types. This
+    // keeps them at size 1, as expected, and handles the cases of function
+    // imports and exports. If we need more (non-function types, non-singleton
+    // rec groups, etc.) then more work will be necessary TODO
+    //
+    // Note that we do this before TypeMapper, which allows it to then fix up
+    // things like the types of parameters (which depend on the type of the
+    // function, which must be modified either in TypeMapper - but as just
+    // explained we cannot do that - or before it, which is what we do here).
+    for (auto& func : module->functions) {
+      if (func->type.getHeapType().getRecGroup().size() != 1 ||
+          !func->type.getFeatures().hasStrings()) {
+        continue;
+      }
+
+      // Fix up the stringrefs in this type that uses strings and is in a
+      // singleton rec group.
+      std::vector<Type> params, results;
+      auto fix = [](Type t) {
+        if (t.isRef() && t.getHeapType().isMaybeShared(HeapType::string)) {
+          auto share = t.getHeapType().getShared();
+          t = Type(HeapTypes::ext.getBasic(share), t.getNullability());
+        }
+        return t;
+      };
+      for (auto param : func->type.getHeapType().getSignature().params) {
+        params.push_back(fix(param));
+      }
+      for (auto result : func->type.getHeapType().getSignature().results) {
+        results.push_back(fix(result));
+      }
+
+      // In addition to doing the update, mark it in the map of updates for
+      // TypeMapper, so RefFuncs with this type get updated.
+      auto old = func->type;
+      func->type = func->type.with(Signature(params, results));
+      updates[old.getHeapType()] = func->type.getHeapType();
+    }
+
+    // Strings turn into externref.
     updates[HeapType::string] = HeapType::ext;
-    updates[HeapType::stringview_wtf8] = HeapType::ext;
-    updates[HeapType::stringview_wtf16] = HeapType::ext;
-    updates[HeapType::stringview_iter] = HeapType::ext;
 
-    // The module may have its own array16 type inside a big rec group, but
-    // imported strings expects that type in its own rec group as part of the
-    // ABI. Fix that up here. (This is valid to do as this type has no sub- or
-    // super-types anyhow; it is "plain old data" for communicating with the
-    // outside.)
-    auto allTypes = ModuleUtils::collectHeapTypes(*module);
-    auto array16 = nullArray16.getHeapType();
-    auto array16Element = array16.getArray().element;
-    for (auto type : allTypes) {
-      // Match an array type with no super and that is closed.
-      if (type.isArray() && !type.getDeclaredSuperType() && !type.isOpen() &&
-          type.getArray().element == array16Element) {
-        updates[type] = array16;
-      }
-    }
-
-    // We consider all types that use strings as modifiable, which means we
-    // mark them as non-public. That is, we are doing something TypeMapper
-    // normally does not, as we are changing the external interface/ABI of the
-    // module: we are changing that ABI from using strings to externs.
-    auto publicTypes = ModuleUtils::getPublicHeapTypes(*module);
-    std::vector<HeapType> stringUsers;
-    for (auto t : publicTypes) {
-      if (Type(t, Nullable).getFeatures().hasStrings()) {
-        stringUsers.push_back(t);
-      }
-    }
-
-    TypeMapper(*module, updates).map(stringUsers);
+    TypeMapper(*module, updates).map();
   }
 
   // Imported string functions.
   Name fromCharCodeArrayImport;
   Name intoCharCodeArrayImport;
   Name fromCodePointImport;
+  Name concatImport;
   Name equalsImport;
+  Name testImport;
   Name compareImport;
   Name lengthImport;
   Name charCodeAtImport;
   Name substringImport;
-
-  // The name of the module to import string functions from.
-  Name WasmStringsModule = "wasm:js-string";
 
   // Creates an imported string function, returning its name (which is equal to
   // the true name of the import, if there is no conflict).
@@ -307,7 +359,8 @@ struct StringLowering : public StringGathering {
     auto name = Names::getValidFunctionName(*module, trueName);
     auto sig = Signature(params, results);
     Builder builder(*module);
-    auto* func = module->addFunction(builder.makeFunction(name, sig, {}));
+    auto* func = module->addFunction(
+      builder.makeFunction(name, Type(sig, NonNullable, Inexact), {}));
     func->module = WasmStringsModule;
     func->base = trueName;
     return name;
@@ -322,6 +375,8 @@ struct StringLowering : public StringGathering {
       module, "fromCharCodeArray", {nullArray16, Type::i32, Type::i32}, nnExt);
     // string.fromCodePoint: codepoint -> ext
     fromCodePointImport = addImport(module, "fromCodePoint", Type::i32, nnExt);
+    // string.concat: string, string -> string
+    concatImport = addImport(module, "concat", {nullExt, nullExt}, nnExt);
     // string.intoCharCodeArray: string, array, start -> num written
     intoCharCodeArrayImport = addImport(module,
                                         "intoCharCodeArray",
@@ -329,6 +384,8 @@ struct StringLowering : public StringGathering {
                                         Type::i32);
     // string.equals: string, string -> i32
     equalsImport = addImport(module, "equals", {nullExt, nullExt}, Type::i32);
+    // string.test: externref -> i32
+    testImport = addImport(module, "test", {nullExt}, Type::i32);
     // string.compare: string, string -> i32
     compareImport = addImport(module, "compare", {nullExt, nullExt}, Type::i32);
     // string.length: string -> i32
@@ -357,37 +414,32 @@ struct StringLowering : public StringGathering {
         switch (curr->op) {
           case StringNewWTF16Array:
             replaceCurrent(builder.makeCall(lowering.fromCharCodeArrayImport,
-                                            {curr->ptr, curr->start, curr->end},
+                                            {curr->ref, curr->start, curr->end},
                                             lowering.nnExt));
             return;
           case StringNewFromCodePoint:
             replaceCurrent(builder.makeCall(
-              lowering.fromCodePointImport, {curr->ptr}, lowering.nnExt));
+              lowering.fromCodePointImport, {curr->ref}, lowering.nnExt));
             return;
           default:
             WASM_UNREACHABLE("TODO: all of string.new*");
         }
       }
 
-      void visitStringAs(StringAs* curr) {
-        // There is no difference between strings and views with imported
-        // strings: they are all just JS strings, so no conversion is needed.
-        // However, we must keep the same nullability: the output of StringAs
-        // must be non-nullable.
-        auto* ref = curr->ref;
-        if (ref->type.isNullable()) {
-          ref = Builder(*getModule()).makeRefAs(RefAsNonNull, ref);
-        }
-        replaceCurrent(ref);
+      void visitStringConcat(StringConcat* curr) {
+        Builder builder(*getModule());
+        replaceCurrent(builder.makeCall(
+          lowering.concatImport, {curr->left, curr->right}, lowering.nnExt));
       }
 
       void visitStringEncode(StringEncode* curr) {
         Builder builder(*getModule());
         switch (curr->op) {
           case StringEncodeWTF16Array:
-            replaceCurrent(builder.makeCall(lowering.intoCharCodeArrayImport,
-                                            {curr->ref, curr->ptr, curr->start},
-                                            Type::i32));
+            replaceCurrent(
+              builder.makeCall(lowering.intoCharCodeArrayImport,
+                               {curr->str, curr->array, curr->start},
+                               Type::i32));
             return;
           default:
             WASM_UNREACHABLE("TODO: all of string.encode*");
@@ -410,16 +462,16 @@ struct StringLowering : public StringGathering {
         }
       }
 
+      void visitStringTest(StringTest* curr) {
+        Builder builder(*getModule());
+        replaceCurrent(
+          builder.makeCall(lowering.testImport, {curr->ref}, Type::i32));
+      }
+
       void visitStringMeasure(StringMeasure* curr) {
         Builder builder(*getModule());
-        switch (curr->op) {
-          case StringMeasureWTF16View:
-            replaceCurrent(
-              builder.makeCall(lowering.lengthImport, {curr->ref}, Type::i32));
-            return;
-          default:
-            WASM_UNREACHABLE("invalid string.measure*");
-        }
+        replaceCurrent(
+          builder.makeCall(lowering.lengthImport, {curr->ref}, Type::i32));
       }
 
       void visitStringWTF16Get(StringWTF16Get* curr) {
@@ -430,15 +482,9 @@ struct StringLowering : public StringGathering {
 
       void visitStringSliceWTF(StringSliceWTF* curr) {
         Builder builder(*getModule());
-        switch (curr->op) {
-          case StringSliceWTF16:
-            replaceCurrent(builder.makeCall(lowering.substringImport,
-                                            {curr->ref, curr->start, curr->end},
-                                            lowering.nnExt));
-            return;
-          default:
-            WASM_UNREACHABLE("TODO: all string.slice*");
-        }
+        replaceCurrent(builder.makeCall(lowering.substringImport,
+                                        {curr->ref, curr->start, curr->end},
+                                        lowering.nnExt));
       }
     };
 
@@ -446,60 +492,13 @@ struct StringLowering : public StringGathering {
     replacer.run(getPassRunner(), module);
     replacer.walkModuleCode(module);
   }
-
-  // A ref.null of none needs to be noext if it is going to a location of type
-  // stringref.
-  void replaceNulls(Module* module) {
-    // Use SubtypingDiscoverer to find when a ref.null of none flows into a
-    // place that has been changed from stringref to externref.
-    struct NullFixer
-      : public WalkerPass<
-          ControlFlowWalker<NullFixer, SubtypingDiscoverer<NullFixer>>> {
-      // Hooks for SubtypingDiscoverer.
-      void noteSubtype(Type, Type) {
-        // Nothing to do for pure types.
-      }
-      void noteSubtype(HeapType, HeapType) {
-        // Nothing to do for pure types.
-      }
-      void noteSubtype(Type, Expression*) {
-        // Nothing to do for a subtype of an expression.
-      }
-      void noteSubtype(Expression* a, Type b) {
-        // This is the case we care about: if |a| is a null that must be a
-        // subtype of ext then we fix that up.
-        if (b.isRef() && b.getHeapType().getTop() == HeapType::ext) {
-          if (auto* null = a->dynCast<RefNull>()) {
-            null->finalize(HeapType::noext);
-          }
-        }
-      }
-      void noteSubtype(Expression* a, Expression* b) {
-        // Only the type matters of the place we assign to.
-        noteSubtype(a, b->type);
-      }
-      void noteNonFlowSubtype(Expression* a, Type b) {
-        // Flow or non-flow is the same for us.
-        noteSubtype(a, b);
-      }
-      void noteCast(HeapType, HeapType) {
-        // Casts do not concern us.
-      }
-      void noteCast(Expression*, Type) {
-        // Casts do not concern us.
-      }
-      void noteCast(Expression*, Expression*) {
-        // Casts do not concern us.
-      }
-    };
-
-    NullFixer fixer;
-    fixer.run(getPassRunner(), module);
-    fixer.walkModuleCode(module);
-  }
 };
 
 Pass* createStringGatheringPass() { return new StringGathering(); }
 Pass* createStringLoweringPass() { return new StringLowering(); }
+Pass* createStringLoweringMagicImportPass() { return new StringLowering(true); }
+Pass* createStringLoweringMagicImportAssertPass() {
+  return new StringLowering(true, true);
+}
 
 } // namespace wasm

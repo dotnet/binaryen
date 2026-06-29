@@ -16,17 +16,19 @@
 
 // The process of module splitting involves these steps:
 //
-//   1. Create the new secondary module.
+//   1. Create the new secondary modules.
 //
-//   2. Export globals, tags, tables, and memories from the primary module and
-//      import them in the secondary module.
+//   2. Move the deferred functions from the primary to each of the secondary
+//      modules.
 //
-//   3. Move the deferred functions from the primary to the secondary module.
-//
-//   4. For any secondary function exported from the primary module, export in
+//   3. For any secondary function exported from the primary module, export in
 //      its place a trampoline function that makes an indirect call to its
 //      placeholder function (and eventually to the original secondary
 //      function), allocating a new table slot for the placeholder if necessary.
+//
+//   4. Replace all references to each secondary module's functions in the
+//      primary module's and each other secondary module's table segments with
+//      references to imported placeholder functions.
 //
 //   5. Rewrite direct calls from primary functions to secondary functions to be
 //      indirect calls to their placeholder functions (and eventually to their
@@ -35,24 +37,22 @@
 //
 //   6. For each primary function directly called from a secondary function,
 //      export the primary function if it is not already exported and import it
-//      into the secondary module.
+//      into each secondary module using it.
 //
-//   7. Replace all references to secondary functions in the primary module's
-//      table segments with references to imported placeholder functions.
-//
-//   8. Create new active table segments in the secondary module that will
-//      replace all the placeholder function references in the table with
-//      references to their corresponding secondary functions upon
+//   7. For each secondary module, create new active table segments in the
+//      module that will replace all the placeholder function references in the
+//      table with references to their corresponding secondary functions upon
 //      instantiation.
 //
+//   8. Export globals, tags, tables, and memories from the primary module and
+//      import them in the secondary modules. If possible, move those module
+//      items instead to the secondary modules.
+//
 // Functions can be used or referenced three ways in a WebAssembly module: they
-// can be exported, called, or placed in a table. The above procedure introduces
-// a layer of indirection to each of those mechanisms that removes all
-// references to secondary functions from the primary module but restores the
-// original program's semantics once the secondary module is instantiated. As
-// more mechanisms that reference functions are added in the future, such as
-// ref.func instructions, they will have to be modified to use a similar layer
-// of indirection.
+// can be exported, called, or referenced with ref.func. The above procedure
+// introduces a layer of indirection to each of those mechanisms that removes
+// all references to secondary functions from the primary module but restores
+// the original program's semantics once the secondary modules are instantiated.
 //
 // The code as currently written makes a couple assumptions about the module
 // that is being split:
@@ -64,16 +64,21 @@
 //
 //   2. It assumes that either all table segment offsets are constants or there
 //      is exactly one segment that may have a non-constant offset. It also
-//      assumes that all segments are active segments (although Binaryen does
-//      not yet support passive table segments anyway).
-
+//      assumes that all segments are active segments.
+//
+//   3. It assumes that if exact function references are required for validity
+//      (because they are stored in a local with an exact function type, for
+//      example), then custom descriptors are allowed so primary functions can
+//      be imported exactly. This could be worked around by removing exactness
+//      from the IR before splitting.
+//
 #include "ir/module-splitting.h"
-#include "ir/element-utils.h"
 #include "ir/export-utils.h"
-#include "ir/manipulation.h"
+#include "ir/find_all.h"
 #include "ir/module-utils.h"
 #include "ir/names.h"
-#include "pass.h"
+#include "support/insert_ordered.h"
+#include "support/unique_deferring_queue.h"
 #include "wasm-builder.h"
 #include "wasm.h"
 
@@ -81,21 +86,18 @@ namespace wasm::ModuleSplitting {
 
 namespace {
 
-static const Name LOAD_SECONDARY_STATUS = "load_secondary_module_status";
-
 template<class F> void forEachElement(Module& module, F f) {
   ModuleUtils::iterActiveElementSegments(module, [&](ElementSegment* segment) {
     Name base = "";
     Index offset = 0;
     if (auto* c = segment->offset->dynCast<Const>()) {
-      offset = c->value.geti32();
+      offset = c->value.getInteger();
     } else if (auto* g = segment->offset->dynCast<GlobalGet>()) {
       base = g->name;
     }
-    ElementUtils::iterElementSegmentFunctionNames(
-      segment, [&](Name& entry, Index i) {
-        f(segment->table, base, offset + i, entry);
-      });
+    for (Index i = 0; i < segment->data.size(); ++i) {
+      f(segment->table, base, offset + i, segment->data[i]);
+    }
   });
 }
 
@@ -129,11 +131,15 @@ struct TableSlotManager {
 
 Expression* TableSlotManager::Slot::makeExpr(Module& module) {
   Builder builder(module);
-  auto makeIndex = [&]() { return builder.makeConst(int32_t(index)); };
+  auto* table = module.getTable(tableName);
+  auto makeIndex = [&]() {
+    return builder.makeConst(Literal::makeFromInt32(index, table->addressType));
+  };
   if (global.size()) {
-    Expression* getBase = builder.makeGlobalGet(global, Type::i32);
+    Expression* getBase = builder.makeGlobalGet(global, table->addressType);
+    auto addOp = table->is64() ? AddInt64 : AddInt32;
     return index == 0 ? getBase
-                      : builder.makeBinary(AddInt32, getBase, makeIndex());
+                      : builder.makeBinary(addOp, getBase, makeIndex());
   } else {
     return makeIndex();
   }
@@ -145,6 +151,27 @@ void TableSlotManager::addSlot(Name func, Slot slot) {
 }
 
 TableSlotManager::TableSlotManager(Module& module) : module(module) {
+  // If possible, just create a new table to manage all primary-to-secondary
+  // calls lazily. Do not re-use slots for functions that will already be in
+  // existing tables, since that is not correct in the face of table mutations.
+  // However, do not do this for emscripten; its loader code (and dynamic
+  // loading in particular) do not support this yet.
+  // TODO: Reduce overhead by creating a separate table for each function type
+  // if WasmGC is enabled.
+  Export* emscriptenTableExport =
+    module.getExportOrNull("__indirect_function_table");
+  Table* singletonTable =
+    module.tables.size() == 1 ? module.tables[0].get() : nullptr;
+  bool emscriptenTableImport =
+    singletonTable && singletonTable->imported() &&
+    singletonTable->module == "env" &&
+    singletonTable->base == "__indirect_function_table";
+
+  if (module.features.hasReferenceTypes() && !emscriptenTableExport &&
+      !emscriptenTableImport) {
+    return;
+  }
+
   // TODO: Reject or handle passive element segments
   auto funcref = Type(HeapType::func, Nullable);
   auto it = std::find_if(
@@ -152,6 +179,7 @@ TableSlotManager::TableSlotManager(Module& module) : module(module) {
     module.tables.end(),
     [&](std::unique_ptr<Table>& table) { return table->type == funcref; });
   if (it == module.tables.end()) {
+    // There is no indirect function table, so we will create one lazily.
     return;
   }
 
@@ -161,13 +189,17 @@ TableSlotManager::TableSlotManager(Module& module) : module(module) {
       activeTableSegments.push_back(segment);
     });
 
-  // If there is exactly one table segment and that segment has a non-constant
-  // offset, append new items to the end of that segment. In all other cases,
-  // append new items at constant offsets after all existing items at constant
-  // offsets.
-  if (activeTableSegments.size() == 1 &&
-      activeTableSegments[0]->type == funcref &&
-      !activeTableSegments[0]->offset->is<Const>()) {
+  if (activeTableSegments.empty()) {
+    // There are no active segments, so we will lazily create one and start
+    // filling it at index 0.
+    activeBase = {activeTable->name, "", 0};
+  } else if (activeTableSegments.size() == 1 &&
+             activeTableSegments[0]->type == funcref &&
+             !activeTableSegments[0]->offset->is<Const>()) {
+    // If there is exactly one table segment and that segment has a non-constant
+    // offset, append new items to the end of that segment. In all other cases,
+    // append new items at constant offsets after all existing items at constant
+    // offsets.
     assert(activeTableSegments[0]->offset->is<GlobalGet>() &&
            "Unexpected initializer instruction");
     activeSegment = activeTableSegments[0];
@@ -183,7 +215,7 @@ TableSlotManager::TableSlotManager(Module& module) : module(module) {
     for (auto& segment : activeTableSegments) {
       assert(segment->offset->is<Const>() &&
              "Unexpected non-const segment offset with multiple segments");
-      Index segmentBase = segment->offset->cast<Const>()->value.geti32();
+      Index segmentBase = segment->offset->cast<Const>()->value.getInteger();
       if (segmentBase + segment->data.size() >= maxIndex) {
         maxIndex = segmentBase + segment->data.size();
         activeSegment = segment;
@@ -193,9 +225,12 @@ TableSlotManager::TableSlotManager(Module& module) : module(module) {
   }
 
   // Initialize funcIndices with the functions already in the table.
-  forEachElement(module, [&](Name table, Name base, Index offset, Name func) {
-    addSlot(func, {table, base, offset});
-  });
+  forEachElement(module,
+                 [&](Name table, Name base, Index offset, Expression* elem) {
+                   if (auto* func = elem->dynCast<RefFunc>()) {
+                     addSlot(func->func, {table, base, offset});
+                   }
+                 });
 }
 
 Table* TableSlotManager::makeTable() {
@@ -204,10 +239,13 @@ Table* TableSlotManager::makeTable() {
 }
 
 ElementSegment* TableSlotManager::makeElementSegment() {
+  Builder builder(module);
+  Expression* offset =
+    builder.makeConst(Literal::makeFromInt32(0, activeTable->addressType));
   return module.addElementSegment(Builder::makeElementSegment(
     Names::getValidElementSegmentName(module, Name::fromInt(0)),
     activeTable->name,
-    Builder(module).makeConst(int32_t(0))));
+    offset));
 }
 
 TableSlotManager::Slot TableSlotManager::getSlot(Name func, HeapType type) {
@@ -238,7 +276,8 @@ TableSlotManager::Slot TableSlotManager::getSlot(Name func, HeapType type) {
                   activeBase.index + Index(activeSegment->data.size())};
 
   Builder builder(module);
-  activeSegment->data.push_back(builder.makeRefFunc(func, type));
+  auto funcType = Type(type, NonNullable, Inexact);
+  activeSegment->data.push_back(builder.makeRefFunc(func, funcType));
 
   addSlot(func, newSlot);
   if (activeTable->initial <= newSlot.index) {
@@ -256,14 +295,13 @@ TableSlotManager::Slot TableSlotManager::getSlot(Name func, HeapType type) {
 
 struct ModuleSplitter {
   const Config& config;
-  std::unique_ptr<Module> secondaryPtr;
+  std::vector<std::unique_ptr<Module>> secondaries;
 
   Module& primary;
-  Module& secondary;
 
-  const std::pair<std::set<Name>, std::set<Name>> classifiedFuncs;
-  const std::set<Name>& primaryFuncs;
-  const std::set<Name>& secondaryFuncs;
+  std::unordered_set<Name> primaryFuncs;
+  std::unordered_set<Name> allSecondaryFuncs;
+  std::unordered_map<Name, Index> funcToSecondaryIndex;
 
   TableSlotManager tableManager;
 
@@ -271,68 +309,47 @@ struct ModuleSplitter {
 
   // Map from internal function names to (one of) their corresponding export
   // names.
-  std::map<Name, Name> exportedPrimaryFuncs;
+  std::unordered_map<Name, Name> exportedPrimaryFuncs;
 
-  // Map placeholder indices to the names of the functions they replace.
-  std::map<size_t, Name> placeholderMap;
+  // For each table, map placeholder indices to the names of the functions they
+  // replace.
+  std::unordered_map<Name, std::map<size_t, Name>> placeholderMap;
 
-  // Internal name of the LOAD_SECONDARY_MODULE function.
-  Name internalLoadSecondaryModule;
+  // Map from original secondary function name to its trampoline
+  std::unordered_map<Name, Name> trampolineMap;
 
   // Initialization helpers
   static std::unique_ptr<Module> initSecondary(const Module& primary);
-  static std::pair<std::set<Name>, std::set<Name>>
-  classifyFunctions(const Module& primary, const Config& config);
-  static std::map<Name, Name> initExportedPrimaryFuncs(const Module& primary);
+  static std::unordered_map<Name, Name>
+  initExportedPrimaryFuncs(const Module& primary);
 
   // Other helpers
-  void exportImportFunction(Name func);
-  Expression* maybeLoadSecondary(Builder& builder, Expression* callIndirect);
+  void exportImportFunction(Name func, const std::set<Module*>& modules);
+  Name getTrampoline(Name funcName);
 
   // Main splitting steps
-  void setupJSPI();
+  void classifyFunctions();
   void moveSecondaryFunctions();
   void thunkExportedSecondaryFunctions();
+  void indirectReferencesToSecondaryFunctions();
   void indirectCallsToSecondaryFunctions();
   void exportImportCalledPrimaryFunctions();
   void setupTablePatching();
   void shareImportableItems();
 
   ModuleSplitter(Module& primary, const Config& config)
-    : config(config), secondaryPtr(initSecondary(primary)), primary(primary),
-      secondary(*secondaryPtr),
-      classifiedFuncs(classifyFunctions(primary, config)),
-      primaryFuncs(classifiedFuncs.first),
-      secondaryFuncs(classifiedFuncs.second), tableManager(primary),
+    : config(config), primary(primary), tableManager(primary),
       exportedPrimaryFuncs(initExportedPrimaryFuncs(primary)) {
-    if (config.jspi) {
-      setupJSPI();
-    }
+    classifyFunctions();
     moveSecondaryFunctions();
     thunkExportedSecondaryFunctions();
+    indirectReferencesToSecondaryFunctions();
     indirectCallsToSecondaryFunctions();
     exportImportCalledPrimaryFunctions();
     setupTablePatching();
     shareImportableItems();
   }
 };
-
-void ModuleSplitter::setupJSPI() {
-  assert(primary.getExportOrNull(LOAD_SECONDARY_MODULE) &&
-         "The load secondary module function must exist");
-  // Remove the exported LOAD_SECONDARY_MODULE function since it's only needed
-  // internally.
-  internalLoadSecondaryModule = primary.getExport(LOAD_SECONDARY_MODULE)->value;
-  primary.removeExport(LOAD_SECONDARY_MODULE);
-  Builder builder(primary);
-  // Add a global to track whether the secondary module has been loaded yet.
-  primary.addGlobal(builder.makeGlobal(LOAD_SECONDARY_STATUS,
-                                       Type::i32,
-                                       builder.makeConst(int32_t(0)),
-                                       Builder::Mutable));
-  primary.addExport(builder.makeExport(
-    LOAD_SECONDARY_STATUS, LOAD_SECONDARY_STATUS, ExternalKind::Global));
-}
 
 std::unique_ptr<Module> ModuleSplitter::initSecondary(const Module& primary) {
   // Create the secondary module and copy trivial properties.
@@ -342,37 +359,92 @@ std::unique_ptr<Module> ModuleSplitter::initSecondary(const Module& primary) {
   return secondary;
 }
 
-std::pair<std::set<Name>, std::set<Name>>
-ModuleSplitter::classifyFunctions(const Module& primary, const Config& config) {
-  std::set<Name> primaryFuncs, secondaryFuncs;
+void ModuleSplitter::classifyFunctions() {
+  // Find functions that refer to data or element segments. These functions must
+  // remain in the primary module because segments cannot be exported to be
+  // accessed from the secondary module.
+  //
+  // TODO: Investigate other options, such as moving the segments to the
+  // secondary module or replacing the segment-using instructions in the
+  // secondary module with calls to imports.
+  ModuleUtils::ParallelFunctionAnalysis<std::vector<Name>>
+    segmentReferrerCollector(
+      primary, [&](Function* func, std::vector<Name>& segmentReferrers) {
+        if (func->imported()) {
+          return;
+        }
+
+        struct SegmentReferrerCollector
+          : PostWalker<SegmentReferrerCollector,
+                       UnifiedExpressionVisitor<SegmentReferrerCollector>> {
+          bool hasSegmentReference = false;
+
+          void visitExpression(Expression* curr) {
+
+#define DELEGATE_ID curr->_id
+
+#define DELEGATE_START(id) [[maybe_unused]] auto* cast = curr->cast<id>();
+#define DELEGATE_GET_FIELD(id, field) cast->field
+#define DELEGATE_FIELD_TYPE(id, field)
+#define DELEGATE_FIELD_HEAPTYPE(id, field)
+#define DELEGATE_FIELD_CHILD(id, field)
+#define DELEGATE_FIELD_OPTIONAL_CHILD(id, field)
+#define DELEGATE_FIELD_INT(id, field)
+#define DELEGATE_FIELD_LITERAL(id, field)
+#define DELEGATE_FIELD_NAME(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_DEF(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_USE(id, field)
+#define DELEGATE_FIELD_ADDRESS(id, field)
+
+#define DELEGATE_FIELD_NAME_KIND(id, field, kind)                              \
+  if (kind == ModuleItemKind::DataSegment ||                                   \
+      kind == ModuleItemKind::ElementSegment) {                                \
+    hasSegmentReference = true;                                                \
+  }
+
+#include "wasm-delegations-fields.def"
+          }
+        };
+        SegmentReferrerCollector collector;
+        collector.walkFunction(func);
+        if (collector.hasSegmentReference) {
+          segmentReferrers.push_back(func->name);
+        }
+      });
+
+  std::unordered_set<Name> segmentReferrers;
+  for (auto& [_, referrers] : segmentReferrerCollector.map) {
+    segmentReferrers.insert(referrers.begin(), referrers.end());
+  }
+
+  std::unordered_set<Name> configSecondaryFuncs;
+  for (auto& funcs : config.secondaryFuncs) {
+    configSecondaryFuncs.insert(funcs.begin(), funcs.end());
+  }
   for (auto& func : primary.functions) {
-    // In JSPI mode exported functions cannot be moved to the secondary
-    // module since that would make them async when they may not have the JSPI
-    // wrapper. Exported JSPI functions can still benefit from splitting though
-    // since only the JSPI wrapper stub will remain in the primary module.
-    if (func->imported() || config.primaryFuncs.count(func->name) ||
-        (config.jspi && ExportUtils::isExported(primary, *func))) {
+    if (func->imported() || !configSecondaryFuncs.contains(func->name) ||
+        segmentReferrers.contains(func->name)) {
       primaryFuncs.insert(func->name);
     } else {
       assert(func->name != primary.start && "The start function must be kept");
-      secondaryFuncs.insert(func->name);
+      allSecondaryFuncs.insert(func->name);
     }
   }
-  return std::make_pair(primaryFuncs, secondaryFuncs);
 }
 
-std::map<Name, Name>
+std::unordered_map<Name, Name>
 ModuleSplitter::initExportedPrimaryFuncs(const Module& primary) {
-  std::map<Name, Name> functionExportNames;
+  std::unordered_map<Name, Name> functionExportNames;
   for (auto& ex : primary.exports) {
     if (ex->kind == ExternalKind::Function) {
-      functionExportNames[ex->value] = ex->name;
+      functionExportNames[*ex->getInternalName()] = ex->name;
     }
   }
   return functionExportNames;
 }
 
-void ModuleSplitter::exportImportFunction(Name funcName) {
+void ModuleSplitter::exportImportFunction(Name funcName,
+                                          const std::set<Module*>& modules) {
   Name exportName;
   // If the function is already exported, use the existing export name.
   // Otherwise, create a new export for it.
@@ -394,22 +466,60 @@ void ModuleSplitter::exportImportFunction(Name funcName) {
   }
   // Import the function if it is not already imported into the secondary
   // module.
-  if (secondary.getFunctionOrNull(funcName) == nullptr) {
-    auto func =
-      Builder::makeFunction(funcName, primary.getFunction(funcName)->type, {});
-    func->module = config.importNamespace;
-    func->base = exportName;
-    secondary.addFunction(std::move(func));
+  for (auto* secondary : modules) {
+    if (secondary->getFunctionOrNull(funcName) == nullptr) {
+      auto primaryFunc = primary.getFunction(funcName);
+      auto func = Builder::makeFunction(funcName, primaryFunc->type, {});
+      func->hasExplicitName = primaryFunc->hasExplicitName;
+      func->module = config.importNamespace;
+      func->base = exportName;
+      func->type = func->type.withInexactIfNoCustomDescs(secondary->features);
+      secondary->addFunction(std::move(func));
+    }
   }
 }
 
 void ModuleSplitter::moveSecondaryFunctions() {
-  // Move the specified functions from the primary to the secondary module.
-  for (auto funcName : secondaryFuncs) {
-    auto* func = primary.getFunction(funcName);
-    ModuleUtils::copyFunction(func, secondary);
-    primary.removeFunction(funcName);
+  // Move the specified functions from the primary to the secondary modules.
+  for (auto& funcNames : config.secondaryFuncs) {
+    auto secondary = initSecondary(primary);
+    for (auto funcName : funcNames) {
+      if (allSecondaryFuncs.contains(funcName)) {
+        auto* func = primary.getFunction(funcName);
+        ModuleUtils::copyFunction(func, *secondary);
+        primary.removeFunction(funcName);
+        funcToSecondaryIndex[funcName] = secondaries.size();
+      }
+    }
+    secondaries.push_back(std::move(secondary));
   }
+}
+
+Name ModuleSplitter::getTrampoline(Name funcName) {
+  auto [it, inserted] = trampolineMap.insert({funcName, Name()});
+  if (!inserted) {
+    return it->second;
+  }
+
+  Builder builder(primary);
+  Module& secondary = *secondaries.at(funcToSecondaryIndex.at(funcName));
+  auto* oldFunc = secondary.getFunction(funcName);
+  auto trampoline = Names::getValidFunctionName(
+    primary, std::string("trampoline_") + funcName.toString());
+  it->second = trampoline;
+
+  // Generate the call and the function.
+  std::vector<Expression*> args;
+  for (Index i = 0; i < oldFunc->getNumParams(); i++) {
+    args.push_back(builder.makeLocalGet(i, oldFunc->getLocalType(i)));
+  }
+  auto* call = builder.makeCall(funcName, args, oldFunc->getResults());
+
+  auto func = builder.makeFunction(trampoline, oldFunc->type, {}, call);
+  func->hasExplicitName = oldFunc->hasExplicitName;
+  primary.addFunction(std::move(func));
+  primaryFuncs.insert(trampoline);
+  return trampoline;
 }
 
 void ModuleSplitter::thunkExportedSecondaryFunctions() {
@@ -421,105 +531,203 @@ void ModuleSplitter::thunkExportedSecondaryFunctions() {
   Builder builder(primary);
   for (auto& ex : primary.exports) {
     if (ex->kind != ExternalKind::Function ||
-        !secondaryFuncs.count(ex->value)) {
+        !allSecondaryFuncs.contains(*ex->getInternalName())) {
       continue;
     }
-    Name secondaryFunc = ex->value;
-    if (primary.getFunctionOrNull(secondaryFunc)) {
-      // We've already created a thunk for this function
-      continue;
-    }
-    auto* func = primary.addFunction(Builder::makeFunction(
-      secondaryFunc, secondary.getFunction(secondaryFunc)->type, {}));
-    std::vector<Expression*> args;
-    Type params = func->getParams();
-    for (size_t i = 0, size = params.size(); i < size; ++i) {
-      args.push_back(builder.makeLocalGet(i, params[i]));
-    }
-    auto tableSlot = tableManager.getSlot(secondaryFunc, func->type);
-    func->body = builder.makeCallIndirect(
-      tableSlot.tableName, tableSlot.makeExpr(primary), args, func->type);
+    Name trampoline = getTrampoline(*ex->getInternalName());
+    ex->setInternalName(trampoline);
   }
 }
 
-Expression* ModuleSplitter::maybeLoadSecondary(Builder& builder,
-                                               Expression* callIndirect) {
-  if (!config.jspi) {
-    return callIndirect;
+// Helper to walk expressions in segments but NOT in globals.
+template<typename Walker>
+static void walkSegments(Walker& walker, Module* module) {
+  walker.setModule(module);
+  for (auto& curr : module->elementSegments) {
+    if (curr->offset) {
+      walker.walk(curr->offset);
+    }
+    for (auto* item : curr->data) {
+      walker.walk(item);
+    }
   }
-  // Check if the secondary module is loaded and if it isn't, call the
-  // function to load it.
-  auto* loadSecondary = builder.makeIf(
-    builder.makeUnary(EqZInt32,
-                      builder.makeGlobalGet(LOAD_SECONDARY_STATUS, Type::i32)),
-    builder.makeCall(internalLoadSecondaryModule, {}, Type::none));
-  return builder.makeSequence(loadSecondary, callIndirect);
+  for (auto& curr : module->dataSegments) {
+    if (curr->offset) {
+      walker.walk(curr->offset);
+    }
+  }
+}
+
+void ModuleSplitter::indirectReferencesToSecondaryFunctions() {
+  // Turn references to secondary functions into references to thunks that
+  // perform a direct call to the original referent. The direct calls in the
+  // thunks will be handled like all other cross-module calls later, in
+  // |indirectCallsToSecondaryFunctions|.
+  struct Gatherer : public PostWalker<Gatherer> {
+    ModuleSplitter& parent;
+
+    Gatherer(ModuleSplitter& parent) : parent(parent) {}
+
+    // Collect RefFuncs in a map from the function name to all RefFuncs that
+    // refer to it. We only collect this for secondary funcs.
+    InsertOrderedMap<Name, std::vector<RefFunc*>> map;
+
+    void visitRefFunc(RefFunc* curr) {
+      Module* currModule = getModule();
+      // Add ref.func to the map when
+      // 1. ref.func's target func is in one of the secondary modules and
+      // 2. the current module is a different module (either the primary module
+      //    or a different secondary module)
+      if (parent.allSecondaryFuncs.contains(curr->func) &&
+          (currModule == &parent.primary ||
+           parent.secondaries.at(parent.funcToSecondaryIndex.at(curr->func))
+               .get() != currModule)) {
+        map[curr->func].push_back(curr);
+      }
+    }
+  } gatherer(*this);
+  // We shouldn't use collector.walkModuleCode here, because we don't want to
+  // walk global initializers. At this point, all globals are still in the
+  // primary module, so if we walk global initializers here, it will create
+  // unnecessary trampolines.
+  //
+  // For example, we have (global $a funcref (ref.func $foo)), and $foo was
+  // split into a secondary module. Because $a is at this point still in the
+  // primary module, $foo will be considered to exist in a different module, so
+  // this will create a trampoline for $foo. But it is possible that later we
+  // find out $a is exclusively used by that secondary module and move $a there.
+  // In that case, $a can just reference $foo locally, but if we scan global
+  // initializers here, we would have created an unnecessary trampoline for
+  // $foo.
+  walkSegments(gatherer, &primary);
+  for (auto& curr : primary.functions) {
+    if (!curr->imported()) {
+      gatherer.walkFunction(curr.get());
+    }
+  }
+  for (auto& secondaryPtr : secondaries) {
+    gatherer.walkModule(secondaryPtr.get());
+  }
+
+  // Ignore references to secondary functions that occur in the active segment
+  // that will contain the imported placeholders. Indirect calls to table slots
+  // initialized by that segment will already go to the right place once the
+  // secondary module has been loaded and the table has been patched.
+  std::unordered_set<RefFunc*> ignore;
+  if (tableManager.activeSegment) {
+    for (auto* expr : tableManager.activeSegment->data) {
+      if (auto* ref = expr->dynCast<RefFunc>()) {
+        ignore.insert(ref);
+      }
+    }
+  }
+
+  // Fix up what we found: Generate trampolines as described earlier, and apply
+  // them.
+  Builder builder(primary);
+  // Generate the new trampoline function and add it to the module.
+  for (auto& [name, refFuncs] : gatherer.map) {
+    // Find the relevant (non-ignored) RefFuncs. If there are none, we can skip
+    // creating a thunk entirely.
+    std::vector<RefFunc*> relevantRefFuncs;
+    for (auto* refFunc : refFuncs) {
+      assert(refFunc->func == name);
+      if (!ignore.contains(refFunc)) {
+        relevantRefFuncs.push_back(refFunc);
+      }
+    }
+    if (relevantRefFuncs.empty()) {
+      continue;
+    }
+
+    Name trampoline = getTrampoline(name);
+    // Update RefFuncs to refer to it.
+    for (auto* refFunc : relevantRefFuncs) {
+      refFunc->func = trampoline;
+    }
+  }
 }
 
 void ModuleSplitter::indirectCallsToSecondaryFunctions() {
   // Update direct calls of secondary functions to be indirect calls of their
   // corresponding table indices instead.
-  struct CallIndirector : public WalkerPass<PostWalker<CallIndirector>> {
+  struct CallIndirector : public PostWalker<CallIndirector> {
     ModuleSplitter& parent;
-    Builder builder;
-    CallIndirector(ModuleSplitter& parent)
-      : parent(parent), builder(parent.primary) {}
-    // Avoid visitRefFunc on element segment data
-    void walkElementSegment(ElementSegment* segment) {}
+    CallIndirector(ModuleSplitter& parent) : parent(parent) {}
     void visitCall(Call* curr) {
-      if (!parent.secondaryFuncs.count(curr->target)) {
+      // Return if the call's target is not in one of the secondary module.
+      if (!parent.allSecondaryFuncs.contains(curr->target)) {
         return;
       }
-      auto* func = parent.secondary.getFunction(curr->target);
-      auto tableSlot = parent.tableManager.getSlot(curr->target, func->type);
+      // Return if the current module is the same module as the call's target,
+      // because we don't need a call_indirect within the same module.
+      Module* currModule = getModule();
+      if (currModule != &parent.primary &&
+          parent.secondaries.at(parent.funcToSecondaryIndex.at(curr->target))
+              .get() == currModule) {
+        return;
+      }
 
-      replaceCurrent(parent.maybeLoadSecondary(
-        builder,
+      Builder builder(*getModule());
+      Index secIndex = parent.funcToSecondaryIndex.at(curr->target);
+      auto* func = parent.secondaries.at(secIndex)->getFunction(curr->target);
+      auto tableSlot =
+        parent.tableManager.getSlot(curr->target, func->type.getHeapType());
+
+      replaceCurrent(
         builder.makeCallIndirect(tableSlot.tableName,
                                  tableSlot.makeExpr(parent.primary),
                                  curr->operands,
-                                 func->type,
-                                 curr->isReturn)));
-    }
-    void visitRefFunc(RefFunc* curr) {
-      assert(false && "TODO: handle ref.func as well");
+                                 func->type.getHeapType(),
+                                 curr->isReturn));
     }
   };
-  PassRunner runner(&primary);
-  CallIndirector(*this).run(&runner, &primary);
+  CallIndirector callIndirector(*this);
+  callIndirector.walkModule(&primary);
+  for (auto& secondaryPtr : secondaries) {
+    callIndirector.walkModule(secondaryPtr.get());
+  }
 }
 
 void ModuleSplitter::exportImportCalledPrimaryFunctions() {
-  // Find primary functions called in the secondary module.
-  ModuleUtils::ParallelFunctionAnalysis<std::vector<Name>> callCollector(
-    secondary, [&](Function* func, std::vector<Name>& calledPrimaryFuncs) {
-      struct CallCollector : PostWalker<CallCollector> {
-        const std::set<Name>& primaryFuncs;
-        std::vector<Name>& calledPrimaryFuncs;
-        CallCollector(const std::set<Name>& primaryFuncs,
-                      std::vector<Name>& calledPrimaryFuncs)
-          : primaryFuncs(primaryFuncs), calledPrimaryFuncs(calledPrimaryFuncs) {
-        }
-        void visitCall(Call* curr) {
-          if (primaryFuncs.count(curr->target)) {
-            calledPrimaryFuncs.push_back(curr->target);
+  // Find primary functions called/referred to from the secondary modules.
+  using CalledPrimaryToModules = std::map<Name, std::set<Module*>>;
+  for (auto& secondaryPtr : secondaries) {
+    Module* secondary = secondaryPtr.get();
+    ModuleUtils::ParallelFunctionAnalysis<CalledPrimaryToModules> callCollector(
+      *secondary,
+      [&](Function* func, CalledPrimaryToModules& calledPrimaryToModules) {
+        struct CallCollector : PostWalker<CallCollector> {
+          const std::unordered_set<Name>& primaryFuncs;
+          CalledPrimaryToModules& calledPrimaryToModules;
+          CallCollector(const std::unordered_set<Name>& primaryFuncs,
+                        CalledPrimaryToModules& calledPrimaryToModules)
+            : primaryFuncs(primaryFuncs),
+              calledPrimaryToModules(calledPrimaryToModules) {}
+          void visitCall(Call* curr) {
+            if (primaryFuncs.contains(curr->target)) {
+              calledPrimaryToModules[curr->target].insert(getModule());
+            }
           }
-        }
-        void visitRefFunc(RefFunc* curr) {
-          assert(false && "TODO: handle ref.func as well");
-        }
-      };
-      CallCollector(primaryFuncs, calledPrimaryFuncs).walkFunction(func);
-    });
-  std::set<Name> calledPrimaryFuncs;
-  for (auto& entry : callCollector.map) {
-    auto& calledFuncs = entry.second;
-    calledPrimaryFuncs.insert(calledFuncs.begin(), calledFuncs.end());
-  }
+          void visitRefFunc(RefFunc* curr) {
+            if (primaryFuncs.contains(curr->func)) {
+              calledPrimaryToModules[curr->func].insert(getModule());
+            }
+          }
+        };
+        CallCollector(primaryFuncs, calledPrimaryToModules)
+          .walkFunctionInModule(func, secondary);
+      });
 
-  // Ensure each called primary function is exported and imported
-  for (auto func : calledPrimaryFuncs) {
-    exportImportFunction(func);
+    CalledPrimaryToModules calledPrimaryToModules;
+    for (auto& [_, map] : callCollector.map) {
+      calledPrimaryToModules.merge(map);
+    }
+
+    // Ensure each called primary function is exported and imported
+    for (auto& [func, modules] : calledPrimaryToModules) {
+      exportImportFunction(func, modules);
+    }
   }
 }
 
@@ -528,103 +736,129 @@ void ModuleSplitter::setupTablePatching() {
     return;
   }
 
-  std::map<Index, Function*> replacedElems;
+  std::map<Module*, std::map<Index, Function*>> moduleToReplacedElems;
   // Replace table references to secondary functions with an imported
   // placeholder that encodes the table index in its name:
   // `importNamespace`.`index`.
-  forEachElement(primary, [&](Name, Name, Index index, Name& elem) {
-    if (secondaryFuncs.count(elem)) {
-      placeholderMap[index] = elem;
-      auto* secondaryFunc = secondary.getFunction(elem);
-      replacedElems[index] = secondaryFunc;
+  forEachElement(
+    primary, [&](Name table, Name, Index index, Expression*& elem) {
+      auto* ref = elem->dynCast<RefFunc>();
+      if (!ref) {
+        return;
+      }
+      if (!allSecondaryFuncs.contains(ref->func)) {
+        return;
+      }
+      assert(table == tableManager.activeTable->name);
+
+      placeholderMap[table][index] = ref->func;
+      Index secondaryIndex = funcToSecondaryIndex.at(ref->func);
+      Module& secondary = *secondaries.at(secondaryIndex);
+      Name secondaryName = config.secondaryNames.at(secondaryIndex);
+      auto* secondaryFunc = secondary.getFunction(ref->func);
+      moduleToReplacedElems[&secondary][index] = secondaryFunc;
+      if (!config.usePlaceholders) {
+        // TODO: This can create active element segments with lots of nulls. We
+        // should optimize them like we do data segments with zeros.
+        elem = Builder(primary).makeRefNull(HeapType::nofunc);
+        return;
+      }
       auto placeholder = std::make_unique<Function>();
-      placeholder->module = config.placeholderNamespace;
+      placeholder->module = config.placeholderNamespacePrefix.toString() + "." +
+                            secondaryName.toString();
       placeholder->base = std::to_string(index);
       placeholder->name = Names::getValidFunctionName(
         primary, std::string("placeholder_") + placeholder->base.toString());
-      placeholder->hasExplicitName = false;
-      placeholder->type = secondaryFunc->type;
-      elem = placeholder->name;
+      placeholder->hasExplicitName = true;
+      placeholder->type = secondaryFunc->type.with(Inexact);
+      elem = Builder(primary).makeRefFunc(placeholder->name, placeholder->type);
       primary.addFunction(std::move(placeholder));
-    }
-  });
+    });
 
-  if (replacedElems.size() == 0) {
+  if (moduleToReplacedElems.size() == 0) {
     // No placeholders to patch out of the table
     return;
   }
 
-  auto secondaryTable =
-    ModuleUtils::copyTable(tableManager.activeTable, secondary);
+  for (auto& [secondaryPtr, replacedElems] : moduleToReplacedElems) {
+    Module& secondary = *secondaryPtr;
+    auto secondaryTable =
+      ModuleUtils::copyTable(tableManager.activeTable, secondary);
 
-  if (tableManager.activeBase.global.size()) {
-    assert(tableManager.activeTableSegments.size() == 1 &&
-           "Unexpected number of segments with non-const base");
-    assert(secondary.tables.size() == 1 && secondary.elementSegments.empty());
-    // Since addition is not currently allowed in initializer expressions, we
-    // need to start the new secondary segment where the primary segment starts.
-    // The secondary segment will contain the same primary functions as the
-    // primary module except in positions where it needs to overwrite a
-    // placeholder function. All primary functions in the table therefore need
-    // to be imported into the second module. TODO: use better strategies here,
-    // such as using ref.func in the start function or standardizing addition in
-    // initializer expressions.
-    ElementSegment* primarySeg = tableManager.activeTableSegments.front();
-    std::vector<Expression*> secondaryElems;
-    secondaryElems.reserve(primarySeg->data.size());
+    if (tableManager.activeBase.global.size()) {
+      assert(tableManager.activeTableSegments.size() == 1 &&
+             "Unexpected number of segments with non-const base");
+      assert(secondary.tables.size() == 1 && secondary.elementSegments.empty());
+      // Since addition is not currently allowed in initializer expressions, we
+      // need to start the new secondary segment where the primary segment
+      // starts. The secondary segment will contain the same primary functions
+      // as the primary module except in positions where it needs to overwrite a
+      // placeholder function. All primary functions in the table therefore need
+      // to be imported into the second module. TODO: use better strategies
+      // here, such as using ref.func in the start function or standardizing
+      // addition in initializer expressions.
+      ElementSegment* primarySeg = tableManager.activeTableSegments.front();
+      std::vector<Expression*> secondaryElems;
+      secondaryElems.reserve(primarySeg->data.size());
 
-    // Copy functions from the primary segment to the secondary segment,
-    // replacing placeholders and creating new exports and imports as necessary.
-    auto replacement = replacedElems.begin();
-    for (Index i = 0;
-         i < primarySeg->data.size() && replacement != replacedElems.end();
-         ++i) {
-      if (replacement->first == i) {
-        // primarySeg->data[i] is a placeholder, so use the secondary function.
-        auto* func = replacement->second;
-        auto* ref = Builder(secondary).makeRefFunc(func->name, func->type);
-        secondaryElems.push_back(ref);
-        ++replacement;
-      } else if (auto* get = primarySeg->data[i]->dynCast<RefFunc>()) {
-        exportImportFunction(get->func);
-        auto* copied =
-          ExpressionManipulator::copy(primarySeg->data[i], secondary);
-        secondaryElems.push_back(copied);
+      // Copy functions from the primary segment to the secondary segment,
+      // replacing placeholders and creating new exports and imports as
+      // necessary.
+      auto replacement = replacedElems.begin();
+      for (Index i = 0;
+           i < primarySeg->data.size() && replacement != replacedElems.end();
+           ++i) {
+        if (replacement->first == i) {
+          // primarySeg->data[i] is a placeholder, so use the secondary
+          // function.
+          auto* func = replacement->second;
+          auto* ref = Builder(secondary).makeRefFunc(func->name, func->type);
+          secondaryElems.push_back(ref);
+          ++replacement;
+        } else if (auto* get = primarySeg->data[i]->dynCast<RefFunc>()) {
+          exportImportFunction(get->func, {&secondary});
+          auto* copied =
+            ExpressionManipulator::copy(primarySeg->data[i], secondary);
+          secondaryElems.push_back(copied);
+        }
       }
+
+      auto offset = ExpressionManipulator::copy(primarySeg->offset, secondary);
+      auto secondarySeg = std::make_unique<ElementSegment>(
+        secondaryTable->name, offset, secondaryTable->type, secondaryElems);
+      secondarySeg->setName(primarySeg->name, primarySeg->hasExplicitName);
+      secondary.addElementSegment(std::move(secondarySeg));
+      return;
     }
 
-    auto offset = ExpressionManipulator::copy(primarySeg->offset, secondary);
-    auto secondarySeg = std::make_unique<ElementSegment>(
-      secondaryTable->name, offset, secondaryTable->type, secondaryElems);
-    secondarySeg->setName(primarySeg->name, primarySeg->hasExplicitName);
-    secondary.addElementSegment(std::move(secondarySeg));
-    return;
-  }
-
-  // Create active table segments in the secondary module to patch in the
-  // original functions when it is instantiated.
-  Index currBase = replacedElems.begin()->first;
-  std::vector<Expression*> currData;
-  auto finishSegment = [&]() {
-    auto* offset = Builder(secondary).makeConst(int32_t(currBase));
-    auto secondarySeg = std::make_unique<ElementSegment>(
-      secondaryTable->name, offset, secondaryTable->type, currData);
-    Name name = Names::getValidElementSegmentName(
-      secondary, Name::fromInt(secondary.elementSegments.size()));
-    secondarySeg->setName(name, false);
-    secondary.addElementSegment(std::move(secondarySeg));
-  };
-  for (auto curr = replacedElems.begin(); curr != replacedElems.end(); ++curr) {
-    if (curr->first != currBase + currData.size()) {
+    // Create active table segments in the secondary module to patch in the
+    // original functions when it is instantiated.
+    Index currBase = replacedElems.begin()->first;
+    std::vector<Expression*> currData;
+    auto finishSegment = [&]() {
+      auto* offset = Builder(secondary).makeConst(
+        Literal::makeFromInt32(currBase, secondaryTable->addressType));
+      auto secondarySeg = std::make_unique<ElementSegment>(
+        secondaryTable->name, offset, secondaryTable->type, currData);
+      Name name = Names::getValidElementSegmentName(
+        secondary, Name::fromInt(secondary.elementSegments.size()));
+      secondarySeg->setName(name, false);
+      secondary.addElementSegment(std::move(secondarySeg));
+    };
+    for (auto curr = replacedElems.begin(); curr != replacedElems.end();
+         ++curr) {
+      if (curr->first != currBase + currData.size()) {
+        finishSegment();
+        currBase = curr->first;
+        currData.clear();
+      }
+      auto* func = curr->second;
+      currData.push_back(
+        Builder(secondary).makeRefFunc(func->name, func->type));
+    }
+    if (currData.size()) {
       finishSegment();
-      currBase = curr->first;
-      currData.clear();
     }
-    auto* func = curr->second;
-    currData.push_back(Builder(secondary).makeRefFunc(func->name, func->type));
-  }
-  if (currData.size()) {
-    finishSegment();
   }
 }
 
@@ -635,7 +869,9 @@ void ModuleSplitter::shareImportableItems() {
   std::unordered_map<std::pair<ExternalKind, Name>, Name> exports;
   for (auto& ex : primary.exports) {
     if (ex->kind != ExternalKind::Function) {
-      exports[std::make_pair(ex->kind, ex->value)] = ex->name;
+      if (auto* name = ex->getInternalName()) {
+        exports[std::make_pair(ex->kind, *name)] = ex->name;
+      }
     }
   }
 
@@ -650,51 +886,339 @@ void ModuleSplitter::shareImportableItems() {
     if (exportIt != exports.end()) {
       secondaryItem.base = exportIt->second;
     } else {
-      Name exportName = Names::getValidExportName(
-        primary, config.newExportPrefix + genericExportName);
-      primary.addExport(new Export{exportName, primaryItem.name, kind});
+      std::string baseName =
+        config.newExportPrefix + (config.minimizeNewExportNames
+                                    ? minified.getName()
+                                    : genericExportName);
+      Name exportName = Names::getValidExportName(primary, baseName);
+      primary.addExport(new Export(exportName, kind, primaryItem.name));
       secondaryItem.base = exportName;
+      exports[std::make_pair(kind, primaryItem.name)] = exportName;
     }
   };
 
-  // TODO: Be more selective by only sharing global items that are actually used
-  // in the secondary module, just like we do for functions.
+  struct UsedNames {
+    std::unordered_set<Name> globals;
+    std::unordered_set<Name> memories;
+    std::unordered_set<Name> tables;
+    std::unordered_set<Name> tags;
+  };
 
-  for (auto& memory : primary.memories) {
-    auto secondaryMemory = ModuleUtils::copyMemory(memory.get(), secondary);
-    makeImportExport(*memory, *secondaryMemory, "memory", ExternalKind::Memory);
+  struct NameCollector
+    : public PostWalker<NameCollector,
+                        UnifiedExpressionVisitor<NameCollector>> {
+    UsedNames& used;
+    NameCollector(UsedNames& used) : used(used) {}
+
+    void visitExpression(Expression* curr) {
+#define DELEGATE_ID curr->_id
+#define DELEGATE_START(id) [[maybe_unused]] auto* cast = curr->cast<id>();
+#define DELEGATE_GET_FIELD(id, field) cast->field
+#define DELEGATE_FIELD_TYPE(id, field)
+#define DELEGATE_FIELD_HEAPTYPE(id, field)
+#define DELEGATE_FIELD_CHILD(id, field)
+#define DELEGATE_FIELD_INT(id, field)
+#define DELEGATE_FIELD_LITERAL(id, field)
+#define DELEGATE_FIELD_NAME(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_DEF(id, field)
+#define DELEGATE_FIELD_SCOPE_NAME_USE(id, field)
+#define DELEGATE_FIELD_ADDRESS(id, field)
+
+#define DELEGATE_FIELD_NAME_KIND(id, field, kind)                              \
+  if (cast->field.is()) {                                                      \
+    switch (kind) {                                                            \
+      case ModuleItemKind::Table:                                              \
+        used.tables.insert(cast->field);                                       \
+        break;                                                                 \
+      case ModuleItemKind::Memory:                                             \
+        used.memories.insert(cast->field);                                     \
+        break;                                                                 \
+      case ModuleItemKind::Global:                                             \
+        used.globals.insert(cast->field);                                      \
+        break;                                                                 \
+      case ModuleItemKind::Tag:                                                \
+        used.tags.insert(cast->field);                                         \
+        break;                                                                 \
+      case ModuleItemKind::Function:                                           \
+      case ModuleItemKind::DataSegment:                                        \
+      case ModuleItemKind::ElementSegment:                                     \
+      case ModuleItemKind::Invalid:                                            \
+        break;                                                                 \
+    }                                                                          \
   }
 
-  for (auto& table : primary.tables) {
-    auto secondaryTable = secondary.getTableOrNull(table->name);
-    if (!secondaryTable) {
-      secondaryTable = ModuleUtils::copyTable(table.get(), secondary);
+#include "wasm-delegations-fields.def"
+    }
+  };
+
+  // Given a module, collect names used in the module
+  auto getUsedNames = [&](Module& module) {
+    UsedNames used;
+    ModuleUtils::ParallelFunctionAnalysis<UsedNames> nameCollector(
+      module, [&](Function* func, UsedNames& used) {
+        if (!func->imported()) {
+          NameCollector(used).walk(func->body);
+        }
+      });
+
+    for (auto& [_, funcUsed] : nameCollector.map) {
+      used.globals.insert(funcUsed.globals.begin(), funcUsed.globals.end());
+      used.memories.insert(funcUsed.memories.begin(), funcUsed.memories.end());
+      used.tables.insert(funcUsed.tables.begin(), funcUsed.tables.end());
+      used.tags.insert(funcUsed.tags.begin(), funcUsed.tags.end());
     }
 
-    makeImportExport(*table, *secondaryTable, "table", ExternalKind::Table);
+    NameCollector collector(used);
+    // We shouldn't use collector.walkModuleCode here, because we don't want to
+    // walk global initializers. At this point, all globals are still in the
+    // primary module, so if we walk global initializers here, other globals
+    // appearing in their initializers will all be marked as used in the primary
+    // module, which is not what we want.
+    //
+    // For example, we have (global $a i32 (global.get $b)). Because $a is at
+    // this point still in the primary module, $b will be marked as "used" in
+    // the primary module. But $a can be moved to a secondary module later if it
+    // is used exclusively by that module. Then $b can be also moved, in case it
+    // doesn't have other uses. But if it is marked as "used" in the primary
+    // module, it can't.
+    walkSegments(collector, &module);
+    for (auto& segment : module.dataSegments) {
+      if (segment->memory.is()) {
+        used.memories.insert(segment->memory);
+      }
+    }
+    for (auto& segment : module.elementSegments) {
+      if (segment->table.is()) {
+        used.tables.insert(segment->table);
+      }
+    }
+
+    // If primary module has exports, they are "used" in it. Secondary modules
+    // don't have exports, so this only applies to the primary module.
+    for (auto& ex : module.exports) {
+      switch (ex->kind) {
+        case ExternalKind::Global:
+          used.globals.insert(*ex->getInternalName());
+          break;
+        case ExternalKind::Memory:
+          used.memories.insert(*ex->getInternalName());
+          break;
+        case ExternalKind::Table:
+          used.tables.insert(*ex->getInternalName());
+          break;
+        case ExternalKind::Tag:
+          used.tags.insert(*ex->getInternalName());
+          break;
+        default:
+          break;
+      }
+    }
+    return used;
+  };
+
+  UsedNames primaryUsed = getUsedNames(primary);
+  std::vector<UsedNames> secondaryUsed;
+  for (auto& secondaryPtr : secondaries) {
+    secondaryUsed.push_back(getUsedNames(*secondaryPtr));
   }
 
+  // Compute the transitive closure of globals referenced in other globals'
+  // initializers. Since globals can reference other globals, we must ensure
+  // that if a global is used in a module, all its dependencies are also marked
+  // as used.
+  auto computeTransitiveGlobals = [&](UsedNames& used) {
+    UniqueNonrepeatingDeferredQueue<Name> worklist;
+    for (auto global : used.globals) {
+      worklist.push(global);
+    }
+    while (!worklist.empty()) {
+      Name name = worklist.pop();
+      // At this point all globals are still in the primary module, so this
+      // exists
+      auto* global = primary.getGlobal(name);
+      if (!global->imported() && global->init) {
+        for (auto* get : FindAll<GlobalGet>(global->init).list) {
+          worklist.push(get->name);
+          used.globals.insert(get->name);
+        }
+      }
+    }
+  };
+
+  computeTransitiveGlobals(primaryUsed);
+  for (auto& used : secondaryUsed) {
+    computeTransitiveGlobals(used);
+  }
+
+  // Given a name and module item kind, returns the list of secondary modules
+  // using that name
+  auto getUsingSecondaries = [&](const Name& name, auto UsedNames::* field) {
+    std::vector<Module*> usingModules;
+    for (size_t i = 0; i < secondaries.size(); ++i) {
+      if ((secondaryUsed[i].*field).contains(name)) {
+        usingModules.push_back(secondaries[i].get());
+      }
+    }
+    return usingModules;
+  };
+
+  // Share module items with secondary modules.
+  // 1. Only share an item with the modules that use it
+  // 2. If an item is used by only a single secondary module, move the item to
+  //    that secondary module. If an item is used by multiple modules (including
+  //    the primary and secondary modules), export the item from the primary and
+  //    import it from the using secondary modules.
+
+  std::vector<Name> memoriesToRemove;
+  for (auto& memory : primary.memories) {
+    auto usingSecondaries =
+      getUsingSecondaries(memory->name, &UsedNames::memories);
+    bool usedInPrimary = primaryUsed.memories.contains(memory->name);
+
+    if (!usedInPrimary && usingSecondaries.size() == 1) {
+      auto* secondary = usingSecondaries[0];
+      ModuleUtils::copyMemory(memory.get(), *secondary);
+      memoriesToRemove.push_back(memory->name);
+    } else {
+      for (auto* secondary : usingSecondaries) {
+        auto* secondaryMemory =
+          ModuleUtils::copyMemory(memory.get(), *secondary);
+        makeImportExport(
+          *memory, *secondaryMemory, "memory", ExternalKind::Memory);
+      }
+    }
+  }
+  for (auto& name : memoriesToRemove) {
+    primary.removeMemory(name);
+  }
+
+  std::vector<Name> tablesToRemove;
+  for (auto& table : primary.tables) {
+    auto usingSecondaries =
+      getUsingSecondaries(table->name, &UsedNames::tables);
+    bool usedInPrimary = primaryUsed.tables.contains(table->name);
+
+    if (!usedInPrimary && usingSecondaries.size() == 1) {
+      auto* secondary = usingSecondaries[0];
+      //  In case we copied this table to this secondary module in
+      //  setupTablePatching(), !usedInPrimary can't be satisfied, because the
+      //  primary module should have an element segment that refers to this
+      //  table.
+      assert(!secondary->getTableOrNull(table->name));
+      ModuleUtils::copyTable(table.get(), *secondary);
+      tablesToRemove.push_back(table->name);
+    } else {
+      for (auto* secondary : usingSecondaries) {
+        // 1. In case we copied this table to this secondary module in
+        //    setupTablePatching(), secondary.getTableOrNull(table->name) is not
+        //    null, and we need to import it.
+        // 2. As in the case with other module elements, if the table is used in
+        //    the secondary module's instructions, we need to export it.
+        auto secondaryTable = secondary->getTableOrNull(table->name);
+        if (!secondaryTable) {
+          secondaryTable = ModuleUtils::copyTable(table.get(), *secondary);
+        }
+        makeImportExport(*table, *secondaryTable, "table", ExternalKind::Table);
+      }
+    }
+  }
+  for (auto& name : tablesToRemove) {
+    primary.removeTable(name);
+  }
+
+  std::vector<Name> globalsToRemove;
   for (auto& global : primary.globals) {
     if (global->mutable_) {
       assert(primary.features.hasMutableGlobals() &&
              "TODO: add wrapper functions for disallowed mutable globals");
     }
-    auto secondaryGlobal = std::make_unique<Global>();
-    secondaryGlobal->type = global->type;
-    secondaryGlobal->mutable_ = global->mutable_;
-    secondaryGlobal->init =
-      global->init == nullptr
-        ? nullptr
-        : ExpressionManipulator::copy(global->init, secondary);
-    makeImportExport(*global, *secondaryGlobal, "global", ExternalKind::Global);
-    secondary.addGlobal(std::move(secondaryGlobal));
+
+    auto usingSecondaries =
+      getUsingSecondaries(global->name, &UsedNames::globals);
+    bool inPrimary = primaryUsed.globals.contains(global->name);
+
+    if (!inPrimary && usingSecondaries.empty()) {
+      // It's not used anywhere, so delete it. Unlike other unused module items
+      // (memories, tables, and tags) that can just sit in the primary module
+      // and later be DCE'ed by another pass, we should remove it here, because
+      // an unused global can contain an initializer that refers to another
+      // global that will be moved to a secondary module, like
+      // (global $unused i32 (global.get $a)) // $a is moved to a secondary
+      globalsToRemove.push_back(global->name);
+
+    } else if (!inPrimary && usingSecondaries.size() == 1) {
+      // We are moving this global to this secondary module
+      auto* secondary = usingSecondaries[0];
+      auto* secondaryGlobal = ModuleUtils::copyGlobal(global.get(), *secondary);
+      globalsToRemove.push_back(global->name);
+
+      if (secondaryGlobal->init) {
+        // When a global's initializer contains ref.func
+        for (auto* ref : FindAll<RefFunc>(secondaryGlobal->init).list) {
+          // If ref.func's function is in a different secondary module, we
+          // create a trampoline here.
+          if (auto targetIndexIt = funcToSecondaryIndex.find(ref->func);
+              targetIndexIt != funcToSecondaryIndex.end()) {
+            if (secondaries[targetIndexIt->second].get() != secondary) {
+              ref->func = getTrampoline(ref->func);
+            }
+          }
+          // 1. If ref.func's function is in the primary module, we export it
+          //    here.
+          // 2. If ref.func's function is in a different secondary module and we
+          //    just created a trampoline for it in the primary module above, we
+          //    export the trampoline here.
+          if (primary.getFunctionOrNull(ref->func)) {
+            exportImportFunction(ref->func, {secondary});
+          }
+          // If ref.func's function is in the same secondary module, we don't
+          // need to do anything. The ref.func can directly reference the
+          // function.
+        }
+      }
+
+    } else { // We are NOT moving this global to the secondary module
+      if (global->init) {
+        for (auto* ref : FindAll<RefFunc>(global->init).list) {
+          // If we are exporting this global from the primary module, we should
+          // create a trampoline here, because we skipped doing it for global
+          // initializers in indirectReferencesToSecondaryFunctions.
+          if (allSecondaryFuncs.contains(ref->func)) {
+            ref->func = getTrampoline(ref->func);
+          }
+        }
+      }
+
+      for (auto* secondary : usingSecondaries) {
+        auto* secondaryGlobal =
+          ModuleUtils::copyGlobal(global.get(), *secondary);
+        makeImportExport(
+          *global, *secondaryGlobal, "global", ExternalKind::Global);
+      }
+    }
+  }
+  for (auto& name : globalsToRemove) {
+    primary.removeGlobal(name);
   }
 
+  std::vector<Name> tagsToRemove;
   for (auto& tag : primary.tags) {
-    auto secondaryTag = std::make_unique<Tag>();
-    secondaryTag->sig = tag->sig;
-    makeImportExport(*tag, *secondaryTag, "tag", ExternalKind::Tag);
-    secondary.addTag(std::move(secondaryTag));
+    auto usingSecondaries = getUsingSecondaries(tag->name, &UsedNames::tags);
+    bool usedInPrimary = primaryUsed.tags.contains(tag->name);
+
+    if (!usedInPrimary && usingSecondaries.size() == 1) {
+      auto* secondary = usingSecondaries[0];
+      ModuleUtils::copyTag(tag.get(), *secondary);
+      tagsToRemove.push_back(tag->name);
+    } else {
+      for (auto* secondary : usingSecondaries) {
+        auto* secondaryTag = ModuleUtils::copyTag(tag.get(), *secondary);
+        makeImportExport(*tag, *secondaryTag, "tag", ExternalKind::Tag);
+      }
+    }
+  }
+  for (auto& name : tagsToRemove) {
+    primary.removeTag(name);
   }
 }
 
@@ -702,7 +1226,7 @@ void ModuleSplitter::shareImportableItems() {
 
 Results splitFunctions(Module& primary, const Config& config) {
   ModuleSplitter split(primary, config);
-  return {std::move(split.secondaryPtr), std::move(split.placeholderMap)};
+  return {std::move(split.secondaries), std::move(split.placeholderMap)};
 }
 
 } // namespace wasm::ModuleSplitting

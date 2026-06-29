@@ -19,7 +19,7 @@
 
 #include <functional>
 
-#include "mixed_arena.h"
+#include "support/mixed_arena.h"
 #include "support/utilities.h"
 #include "wasm-traversal.h"
 #include "wasm.h"
@@ -39,12 +39,14 @@ struct PassRegistry {
   using Creator = std::function<Pass*()>;
 
   void registerPass(const char* name, const char* description, Creator create);
+
   // Register a pass that's used for internal testing. These passes do not show
   // up in --help.
   void
   registerTestPass(const char* name, const char* description, Creator create);
   std::unique_ptr<Pass> createPass(std::string name);
   std::vector<std::string> getRegisteredNames();
+  bool containsPass(const std::string& name);
   std::string getPassDescription(std::string name);
   bool isPassHidden(std::string name);
 
@@ -87,6 +89,17 @@ struct InliningOptions {
   // This is checked after alwaysInlineMaxSize and oneCallerInlineMaxSize, but
   // the order normally won't matter.
   Index flexibleInlineMaxSize = 20;
+  // The limit for the combined size of the code after inlining.
+  // We have an absolute limit in order to avoid extremely-large sizes after
+  // inlining, as they may hit limits in VMs and/or slow down startup
+  // (measurements there indicate something like ~1 second to optimize a 100K
+  // function). See e.g.
+  // https://github.com/WebAssembly/binaryen/pull/3730#issuecomment-867939138
+  // https://github.com/emscripten-core/emscripten/issues/13899#issuecomment-825073344
+  // The limit is arbitrary, but based on the links above. It is a very high
+  // value that should appear very rarely in practice (for example, it does
+  // not occur on the Emscripten benchmark suite of real-world codebases).
+  Index maxCombinedBinarySize = 400 * 1024;
   // Loops usually mean the function does heavy work, so the call overhead
   // is not significant and we do not inline such functions by default.
   bool allowFunctionsWithLoops = false;
@@ -97,12 +110,9 @@ struct InliningOptions {
   Index partialInliningIfs = 0;
 };
 
-// Forward declaration for FuncEffectsMap.
-class EffectAnalyzer;
-
-using FuncEffectsMap = std::unordered_map<Name, EffectAnalyzer>;
-
 struct PassOptions {
+  friend Pass;
+
   // Run passes in debug mode, doing extra validation and timing checks.
   bool debug = false;
   // Whether to run the validator to check for errors.
@@ -208,17 +218,19 @@ struct PassOptions {
   // but we also want to keep types of things on the boundary unchanged. For
   // example, we should not change an exported function's signature, as the
   // outside may need that type to properly call the export.
-  //
-  //   * Since the goal of closedWorld is to optimize types aggressively but
-  //     types on the module boundary cannot be changed, we assume the producer
-  //     has made a mistake and we consider it a validation error if any user
-  //     defined types besides the types of imported or exported functions
-  //     themselves appear on the module boundary. For example, no user defined
-  //     struct type may be a parameter or result of an exported function. This
-  //     error may be relaxed or made more configurable in the future.
   bool closedWorld = false;
   // Whether to try to preserve debug info through, which are special calls.
   bool debugInfo = false;
+  // Whether to generate StackIR during binary writing. This is on by default
+  // in -O2 and above.
+  bool generateStackIR = false;
+  // Whether to optimize StackIR during binary writing. How we optimize depends
+  // on other optimization flags like optimizeLevel. This is on by default in
+  // -O2 and above.
+  bool optimizeStackIR = false;
+  // Whether to print StackIR during binary writing, and if so to what stream.
+  // This is mainly useful for debugging.
+  std::optional<std::ostream*> printStackIR;
   // Whether we are targeting JS. In that case we want to avoid emitting things
   // in the optimizer that do not translate well to JS, or that could cause us
   // to need extra lowering work or even a loop (where we optimize to something
@@ -230,15 +242,6 @@ struct PassOptions {
   std::unordered_map<std::string, std::string> arguments;
   // Passes to skip and not run.
   std::unordered_set<std::string> passesToSkip;
-
-  // Effect info computed for functions. One pass can generate this and then
-  // other passes later can benefit from it. It is up to the sequence of passes
-  // to update or discard this when necessary - in particular, when new effects
-  // are added to a function this must be changed or we may optimize
-  // incorrectly. However, it is extremely rare for a pass to *add* effects;
-  // passes normally only remove effects. Passes that do add effects must set
-  // addsEffects() so the pass runner is aware of them.
-  std::shared_ptr<FuncEffectsMap> funcEffectsMap;
 
   // -Os is our default
   static constexpr const int DEFAULT_OPTIMIZE_LEVEL = 2;
@@ -259,7 +262,8 @@ struct PassOptions {
     return PassOptions(); // defaults are to not optimize
   }
 
-  bool hasArgument(std::string key) { return arguments.count(key) > 0; }
+private:
+  bool hasArgument(std::string key) { return arguments.contains(key); }
 
   std::string getArgument(std::string key, std::string errorTextIfMissing) {
     if (!hasArgument(key)) {
@@ -312,9 +316,8 @@ struct PassRunner {
   }
 
   // Add a pass using its name.
-  void add(std::string passName) {
-    doAdd(PassRegistry::get()->createPass(passName));
-  }
+  void add(std::string passName,
+           std::optional<std::string> passArg = std::nullopt);
 
   // Add a pass given an instance.
   void add(std::unique_ptr<Pass> pass) { doAdd(std::move(pass)); }
@@ -476,6 +479,8 @@ public:
   // to imports must override this to return true.
   virtual bool addsEffects() { return false; }
 
+  void setPassArg(const std::string& value) { passArg = value; }
+
   std::string name;
 
   PassRunner* getPassRunner() { return runner; }
@@ -487,6 +492,19 @@ public:
   PassOptions& getPassOptions() { return runner->options; }
 
 protected:
+  bool hasArgument(const std::string& key);
+  std::string getArgument(const std::string& key,
+                          const std::string& errorTextIfMissing);
+  std::string getArgumentOrDefault(const std::string& key,
+                                   const std::string& defaultValue);
+
+  // The main argument of the pass, which can be specified individually for
+  // every pass . getArgument() and friends will refer to this value if queried
+  // for a key that matches the pass name. All other arguments are taken from
+  // the runner / passOptions and therefore are global for all instances of a
+  // pass.
+  std::optional<std::string> passArg;
+
   Pass() = default;
   Pass(const Pass&) = default;
   Pass(Pass&&) = default;
@@ -501,7 +519,7 @@ template<typename WalkerType>
 class WalkerPass : public Pass, public WalkerType {
 
 protected:
-  using super = WalkerPass<WalkerType>;
+  using Super = WalkerPass<WalkerType>;
 
 public:
   void run(Module* module) override {

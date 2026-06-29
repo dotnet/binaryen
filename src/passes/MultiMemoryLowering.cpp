@@ -43,6 +43,7 @@
 #include "ir/abstract.h"
 #include "ir/module-utils.h"
 #include "ir/names.h"
+#include "support/utilities.h"
 #include "wasm-builder.h"
 #include <pass.h>
 #include <wasm.h>
@@ -109,7 +110,7 @@ struct MultiMemoryLowering : public Pass {
           return;
         }
       }
-      super::walkFunction(func);
+      Super::walkFunction(func);
     }
 
     void visitMemoryGrow(MemoryGrow* curr) {
@@ -430,20 +431,26 @@ struct MultiMemoryLowering : public Pass {
   Memory& getFirstMemory() { return *wasm->memories[0]; }
 
   void prepCombinedMemory() {
-    pointerType = getFirstMemory().indexType;
+    pointerType = getFirstMemory().addressType;
     memoryInfo = pointerType == Type::i32 ? Builder::MemoryInfo::Memory32
                                           : Builder::MemoryInfo::Memory64;
     isShared = getFirstMemory().shared;
     isImported = getFirstMemory().imported();
+    const uint8_t pageSizeLog2 = getFirstMemory().pageSizeLog2;
     for (auto& memory : wasm->memories) {
       // We are assuming that each memory is configured the same as the first
       // and assert if any of the memories does not match this configuration
       assert(memory->shared == isShared);
-      assert(memory->indexType == pointerType);
+      assert(memory->addressType == pointerType);
 
       // TODO: handle memory import for memories other than the first
       if (memory->name != getFirstMemory().name && memory->imported()) {
         Fatal() << "MultiMemoryLowering: only the first memory can be imported";
+      }
+      // TODO: handle memory with different page sizes.
+      if (memory->pageSizeLog2 != pageSizeLog2) {
+        Fatal()
+          << "MultiMemoryLowering: all memories must have the same page size";
       }
 
       // Calculating the total initial and max page size for the combined memory
@@ -456,8 +463,8 @@ struct MultiMemoryLowering : public Pass {
     }
     // Ensuring valid initial and max page sizes that do not exceed the number
     // of pages addressable by the pointerType
-    Address maxSize =
-      pointerType == Type::i32 ? Memory::kMaxSize32 : Memory::kMaxSize64;
+    Address maxSize = pointerType == Type::i32 ? getFirstMemory().maxSize32()
+                                               : getFirstMemory().maxSize64();
     if (totalMaxPages > maxSize || totalMaxPages == 0) {
       totalMaxPages = Memory::kUnlimitedSize;
     }
@@ -473,7 +480,7 @@ struct MultiMemoryLowering : public Pass {
     // Ensuring only the first memory is an exported memory
     for (auto& exp : wasm->exports) {
       if (exp->kind == ExternalKind::Memory &&
-          exp->value == getFirstMemory().name) {
+          *exp->getInternalName() == getFirstMemory().name) {
         isExported = true;
       } else if (exp->kind == ExternalKind::Memory) {
         Fatal() << "MultiMemoryLowering: only the first memory can be exported";
@@ -504,7 +511,7 @@ struct MultiMemoryLowering : public Pass {
         Name name = Names::getValidGlobalName(
           *wasm, memory->name.toString() + "_byte_offset");
         offsetGlobalNames.push_back(std::move(name));
-        addGlobal(name, offsetRunningTotal * Memory::kPageSize);
+        addGlobal(name, offsetRunningTotal << memory->pageSizeLog2);
       }
       offsetRunningTotal += memory->initial;
     }
@@ -553,13 +560,17 @@ struct MultiMemoryLowering : public Pass {
     auto function = Builder::makeFunction(
       functionName, Signature(pointerType, pointerType), {});
     function->setLocalName(0, "page_delta");
-    auto pageSizeConst = [&]() {
-      return builder.makeConst(Literal(Memory::kPageSize));
+    auto currPageSizeLog2 = wasm->memories[memIdx]->pageSizeLog2;
+    auto makeMulPageSize = [&](Expression* pageCountExpr) -> Expression* {
+      if (currPageSizeLog2 == 0) {
+        return pageCountExpr;
+      }
+      return builder.makeBinary(Abstract::getBinary(pointerType, Abstract::Shl),
+                                pageCountExpr,
+                                builder.makeConst(Literal(currPageSizeLog2)));
     };
-    auto getOffsetDelta = [&]() {
-      return builder.makeBinary(Abstract::getBinary(pointerType, Abstract::Mul),
-                                builder.makeLocalGet(0, pointerType),
-                                pageSizeConst());
+    auto getOffsetDelta = [&]() -> Expression* {
+      return makeMulPageSize(builder.makeLocalGet(0, pointerType));
     };
     auto getMoveSource = [&](Name global) {
       return builder.makeGlobalGet(global, pointerType);
@@ -609,9 +620,7 @@ struct MultiMemoryLowering : public Pass {
           // size
           builder.makeBinary(
             Abstract::getBinary(pointerType, Abstract::Sub),
-            builder.makeBinary(Abstract::getBinary(pointerType, Abstract::Mul),
-                               builder.makeLocalGet(sizeLocal, pointerType),
-                               pageSizeConst()),
+            makeMulPageSize(builder.makeLocalGet(sizeLocal, pointerType)),
             getMoveSource(offsetGlobalName)),
           combinedMemory,
           combinedMemory));
@@ -645,12 +654,13 @@ struct MultiMemoryLowering : public Pass {
     auto function = Builder::makeFunction(
       functionName, Signature(Type::none, pointerType), {});
     Expression* functionBody;
+    auto currPageSizeLog2 = wasm->memories[memIdx]->pageSizeLog2;
     auto pageSizeConst = [&]() {
-      return builder.makeConst(Literal(Memory::kPageSize));
+      return builder.makeConst(Literal(currPageSizeLog2));
     };
     auto getOffsetInPageUnits = [&](Name global) {
       return builder.makeBinary(
-        Abstract::getBinary(pointerType, Abstract::DivU),
+        Abstract::getBinary(pointerType, Abstract::ShrU),
         builder.makeGlobalGet(global, pointerType),
         pageSizeConst());
     };
@@ -690,7 +700,7 @@ struct MultiMemoryLowering : public Pass {
   void addCombinedMemory() {
     auto memory = Builder::makeMemory(combinedMemory);
     memory->shared = isShared;
-    memory->indexType = pointerType;
+    memory->addressType = pointerType;
     memory->initial = totalInitialPages;
     memory->max = totalMaxPages;
     if (isImported) {
@@ -706,7 +716,7 @@ struct MultiMemoryLowering : public Pass {
         // We checked in prepCombinedMemory that any memory exports are for
         // the first memory, so setting the exports to the combinedMemory means
         // calling JS will not have to worry about offsets
-        exp->value = combinedMemory;
+        *exp->getInternalName() = combinedMemory;
       }
     }
   }

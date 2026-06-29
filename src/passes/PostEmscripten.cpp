@@ -27,6 +27,7 @@
 #include <ir/table-utils.h>
 #include <pass.h>
 #include <shared-constants.h>
+#include <support/debug.h>
 #include <wasm-builder.h>
 #include <wasm-emscripten.h>
 #include <wasm.h>
@@ -81,7 +82,7 @@ static void calcSegmentOffsets(Module& wasm,
       OffsetSearcher(std::unordered_map<Name, Address>& offsets)
         : offsets(offsets) {}
       void visitMemoryInit(MemoryInit* curr) {
-        // The desitination of the memory.init is either a constant
+        // The destination of the memory.init is either a constant
         // or the result of an addition with __memory_base in the
         // case of PIC code.
         auto* dest = curr->dest->dynCast<Const>();
@@ -133,7 +134,9 @@ static void removeSegment(Module& wasm, Name segment) {
 }
 
 static Address getExportedAddress(Module& wasm, Export* export_) {
-  Global* g = wasm.getGlobal(export_->value);
+  Global* g = wasm.getGlobal((export_->kind == ExternalKind::Global)
+                               ? *export_->getInternalName()
+                               : Name());
   auto* addrConst = g->init->dynCast<Const>();
   return addrConst->value.getUnsigned();
 }
@@ -214,8 +217,7 @@ struct PostEmscripten : public Pass {
     std::vector<Address> segmentOffsets; // segment index => address offset
     calcSegmentOffsets(module, segmentOffsets);
 
-    auto& options = getPassOptions();
-    auto sideModule = options.hasArgument("post-emscripten-side-module");
+    auto sideModule = hasArgument("post-emscripten-side-module");
     if (!sideModule) {
       removeData(module, segmentOffsets, "__start_em_asm", "__stop_em_asm");
       removeData(module, segmentOffsets, "__start_em_js", "__stop_em_js");
@@ -235,15 +237,15 @@ struct PostEmscripten : public Pass {
   }
 
   void removeEmJsExports(Module& module) {
-    auto& options = getPassOptions();
-    auto sideModule = options.hasArgument("post-emscripten-side-module");
+    auto sideModule = hasArgument("post-emscripten-side-module");
     EmJsWalker walker(sideModule);
     walker.walkModule(&module);
-    for (const Export& exp : walker.toRemove) {
+    for (Export& exp : walker.toRemove) {
       if (exp.kind == ExternalKind::Function) {
-        module.removeFunction(exp.value);
+        module.removeFunction(*exp.getInternalName());
       } else {
-        module.removeGlobal(exp.value);
+        assert(exp.kind == ExternalKind::Global);
+        module.removeGlobal(*exp.getInternalName());
       }
       module.removeExport(exp.name);
     }
@@ -287,11 +289,11 @@ struct PostEmscripten : public Pass {
       });
 
     // Assume a non-direct call might throw.
-    analyzer.propagateBack(
-      [](const Info& info) { return info.canThrow; },
-      [](const Info& info) { return true; },
-      [](Info& info, Function* reason) { info.canThrow = true; },
-      analyzer.NonDirectCallsHaveProperty);
+    analyzer.propagateBack([](const Info& info) { return info.canThrow; },
+                           [](const Info& info) { return true; },
+                           [](Info& info) { info.canThrow = true; },
+                           [](const Info& info, Function* reason) {},
+                           analyzer.NonDirectCallsHaveProperty);
 
     // Apply the information.
     struct OptimizeInvokes : public WalkerPass<PostWalker<OptimizeInvokes>> {

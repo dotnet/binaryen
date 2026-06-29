@@ -157,9 +157,9 @@ int main(int argc, char** argv) {
 
     ret += "        case " + std::to_string(functionExportIndex++) + ":\n";
 
-    auto* func = wasm.getFunction(exp->value);
+    auto* func = wasm.getFunction(*exp->getInternalName());
 
-    ret += std::string("          puts(\"[fuzz-exec] calling ") +
+    ret += std::string("          puts(\"[fuzz-exec] export ") +
            exp->name.toString() + "\");\n";
     auto result = func->getResults();
 

@@ -7,7 +7,7 @@
                 "type": "git",
                 "git": {
                     "repositoryUrl": "https://github.com/WebAssembly/binaryen",
-                    "commitHash": "728b37cbe95ca8ea8cfba9ebc70e3fcb14db273a"
+                    "commitHash": "54f9f7afa703ade4a34aa3291abbe237bb0cd8a4"
                 }
             },
             "developmentDependency": false

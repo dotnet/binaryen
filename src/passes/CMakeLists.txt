@@ -15,6 +15,7 @@ FILE(GLOB passes_HEADERS *.h)
 set(passes_SOURCES
   param-utils.cpp
   pass.cpp
+  string-utils.cpp
   test_passes.cpp
   AbstractTypeRefining.cpp
   AlignmentLowering.cpp
@@ -27,13 +28,16 @@ set(passes_SOURCES
   ConstHoisting.cpp
   DataFlowOpts.cpp
   DeadArgumentElimination.cpp
+  DeadArgumentElimination2.cpp
   DeadCodeElimination.cpp
   DeAlign.cpp
+  DebugLocationPropagation.cpp
   DeNaN.cpp
   Directize.cpp
   DuplicateImportElimination.cpp
   DuplicateFunctionElimination.cpp
   DWARF.cpp
+  EncloseWorld.cpp
   ExtractFunction.cpp
   Flatten.cpp
   FuncCastEmulation.cpp
@@ -43,18 +47,20 @@ set(passes_SOURCES
   GlobalStructInference.cpp
   GlobalTypeOptimization.cpp
   GUFA.cpp
-  hash-stringify-walker.cpp
   Outlining.cpp
   Heap2Local.cpp
+  HeapStoreOptimization.cpp
   I64ToI32Lowering.cpp
   Inlining.cpp
+  InstrumentBranchHints.cpp
   InstrumentLocals.cpp
   InstrumentMemory.cpp
   Intrinsics.cpp
+  J2CLItableMerging.cpp
   J2CLOpts.cpp
-  JSPI.cpp
   LegalizeJSInterface.cpp
   LimitSegments.cpp
+  LLVMMemoryCopyFillLowering.cpp
   LocalCSE.cpp
   LocalSubtyping.cpp
   LogExecution.cpp
@@ -66,11 +72,13 @@ set(passes_SOURCES
   MergeLocals.cpp
   Metrics.cpp
   MinifyImportsAndExports.cpp
+  MinimizeRecGroups.cpp
   Monomorphize.cpp
   MultiMemoryLowering.cpp
   NameList.cpp
   NameTypes.cpp
   NoInline.cpp
+  LLVMNontrappingFPToIntLowering.cpp
   OnceReduction.cpp
   OptimizeAddedConstants.cpp
   OptimizeCasts.cpp
@@ -86,17 +94,21 @@ set(passes_SOURCES
   PrintFunctionMap.cpp
   RoundTrip.cpp
   SetGlobals.cpp
-  StackIR.cpp
   SignaturePruning.cpp
   SignatureRefining.cpp
   SignExtLowering.cpp
+  StringLifting.cpp
   StringLowering.cpp
   Strip.cpp
   StripTargetFeatures.cpp
+  StripToolchainAnnotations.cpp
+  TraceCalls.cpp
+  RandomizeBranchHints.cpp
   RedundantSetElimination.cpp
   RemoveImports.cpp
-  RemoveMemory.cpp
+  RemoveMemoryInit.cpp
   RemoveNonJSOps.cpp
+  RemoveRelaxedSIMD.cpp
   RemoveUnusedBrs.cpp
   RemoveUnusedNames.cpp
   RemoveUnusedModuleElements.cpp
@@ -104,6 +116,7 @@ set(passes_SOURCES
   ReorderFunctions.cpp
   ReorderGlobals.cpp
   ReorderLocals.cpp
+  ReorderTypes.cpp
   ReReloop.cpp
   TrapMode.cpp
   TypeGeneralizing.cpp
@@ -137,4 +150,4 @@ if(EMSCRIPTEN)
   list(REMOVE_ITEM passes_SOURCES "hash-stringify-walker.cpp")
   list(REMOVE_ITEM passes_SOURCES "Outlining.cpp")
 endif()
-add_library(passes OBJECT ${passes_SOURCES})
+target_sources(binaryen PRIVATE ${passes_SOURCES})

@@ -45,6 +45,13 @@ struct Metrics
   }
 
   void doWalkModule(Module* module) {
+    std::string title = getArgumentOrDefault("metrics", "");
+    std::cout << "Metrics";
+    if (!title.empty()) {
+      std::cout << ": " << title;
+    }
+    std::cout << '\n';
+
     ImportInfo imports(*module);
 
     // global things
@@ -94,7 +101,7 @@ struct Metrics
       printCounts("global");
       // compute binary info, so we know function sizes
       BufferWithRandomAccess buffer;
-      WasmBinaryWriter writer(module, buffer);
+      WasmBinaryWriter writer(module, buffer, getPassOptions());
       writer.write();
       // print for each function
       Index binaryIndex = 0;
@@ -108,14 +115,14 @@ struct Metrics
       });
       // print for each export how much code size is due to it, i.e.,
       // how much the module could shrink without it.
-      auto sizeAfterGlobalCleanup = [](Module* module) {
+      auto sizeAfterGlobalCleanup = [&](Module* module) {
         PassRunner runner(module,
                           PassOptions::getWithDefaultOptimizationOptions());
         runner.setIsNested(true);
         runner.addDefaultGlobalOptimizationPostPasses(); // remove stuff
         runner.run();
         BufferWithRandomAccess buffer;
-        WasmBinaryWriter writer(module, buffer);
+        WasmBinaryWriter writer(module, buffer, getPassOptions());
         writer.write();
         return buffer.size();
       };
@@ -126,16 +133,19 @@ struct Metrics
         baseline = sizeAfterGlobalCleanup(&test);
       }
       for (auto& exp : module->exports) {
-        // create a test module where we remove the export and then see how much
-        // can be removed thanks to that
-        Module test;
-        ModuleUtils::copyModule(*module, test);
-        test.removeExport(exp->name);
-        counts.clear();
-        counts["[removable-bytes-without-it]"] =
-          baseline - sizeAfterGlobalCleanup(&test);
-        printCounts(std::string("export: ") + exp->name.toString() + " (" +
-                    exp->value.toString() + ')');
+        // Removing a type export will not remove any code
+        if (auto* name = exp->getInternalName()) {
+          // create a test module where we remove the export and then see how
+          // much can be removed thanks to that
+          Module test;
+          ModuleUtils::copyModule(*module, test);
+          test.removeExport(exp->name);
+          counts.clear();
+          counts["[removable-bytes-without-it]"] =
+            baseline - sizeAfterGlobalCleanup(&test);
+          printCounts(std::string("export: ") + exp->name.toString() + " (" +
+                      name->toString() + ')');
+        }
       }
       // check how much size depends on the start method
       if (!module->start.isNull()) {
@@ -185,16 +195,17 @@ struct Metrics
     keys.push_back("[total]");
     counts["[total]"] = total;
     // sort
-    sort(keys.begin(), keys.end(), [](const char* a, const char* b) -> bool {
-      // Sort the [..] ones first.
-      if (a[0] == '[' && b[0] != '[') {
-        return true;
-      }
-      if (a[0] != '[' && b[0] == '[') {
-        return false;
-      }
-      return strcmp(b, a) > 0;
-    });
+    std::sort(
+      keys.begin(), keys.end(), [](const char* a, const char* b) -> bool {
+        // Sort the [..] ones first.
+        if (a[0] == '[' && b[0] != '[') {
+          return true;
+        }
+        if (a[0] != '[' && b[0] == '[') {
+          return false;
+        }
+        return strcmp(b, a) > 0;
+      });
     o << title << "\n";
     for (auto* key : keys) {
       auto value = counts[key];
@@ -202,7 +213,7 @@ struct Metrics
         continue;
       }
       o << " " << left << setw(15) << key << ": " << setw(8) << value;
-      if (lastCounts.count(key)) {
+      if (lastCounts.contains(key)) {
         int before = lastCounts[key];
         int after = value;
         if (after - before) {

@@ -19,8 +19,11 @@
 //
 
 #include <ir/block-utils.h>
+#include <ir/branch-hints.h>
 #include <ir/drop.h>
 #include <ir/effects.h>
+#include <ir/find_all.h>
+#include <ir/intrinsics.h>
 #include <ir/iteration.h>
 #include <ir/literal-utils.h>
 #include <ir/utils.h>
@@ -87,13 +90,11 @@ struct Vacuum : public WalkerPass<ExpressionStackWalker<Vacuum>> {
       // Some instructions have special handling in visit*, and we should do
       // nothing for them here.
       if (curr->is<Drop>() || curr->is<Block>() || curr->is<If>() ||
-          curr->is<Loop>() || curr->is<Try>()) {
+          curr->is<Loop>() || curr->is<Try>() || curr->is<TryTable>()) {
         return curr;
       }
-      // Check if this expression itself has side effects, ignoring children.
-      EffectAnalyzer self(getPassOptions(), *getModule());
-      self.visit(curr);
-      if (self.hasUnremovableSideEffects()) {
+      // Check if this expression itself must be kept.
+      if (mustKeepUnusedParent(curr)) {
         return curr;
       }
       // The result isn't used, and this has no side effects itself, so we can
@@ -129,6 +130,26 @@ struct Vacuum : public WalkerPass<ExpressionStackWalker<Vacuum>> {
     }
   }
 
+  // Check if a parent expression must be kept around, given the knowledge that
+  // its result is unused (dropped). This is basically just a call to
+  // ShallowEffectAnalyzer to see if we can remove it, except that given the
+  // result is unused, the relevant hint may help us. (This just checks the
+  // parent itself: it may have children that the caller must check and keep
+  // around if so.)
+  bool mustKeepUnusedParent(Expression* curr) {
+    if (auto* call = curr->dynCast<Call>()) {
+      // If |curr| is marked as removable if unused, then it is removable
+      // without even checking effects.
+      if (Intrinsics(*getModule())
+            .getCallAnnotations(call, getFunction())
+            .removableIfUnused) {
+        return false;
+      }
+    }
+    ShallowEffectAnalyzer self(getPassOptions(), *getModule(), curr);
+    return self.hasUnremovableSideEffects();
+  }
+
   void visitBlock(Block* curr) {
     auto& list = curr->list;
 
@@ -158,15 +179,16 @@ struct Vacuum : public WalkerPass<ExpressionStackWalker<Vacuum>> {
           continue;
         }
 
-        // Check if we may no longer be heading to a trap. Two situations count
-        // here: Control flow might branch, or we might call (since a call might
-        // reach an import; see notes on that in pass.h:trapsNeverHappen).
+        // Check if we may no longer be heading to a trap. We can only optimize
+        // if the trap will actually be reached. Two situations can prevent that
+        // here: Control flow might branch away, or we might hang (which can
+        // happen in a call or a loop).
         //
         // We also cannot remove a pop as it is necessary for structural
         // reasons.
         EffectAnalyzer effects(getPassOptions(), *getModule(), list[i]);
         if (effects.transfersControlFlow() || effects.calls ||
-            effects.danglingPop) {
+            effects.mayNotReturn || effects.danglingPop) {
           headingToTrap = false;
           continue;
         }
@@ -296,6 +318,7 @@ struct Vacuum : public WalkerPass<ExpressionStackWalker<Vacuum>> {
         curr->ifFalse = nullptr;
         curr->condition =
           Builder(*getModule()).makeUnary(EqZInt32, curr->condition);
+        BranchHints::flip(curr, getFunction());
       } else if (curr->ifTrue->is<Drop>() && curr->ifFalse->is<Drop>()) {
         // instead of dropping both sides, drop the if, if they are the same
         // type
@@ -394,7 +417,7 @@ struct Vacuum : public WalkerPass<ExpressionStackWalker<Vacuum>> {
     }
     // sink a drop into an arm of an if-else if the other arm ends in an
     // unreachable, as it if is a branch, this can make that branch optimizable
-    // and more vaccuming possible
+    // and more vacuuming possible
     auto* iff = curr->value->dynCast<If>();
     if (iff && iff->ifFalse && iff->type.isConcrete()) {
       // reuse the drop in both cases
@@ -434,6 +457,15 @@ struct Vacuum : public WalkerPass<ExpressionStackWalker<Vacuum>> {
     }
   }
 
+  void visitTryTable(TryTable* curr) {
+    // If try_table's body does not throw, the whole try_table can be replaced
+    // with the try_table's body.
+    if (!EffectAnalyzer(getPassOptions(), *getModule(), curr->body).throws()) {
+      replaceCurrent(curr->body);
+      return;
+    }
+  }
+
   void visitFunction(Function* curr) {
     auto* optimized =
       optimize(curr->body, curr->getResults() != Type::none, true);
@@ -442,10 +474,40 @@ struct Vacuum : public WalkerPass<ExpressionStackWalker<Vacuum>> {
     } else {
       ExpressionManipulator::nop(curr->body);
     }
-    if (curr->getResults() == Type::none &&
-        !EffectAnalyzer(getPassOptions(), *getModule(), curr)
-           .hasUnremovableSideEffects()) {
-      ExpressionManipulator::nop(curr->body);
+    if (curr->getResults() == Type::none) {
+      EffectAnalyzer effects(getPassOptions(), *getModule(), curr);
+      if (!effects.hasUnremovableSideEffects()) {
+        // We can remove these contents. However, there is one situation we want
+        // to handle here: in trapsNeverHappen mode, we can remove traps, but
+        // we don't want to remove an actual Unreachable - replacing an
+        // Unreachable with a Nop is valid, but does not propagate to callers in
+        // other passes.
+        //
+        // To avoid that situation, after finding we can remove the code, we
+        // also require that no Unreachable exists. Note that this is unoptimal:
+        // there may be a complex bundle of code whose only effect is to
+        // potentially trap, and it happens to contain an Unreachable inside
+        // somewhere, then that would prevent us from nopping the entire thing.
+        // But we leave untangling such code for other passes.
+        //
+        // This is also unoptimal as it is a heuristic: some toolchain might
+        // emit 0 / 0 for a logical trap, rather than an Unreachable. We would
+        // remove that 0 / 0 if we saw it, and the trap would not propagate.
+        // (But other passes would handle it, if they saw it first.)
+        if (effects.trap) {
+          // The code is removable, so the trap is the only effect it has, and
+          // we are considering removing it because TNH is enabled.
+          assert(getPassOptions().trapsNeverHappen);
+          if (!FindAll<Unreachable>(curr->body).list.empty()) {
+            return;
+          }
+        }
+        // Either trapsNeverHappen and there is no Unreachable (so we are only
+        // removing implicit traps, which is fine), or traps may happen in terms
+        // of the flag, but not in this actual code. Either way, we can remove
+        // all of this.
+        ExpressionManipulator::nop(curr->body);
+      }
     }
   }
 };

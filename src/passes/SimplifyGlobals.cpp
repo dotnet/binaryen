@@ -148,7 +148,7 @@ struct GlobalUseScanner : public WalkerPass<PostWalker<GlobalUseScanner>> {
   //  if (global % 17 < 4) { global = 1 }
   //
   // What we want to disallow is using the global to actually do something that
-  // is noticeeable *aside* from writing the global, like this:
+  // is noticeable *aside* from writing the global, like this:
   //
   //  if (global ? foo() : bar()) { .. }
   //
@@ -170,10 +170,40 @@ struct GlobalUseScanner : public WalkerPass<PostWalker<GlobalUseScanner>> {
     if (codeEffects.hasAnything()) {
       return Name();
     }
+    // Verify that we actually have a global.set here. We could also have a
+    // call to a function for whom we have computed function effects, but that
+    // is not what we want: such a function can be called from other places too.
+    // This read-only-to-write pattern must contain an actual global.set, so we
+    // can count the sets in the entire program to confirm that no dangerous
+    // ones exist. (In other words, we cannot take the shortcut of assuming that
+    // the effect "writes global $foo" means we actually have a global.set $foo
+    // here.)
+    auto found = false;
+    for (auto* set : FindAll<GlobalSet>(code).list) {
+      if (set->name == writtenGlobal) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      return Name();
+    }
 
     // See if we read that global in the condition expression.
     EffectAnalyzer conditionEffects(getPassOptions(), *getModule(), condition);
-    if (!conditionEffects.mutableGlobalsRead.count(writtenGlobal)) {
+    if (!conditionEffects.mutableGlobalsRead.contains(writtenGlobal)) {
+      return Name();
+    }
+    // As above, confirm we see an actual global.get, and not a call to one with
+    // computed effects.
+    found = false;
+    for (auto* get : FindAll<GlobalGet>(condition).list) {
+      if (get->name == writtenGlobal) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
       return Name();
     }
 
@@ -317,7 +347,14 @@ struct GlobalUseModifier : public WalkerPass<PostWalker<GlobalUseModifier>> {
   void visitGlobalGet(GlobalGet* curr) {
     auto iter = copiedParentMap->find(curr->name);
     if (iter != copiedParentMap->end()) {
-      curr->name = iter->second;
+      auto original = iter->second;
+      // Only apply this optimization if the global we are switching to has the
+      // right type for us.
+      // TODO: We could also allow it to be more refined, but would then need to
+      //       refinalize.
+      if (getModule()->getGlobal(original)->type == curr->type) {
+        curr->name = original;
+      }
     }
   }
 
@@ -329,7 +366,7 @@ struct ConstantGlobalApplier
   : public WalkerPass<
       LinearExecutionWalker<ConstantGlobalApplier,
                             UnifiedExpressionVisitor<ConstantGlobalApplier>>> {
-  using super = WalkerPass<
+  using Super = WalkerPass<
     LinearExecutionWalker<ConstantGlobalApplier,
                           UnifiedExpressionVisitor<ConstantGlobalApplier>>>;
 
@@ -354,7 +391,7 @@ struct ConstantGlobalApplier
       // This operation will change the type, so refinalize.
       refinalize = true;
     }
-    super::replaceCurrent(rep);
+    Super::replaceCurrent(rep);
   }
 
   void visitExpression(Expression* curr) {
@@ -508,7 +545,7 @@ struct SimplifyGlobals : public Pass {
     }
     for (auto& ex : module->exports) {
       if (ex->kind == ExternalKind::Global) {
-        map[ex->value].exported = true;
+        map[*ex->getInternalName()].exported = true;
       }
     }
 
@@ -545,7 +582,7 @@ struct SimplifyGlobals : public Pass {
       }
 
       if (info.imported || info.exported) {
-        // If the global is observable from the outside, we can't do anythng
+        // If the global is observable from the outside, we can't do anything
         // here.
         //
         // TODO: optimize the case of an imported but immutable global, etc.
@@ -629,8 +666,8 @@ struct SimplifyGlobals : public Pass {
       // Go all the way back.
       for (auto& global : module->globals) {
         auto child = global->name;
-        if (copiedParentMap.count(child)) {
-          while (copiedParentMap.count(copiedParentMap[child])) {
+        if (copiedParentMap.contains(child)) {
+          while (copiedParentMap.contains(copiedParentMap[child])) {
             copiedParentMap[child] = copiedParentMap[copiedParentMap[child]];
           }
         }
@@ -731,10 +768,11 @@ struct SimplifyGlobals : public Pass {
 
       void visitGlobalGet(GlobalGet* curr) {
         // If this is a get of a global with a single get and no sets, then we
-        // can fold that code into here.
+        // can fold that code into here. We must also avoid an export, as it can
+        // have additional gets and sets that we do not see.
         auto name = curr->name;
         auto& info = infos[name];
-        if (info.written == 0 && info.read == 1) {
+        if (info.written == 0 && info.read == 1 && !info.exported) {
           auto* global = wasm.getGlobal(name);
           if (global->init) {
             // Copy that global's code. For simplicity we copy it as we have to

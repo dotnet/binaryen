@@ -22,6 +22,7 @@
 #include "ir/find_all.h"
 #include "ir/lubs.h"
 #include "ir/module-utils.h"
+#include "ir/public-type-validator.h"
 #include "ir/utils.h"
 #include "pass.h"
 #include "wasm-type.h"
@@ -67,17 +68,28 @@ struct GlobalRefining : public Pass {
     // In closed world we cannot change the types of exports, as we might change
     // from a public type to a private that would cause a validation error.
     // TODO We could refine to a type that is still public, however.
+    //
+    // We are also limited in open world: in that mode we must assume that
+    // another module might import our exported globals with the current type
+    // (that type is a contract between them), and in such a case the type of
+    // mutable globals must match precisely (the same rule as for mutable struct
+    // fields in subtypes - the types must match exactly, or else a write in
+    // one place could store a type considered in valid in another place).
     std::unordered_set<Name> unoptimizable;
-    if (getPassOptions().closedWorld) {
-      for (auto* global : ExportUtils::getExportedGlobals(*module)) {
+    auto exportedGlobalsVec = ExportUtils::getExportedGlobals(*module);
+    std::unordered_set<Global*> exportedGlobals(exportedGlobalsVec.begin(),
+                                                exportedGlobalsVec.end());
+    for (auto* global : exportedGlobalsVec) {
+      if (getPassOptions().closedWorld || global->mutable_) {
         unoptimizable.insert(global->name);
       }
     }
 
     bool optimized = false;
+    PublicTypeValidator publicTypeValidator(module->features);
 
     for (auto& global : module->globals) {
-      if (global->imported() || unoptimizable.count(global->name)) {
+      if (global->imported() || unoptimizable.contains(global->name)) {
         continue;
       }
 
@@ -95,12 +107,20 @@ struct GlobalRefining : public Pass {
 
       auto oldType = global->type;
       auto newType = lub.getLUB();
-      if (newType != oldType) {
-        // We found an improvement!
-        assert(Type::isSubType(newType, oldType));
-        global->type = newType;
-        optimized = true;
+      if (newType == oldType) {
+        continue;
       }
+
+      // Do not make invalid types public.
+      if (exportedGlobals.contains(global.get()) &&
+          !publicTypeValidator.isValidPublicType(newType)) {
+        continue;
+      }
+
+      // We found an improvement!
+      assert(Type::isSubType(newType, oldType));
+      global->type = newType;
+      optimized = true;
     }
 
     if (!optimized) {
@@ -143,8 +163,9 @@ struct GlobalRefining : public Pass {
           ReFinalize().walkFunctionInModule(curr, &wasm);
         }
       }
-    };
-    GetUpdater(*this, *module).run(getPassRunner(), module);
+    } updater(*this, *module);
+    updater.run(getPassRunner(), module);
+    updater.runOnModuleCode(getPassRunner(), module);
   }
 };
 

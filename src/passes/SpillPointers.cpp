@@ -69,7 +69,7 @@ struct SpillPointers
   // main entry point
 
   void doWalkFunction(Function* func) {
-    super::doWalkFunction(func);
+    Super::doWalkFunction(func);
     spillPointers();
   }
 
@@ -79,7 +79,7 @@ struct SpillPointers
   Type pointerType;
 
   void spillPointers() {
-    pointerType = getModule()->memories[0]->indexType;
+    pointerType = getModule()->memories[0]->addressType;
 
     // we only care about possible pointers
     auto* func = getFunction();
@@ -94,7 +94,7 @@ struct SpillPointers
     bool spilled = false;
     Index spillLocal = -1;
     for (auto& curr : basicBlocks) {
-      if (liveBlocks.count(curr.get()) == 0) {
+      if (!liveBlocks.contains(curr.get())) {
         continue; // ignore dead blocks
       }
       auto& liveness = curr->contents;
@@ -121,7 +121,7 @@ struct SpillPointers
         } else if (action.isOther()) {
           std::vector<Index> toSpill;
           for (auto index : live) {
-            if (pointerMap.count(index) > 0) {
+            if (pointerMap.contains(index)) {
               toSpill.push_back(index);
             }
           }
@@ -171,7 +171,7 @@ struct SpillPointers
       auto* set = builder.makeLocalSet(temp, operand);
       block->list.push_back(set);
       block->finalize();
-      if (actualPointers.count(&operand) > 0) {
+      if (actualPointers.contains(&operand)) {
         // this is something we track, and it's moving - update
         actualPointers[&operand] = &set->value;
       }

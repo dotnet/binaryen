@@ -36,7 +36,7 @@ ParseDefsCtx::makeTypeUse(Index pos,
 
     auto sig = Signature(Type(paramTypes), Type(resultTypes));
 
-    if (!type->isSignature() || type->getSignature() != sig) {
+    if (!type->type.isSignature() || type->type.getSignature() != sig) {
       return in.err(pos, "type does not match provided signature");
     }
   }
@@ -58,6 +58,18 @@ Result<> ParseDefsCtx::addGlobal(Name,
                                  Index) {
   if (exp) {
     wasm.globals[index]->init = *exp;
+  }
+  return Ok{};
+}
+
+Result<> ParseDefsCtx::addTable(Name,
+                                const std::vector<Name>&,
+                                ImportNames*,
+                                TableTypeT,
+                                std::optional<ExprT> init,
+                                Index) {
+  if (init) {
+    wasm.tables[index]->init = *init;
   }
   return Ok{};
 }

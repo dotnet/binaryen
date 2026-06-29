@@ -16,12 +16,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest, windows-latest, windows-11-arm]
     defaults:
       run:
         shell: bash
     steps:
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v4
       with:
         submodules: true
 
@@ -31,7 +31,7 @@ jobs:
 
     - name: install ninja (win)
       run: choco install ninja
-      if: matrix.os == 'windows-latest'
+      if: startsWith(matrix.os, 'windows')
 
     - name: mkdir
       run: mkdir -p out
@@ -47,6 +47,11 @@ jobs:
       run: cmake -S . -B out -DCMAKE_INSTALL_PREFIX=out/install
       if: matrix.os == 'windows-latest'
 
+    - name: cmake (win arm64)
+      # -G "Visual Studio 15 2017"
+      run: cmake -S . -B out -DCMAKE_INSTALL_PREFIX=out-arm64/install 
+      if: matrix.os == 'windows-11-arm'
+
     - name: build
       run: cmake --build out -v --config Release --target install
 
@@ -56,7 +61,7 @@ jobs:
 
     - name: strip
       run: find out*/install/ -type f -perm -u=x -exec strip -x {} +
-      if: matrix.os != 'windows-latest'
+      if: ${{ !startsWith(matrix.os, 'windows') }}
 
     - name: archive
       id: archive
@@ -71,13 +76,14 @@ jobs:
         tar -czf $TARBALL binaryen-$VERSION
         # on Windows, MSYS2 will strip the carriage return from CMake output
         cmake -E sha256sum $TARBALL > $SHASUM
-        echo "::set-output name=tarball::$TARBALL"
-        echo "::set-output name=shasum::$SHASUM"
+        echo "TARBALL=$TARBALL" >> $GITHUB_OUTPUT
+        echo "SHASUM=$SHASUM" >> $GITHUB_OUTPUT
+      if: matrix.os != 'windows-11-arm'
 
     - name: archive-arm64
       id: archive-arm64
       run: |
-        OSNAME=$(echo ${{ matrix.os }} | sed 's/-latest//')
+        OSNAME=$(echo ${{ matrix.os }} | sed 's/-latest//' | sed 's/-11-arm//')
         VERSION=$GITHUB_REF_NAME
         PKGNAME="binaryen-$VERSION-arm64-$OSNAME"
         TARBALL=$PKGNAME.tar.gz
@@ -87,57 +93,64 @@ jobs:
         tar -czf $TARBALL binaryen-$VERSION
         # on Windows, MSYS2 will strip the carriage return from CMake output
         cmake -E sha256sum $TARBALL > $SHASUM
-        echo "::set-output name=tarball::$TARBALL"
-        echo "::set-output name=shasum::$SHASUM"
-      if: matrix.os == 'macos-latest'
+        echo "TARBALL=$TARBALL" >> $GITHUB_OUTPUT
+        echo "SHASUM=$SHASUM" >> $GITHUB_OUTPUT
+      if: ${{ matrix.os == 'macos-latest' || matrix.os == 'windows-11-arm' }} 
 
     - name: upload tarball
       uses: softprops/action-gh-release@v1
       with:
         draft: true
         files: |
-          ${{ steps.archive.outputs.tarball }}
-          ${{ steps.archive.outputs.shasum }}
-          ${{ steps.archive-arm64.outputs.tarball }}
-          ${{ steps.archive-arm64.outputs.shasum }}
+          ${{ steps.archive.outputs.TARBALL }}
+          ${{ steps.archive.outputs.SHASUM }}
+          ${{ steps.archive-arm64.outputs.TARBALL }}
+          ${{ steps.archive-arm64.outputs.SHASUM }}
 
   # Build with gcc 6.3 and run tests on Alpine Linux (inside chroot).
+  # Keep in sync with ci.yml.
   # Note: Alpine uses musl libc.
   build-alpine:
     name: alpine
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        docker_platform: [amd64, arm64]
+        os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
-    - uses: actions/setup-python@v1
+    - uses: actions/setup-python@v5
       with:
         python-version: '3.x'
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v4
       with:
         submodules: true
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-      if: matrix.docker_platform != 'amd64'
 
     - name: start docker
       run: |
-        docker run -w /src -dit --platform=linux/${{ matrix.docker_platform }} --name alpine -v $PWD:/src node:lts-alpine
+        if [[ "${{ matrix.docker_platform }}" == "ubuntu-24.04-arm" ]]; then
+          platform="--platform=linux/arm64"
+        fi
+        docker run -w /src -dit $platform --name alpine -v $PWD:/src node:lts-alpine
         echo 'docker exec alpine "$@";' > ./alpine.sh
         chmod +x ./alpine.sh
-
 
     - name: install packages
       run: |
         ./alpine.sh apk update
-        ./alpine.sh apk add build-base cmake git python3 clang ninja py3-pip
+        ./alpine.sh apk add build-base cmake git python3 py3-pip clang ninja util-linux
+
+    - name: avoid d8 tests (jsvu is not compatible with alpine)
+      run: |
+        ./alpine.sh rm -Rf test/lit/d8
 
     - name: install python dev dependencies
       run: ./alpine.sh pip3 install --break-system-packages -r requirements-dev.txt
 
     - name: cmake
+      # Build with an 8MB stack size, as otherwise Alpine/musl's default stack
+      # size for pthreads is tiny,
+      # https://github.com/WebAssembly/binaryen/issues/8594
       run: |
-        ./alpine.sh cmake . -G Ninja -DCMAKE_CXX_FLAGS="-static" -DCMAKE_C_FLAGS="-static" -DCMAKE_BUILD_TYPE=Release -DBUILD_STATIC_LIB=ON -DCMAKE_INSTALL_PREFIX=install
+        ./alpine.sh cmake . -G Ninja -DCMAKE_CXX_FLAGS="-static" -DCMAKE_C_FLAGS="-static" -DCMAKE_EXE_LINKER_FLAGS="-Wl,-z,stack-size=8388608" -DCMAKE_BUILD_TYPE=Release -DBUILD_STATIC_LIB=ON -DBUILD_MIMALLOC=ON -DCMAKE_INSTALL_PREFIX=install
 
     - name: build
       run: |
@@ -158,16 +171,16 @@ jobs:
         mv install binaryen-$VERSION
         tar -czf $TARBALL binaryen-$VERSION
         cmake -E sha256sum $TARBALL > $SHASUM
-        echo "::set-output name=tarball::$TARBALL"
-        echo "::set-output name=shasum::$SHASUM"
+        echo "TARBALL=$TARBALL" >> $GITHUB_OUTPUT
+        echo "SHASUM=$SHASUM" >> $GITHUB_OUTPUT
 
     - name: upload tarball
       uses: softprops/action-gh-release@v1
       with:
         draft: true
         files: |
-          ${{ steps.archive.outputs.tarball }}
-          ${{ steps.archive.outputs.shasum }}
+          ${{ steps.archive.outputs.TARBALL }}
+          ${{ steps.archive.outputs.SHASUM }}
 
   # Build using Emscripten to JavaScript+WebAssembly.
   build-node:
@@ -177,7 +190,7 @@ jobs:
       run:
         shell: bash
     steps:
-    - uses: actions/setup-python@v1
+    - uses: actions/setup-python@v5
       with:
         python-version: '3.x'
     - uses: actions/checkout@v1
@@ -224,13 +237,13 @@ jobs:
         cp out/bin/wasm-opt* binaryen-$VERSION/
         tar -czf $TARBALL binaryen-$VERSION
         cmake -E sha256sum $TARBALL > $SHASUM
-        echo "::set-output name=tarball::$TARBALL"
-        echo "::set-output name=shasum::$SHASUM"
+        echo "TARBALL=$TARBALL" >> $GITHUB_OUTPUT
+        echo "SHASUM=$SHASUM" >> $GITHUB_OUTPUT
 
     - name: upload tarball
       uses: softprops/action-gh-release@v1
       with:
         draft: true
         files: |
-          ${{ steps.archive.outputs.tarball }}
-          ${{ steps.archive.outputs.shasum }}
+          ${{ steps.archive.outputs.TARBALL }}
+          ${{ steps.archive.outputs.SHASUM }}
