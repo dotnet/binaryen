@@ -1,0 +1,78 @@
+# Create this pipeline in `dnceng/internal` against the GitHub repository
+# `dotnet/binaryen` so GitHub-attributed CodeQL snapshots stay separate from
+# the existing ADO-mirror pipeline in `eng/azure-pipelines.yml`.
+# After merge, create or update that ADO definition to point to this file and
+# queue one `dotnet/main` run to seed the initial GitHub-attributed snapshots.
+
+trigger:
+  batch: true
+  branches:
+    include:
+    - dotnet/main
+
+pr: none
+
+schedules:
+- cron: 0 0 * * 0
+  displayName: Weekly CodeQL refresh
+  branches:
+    include:
+    - dotnet/main
+  always: true
+
+variables:
+- template: /eng/common-variables.yml@self
+- template: /eng/common/templates-official/variables/pool-providers.yml@self
+
+resources:
+  repositories:
+  - repository: 1ESPipelineTemplates
+    type: git
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/tags/release
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
+  parameters:
+    sdl:
+      codeql:
+        compiled:
+          enabled: true
+        runSourceLanguagesInSourceAnalysis: true
+        sourceLanguages: javascript, python
+        binaryLanguages: cpp
+      sourceAnalysisPool:
+        name: $(DncEngInternalBuildPool)
+        image: 1es-windows-2022
+        os: windows
+    containers:
+      mariner2crossamd64:
+        image: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net11.0-cross-amd64
+    stages:
+    - stage: build
+      displayName: CodeQL
+      jobs:
+      - template: /eng/common/templates-official/jobs/jobs.yml@self
+        parameters:
+          jobs:
+
+          ############ LINUX BUILD ############
+          - job: Build_Linux_x64
+            displayName: Linux_x64
+            timeoutInMinutes: 360
+            pool:
+              name: $(DncEngInternalBuildPool)
+              image: build.azurelinux.3.amd64
+              os: linux
+            container: mariner2crossamd64
+            steps:
+            - script: |
+                git clean -ffdx
+                git reset --hard HEAD
+              displayName: Clean up working directory
+
+            - bash: |
+                ./build.sh --ci --restore --build --arch x64 --configuration $(_BuildConfig) $(_InternalBuildArgs) /p:RestoreUsingNuGetTargets=false
+              displayName: Build for CodeQL
+              env:
+                ROOTFS_DIR: /crossrootfs/x64
