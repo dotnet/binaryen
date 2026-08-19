@@ -35,7 +35,7 @@ stages:
             x64:
               assetManifestOS: linux
               assetManifestPlatform: x64
-              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-amd64
+              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net10.0-cross-amd64
               rootfs: /crossrootfs/x64
               ClangTargetArg: /p:ClangTarget=x86_64-linux-gnu
               ClangBinDirArg: /p:ClangBinDir=/usr/local/bin
@@ -43,7 +43,7 @@ stages:
             arm64:
               assetManifestOS: linux
               assetManifestPlatform: arm64
-              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-arm64
+              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net10.0-cross-arm64
               rootfs: /crossrootfs/arm64
               ClangTargetArg: /p:ClangTarget=aarch64-linux-gnu
               ClangBinDirArg: /p:ClangBinDir=/usr/local/bin
@@ -79,7 +79,7 @@ stages:
             x64:
               assetManifestOS: linux-musl
               assetManifestPlatform: x64
-              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-amd64-alpine
+              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net10.0-cross-amd64-musl
               rootfs: /crossrootfs/x64
               ClangTargetArg: /p:ClangTarget=x86_64-alpine-linux-musl
               ClangBinDirArg: /p:ClangBinDir=/usr/local/bin
@@ -87,7 +87,7 @@ stages:
             arm64:
               assetManifestOS: linux-musl
               assetManifestPlatform: arm64
-              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:cbl-mariner-2.0-cross-arm64-alpine
+              imagename: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net10.0-cross-arm64-musl
               rootfs: /crossrootfs/arm64
               ClangTargetArg: /p:ClangTarget=aarch64-alpine-linux-musl
               ClangBinDirArg: /p:ClangBinDir=/usr/local/bin
