@@ -81,10 +81,15 @@
       <_BuildArgs Condition="'$(BuildOS)' == 'OSX'" Include="-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0" />
       <_BuildArgs Condition="'$(BuildOS)' == 'OSX' and '$(TargetArchitecture)' == 'x64'" Include="-DCMAKE_OSX_ARCHITECTURES=x86_64" />
       <_BuildArgs Condition="'$(BuildOS)' == 'OSX' and '$(TargetArchitecture)' == 'arm64'" Include="-DCMAKE_OSX_ARCHITECTURES=arm64" />
-      <_BuildArgs Include='-DCMAKE_C_FLAGS="$(_CrossCFlags)"' />
-      <_BuildArgs Include='-DCMAKE_CXX_FLAGS="$(_CrossCXXFlags)"' />
-      <_BuildArgs Include='-DCMAKE_EXE_LINKER_FLAGS="$(_ExeLinkerFlags)"' />
-      <_BuildArgs Include='-DCMAKE_SHARED_LINKER_FLAGS="$(_SharedLinkerFlags)"' />
+      <!-- Use the *_INIT variables rather than setting CMAKE_<LANG>_FLAGS et al directly:
+           setting the cache variables suppresses the values the platform modules contribute,
+           which on MSVC silently dropped /DWIN32 /D_WINDOWS /GR /EHsc and /machine:<arch>.
+           The *_INIT variables are appended to by the platform modules, so both our flags
+           and the platform defaults (and $ENV{CXXFLAGS}/$ENV{LDFLAGS}) are preserved. -->
+      <_BuildArgs Include='-DCMAKE_C_FLAGS_INIT="$(_CrossCFlags)"' />
+      <_BuildArgs Include='-DCMAKE_CXX_FLAGS_INIT="$(_CrossCXXFlags)"' />
+      <_BuildArgs Include='-DCMAKE_EXE_LINKER_FLAGS_INIT="$(_ExeLinkerFlags)"' />
+      <_BuildArgs Include='-DCMAKE_SHARED_LINKER_FLAGS_INIT="$(_SharedLinkerFlags)"' />
       <_BuildArgs Include="-DBUILD_TESTS:BOOL=OFF" />
       <_BuildArgs Include="-DINSTALL_LIBS:BOOL=OFF" />
       <_BuildArgs Condition="'$(BuildOS)' == 'Linux'" Include="-DCMAKE_C_COMPILER=clang" />

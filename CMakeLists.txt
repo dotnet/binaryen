@@ -288,6 +288,11 @@ if(MSVC)
 
   add_link_flag("/STACK:8388608")
 
+  # Enable Control Flow Guard. The flag is needed both when compiling (to emit
+  # the guard checks) and when linking (to emit the guard address tables).
+  add_compile_flag("/guard:cf")
+  add_link_flag("/guard:cf")
+
 else() # MSVC
 
   add_compile_flag("-fno-omit-frame-pointer")
