@@ -1,0 +1,21 @@
+#
+# drop tests, fuzzers, docs, vendored fixtures, unused tooling to reduce compliance scanner overhead
+#
+check.py
+fuzz
+media
+scripts/fuzz_opt.py
+scripts/fuzz_passes.py
+scripts/fuzz_passes_wast.py
+scripts/fuzz_relooper.py
+scripts/test
+test
+third_party/.clang-format
+third_party/.clang-tidy
+third_party/fuzztest
+third_party/googletest
+third_party/mimalloc
+third_party/mozjs
+third_party/setup.py
+third_party/v8
+third_party/wabt

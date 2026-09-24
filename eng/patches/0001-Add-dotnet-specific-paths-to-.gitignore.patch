@@ -1,0 +1,25 @@
+From 2a09b0d87230516bb67328a9eb8bca18e6673e5d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Alexander=20K=C3=B6plinger?= <alex.koeplinger@outlook.com>
+Date: Mon, 8 Jun 2026 11:40:50 +0200
+Subject: [PATCH] Add dotnet specific paths to .gitignore
+
+---
+ .gitignore | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/.gitignore b/.gitignore
+index b88109b38..d3685e3c4 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -63,3 +63,8 @@ CMakeUserPresets.json
+ .cache/*
+ 
+ .venv/
++
++# DOTNET ignores
++/.dotnet
++/.packages
++/artifacts
+-- 
+2.54.0
+
