@@ -173,3 +173,19 @@ stages:
         - powershell: eng\common\build.ps1 -ci -restore -publish -configuration $(_BuildConfig) $(_InternalBuildArgs) /p:AssetManifestOS=$(_BuildConfig)-$(assetManifestOS) /p:PlatformName=$(assetManifestPlatform) -projects $(Build.SourcesDirectory)\binaryen.proj
           displayName: Publish packages
           condition: and(succeeded(), ne(variables['System.TeamProject'], 'public'), ne(variables['Build.Reason'], 'PullRequest'))
+
+      ############ VALIDATE PATCHES ############
+      - job: Validate_Patches
+        displayName: Validate Patches
+        timeoutInMinutes: 30
+        pool:
+          name: $(DncEngPublicBuildPool)
+          demands: ImageOverride -equals build.azurelinux.3.amd64.open
+        steps:
+        - script: |
+            git config --global user.name "dotnet-maestro[bot]"
+            git config --global user.email "dotnet-maestro[bot]@users.noreply.github.com"
+          displayName: Set git author
+
+        - bash: ./eng/patches/validate.sh
+          displayName: 'Validate patches reproduce current repo'
