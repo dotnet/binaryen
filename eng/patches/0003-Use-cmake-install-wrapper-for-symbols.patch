@@ -1,0 +1,55 @@
+From 41e629510009cc1aa47d3db7d25ad49169e8f4a0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Alexander=20K=C3=B6plinger?= <alex.koeplinger@outlook.com>
+Date: Mon, 8 Jun 2026 11:40:50 +0200
+Subject: [PATCH] Use cmake install wrapper for symbols
+
+---
+ CMakeLists.txt | 11 +++++------
+ 1 file changed, 5 insertions(+), 6 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 97863ffb5..52dc4b7f5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -8,6 +8,8 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum OS X deployment ve
+ project(binaryen LANGUAGES C CXX VERSION 129)
+ include(GNUInstallDirs)
+ 
++INCLUDE(eng/functions.cmake)
++
+ # The C++ standard whose features are required to build Binaryen.
+ # Keep in sync with scripts/test/shared.py cxx_standard
+ # The if condition allows embedding in a project with a higher default C++ standard set
+@@ -184,7 +186,7 @@ function(binaryen_add_executable name sources)
+   target_link_libraries(${name} PRIVATE Threads::Threads)
+   target_link_libraries(${name} PRIVATE binaryen)
+   binaryen_setup_rpath(${name})
+-  install(TARGETS ${name} DESTINATION ${CMAKE_INSTALL_BINDIR})
++  install_with_stripped_symbols(${name} TARGETS bin)
+ endfunction()
+ 
+ # Compiler setup. Use SYSTEM to avoid warnings and errors from third-party headers.
+@@ -518,10 +520,7 @@ set(binaryen_SOURCES
+ target_sources(binaryen PRIVATE ${binaryen_SOURCES})
+ 
+ if(INSTALL_LIBS OR NOT BUILD_STATIC_LIB)
+-  install(TARGETS binaryen
+-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
++  install_with_stripped_symbols(binaryen TARGETS lib)
+ endif()
+ if(INSTALL_LIBS)
+   install(FILES src/binaryen-c.h src/wasm-delegations.def DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+@@ -568,7 +567,7 @@ if(EMSCRIPTEN)
+   # Don't exit the process on a fatal error, instead throw, so that JS can
+   # catch.
+   add_compile_flag("-DTHROW_ON_FATAL")
+-  install(TARGETS binaryen_js DESTINATION ${CMAKE_INSTALL_BINDIR})
++  install_with_stripped_symbols(binaryen_js TARGETS bin)
+ endif()
+ 
+ configure_file(scripts/binaryen-lit.in ${CMAKE_BINARY_DIR}/bin/binaryen-lit @ONLY)
+-- 
+2.54.0
+
