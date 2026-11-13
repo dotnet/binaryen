@@ -8,7 +8,7 @@ variables:
 - name: WindowsImage
   value: 1es-windows-2022
 - name: MacImage
-  value: macOS-14
+  value: macOS-15
 
 trigger:
   batch: true
