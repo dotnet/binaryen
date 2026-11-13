@@ -66,7 +66,7 @@
       <_CommonCFlags Condition="'$(BuildOS)' == 'Linux' and '$(ClangTarget)' != ''">--target=$(ClangTarget) --gcc-toolchain=$(Sysroot)/usr/ --sysroot=$(Sysroot)</_CommonCFlags>
       <_CommonCFlags Condition="'$(BuildOS)' == 'OSX' and '$(TargetArchitecture)' == 'arm64'">--target=aarch64-apple-darwin</_CommonCFlags>
       <_CommonCXXFlags>$(_CommonCFlags)</_CommonCXXFlags>
-      <_CommonCXXFlags Condition="'$(BuildOS)' == 'Linux'">$(_CommonCXXFlags) -nostdinc++ -I$(MonoLLVMDir)\$(TargetArchitecture)\include\c++\v1</_CommonCXXFlags>
+      <_CommonCXXFlags Condition="'$(BuildOS)' == 'Linux'">$(_CommonCXXFlags) -stdlib=libc++ -nostdinc++ -I$(MonoLLVMDir)\$(TargetArchitecture)\include\c++\v1</_CommonCXXFlags>
       <_CrossCFlags>$(_CommonCFlags)</_CrossCFlags>
       <_CrossCXXFlags>$(_CommonCXXFlags)</_CrossCXXFlags>
       <_ExeLinkerFlags>$(_CommonCFlags)</_ExeLinkerFlags>
