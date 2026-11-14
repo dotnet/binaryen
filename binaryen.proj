@@ -70,9 +70,9 @@
       <_CrossCFlags>$(_CommonCFlags)</_CrossCFlags>
       <_CrossCXXFlags>$(_CommonCXXFlags)</_CrossCXXFlags>
       <_ExeLinkerFlags>$(_CommonCFlags)</_ExeLinkerFlags>
-      <_ExeLinkerFlags Condition="'$(BuildOS)' == 'Linux'">-Wl,--build-id -fuse-ld=lld -lm -lc++ -L$(MonoLLVMDir)\$(TargetArchitecture)\lib $(_ExeLinkerFlags)</_ExeLinkerFlags>
+      <_ExeLinkerFlags Condition="'$(BuildOS)' == 'Linux'">-Wl,--build-id -fuse-ld=lld -stdlib=libc++ -lm -lc++ -L$(MonoLLVMDir)\$(TargetArchitecture)\lib $(_ExeLinkerFlags)</_ExeLinkerFlags>
       <_SharedLinkerFlags>$(_CommonCFlags)</_SharedLinkerFlags>
-      <_SharedLinkerFlags Condition="'$(BuildOS)' == 'Linux'">-Wl,--build-id -fuse-ld=lld -lm -lc++ -L$(MonoLLVMDir)\$(TargetArchitecture)\lib $(_SharedLinkerFlags)</_SharedLinkerFlags>
+      <_SharedLinkerFlags Condition="'$(BuildOS)' == 'Linux'">-Wl,--build-id -fuse-ld=lld -stdlib=libc++ -lm -lc++ -L$(MonoLLVMDir)\$(TargetArchitecture)\lib $(_SharedLinkerFlags)</_SharedLinkerFlags>
     </PropertyGroup>
     <ItemGroup>
       <_BuildArgs Include="-DCMAKE_BUILD_TYPE=RelWithDebInfo" />
