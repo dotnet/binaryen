@@ -43,13 +43,13 @@ extends:
       image: $(WindowsImage)
       os: windows
     containers:
-      mariner2crossamd64:
+      crossamd64:
         image: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net11.0-cross-amd64
-      mariner2crossarm64:
+      crossarm64:
         image: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net11.0-cross-arm64
-      mariner2crossamd64alpine:
+      crossamd64musl:
         image: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net11.0-cross-amd64-musl
-      mariner2crossarm64alpine:
+      crossarm64musl:
         image: mcr.microsoft.com/dotnet-buildtools/prereqs:azurelinux-3.0-net11.0-cross-arm64-musl
     stages:
     - stage: build
@@ -78,7 +78,7 @@ extends:
               name: $(DncEngInternalBuildPool)
               image: $(LinuxImage)
               os: linux
-            container: mariner2crossamd64
+            container: crossamd64
             steps:
             - script: |
                 git clean -ffdx
@@ -111,7 +111,7 @@ extends:
               name: $(DncEngInternalBuildPool)
               image: $(LinuxImage)
               os: linux
-            container: mariner2crossarm64
+            container: crossarm64
             steps:
             - script: |
                 git clean -ffdx
@@ -144,7 +144,7 @@ extends:
               name: $(DncEngInternalBuildPool)
               image: $(LinuxImage)
               os: linux
-            container: mariner2crossamd64alpine
+            container: crossamd64musl
             steps:
             - script: |
                 git clean -ffdx
@@ -177,7 +177,7 @@ extends:
               name: $(DncEngInternalBuildPool)
               image: $(LinuxImage)
               os: linux
-            container: mariner2crossarm64alpine
+            container: crossarm64musl
             steps:
             - script: |
                 git clean -ffdx
