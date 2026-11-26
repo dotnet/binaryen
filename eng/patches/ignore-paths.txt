@@ -1,0 +1,18 @@
+#
+# Paths excluded from the validate.sh diff between the current repo and the patched upstream clone
+#
+.azuredevops
+.config
+.dotnet
+.git
+eng
+.CodeQL.yml
+binaryen.proj
+build.cmd
+build.sh
+cgmanifest.json
+Directory.Build.props
+Directory.Build.targets
+es-metadata.yml
+global.json
+NuGet.config

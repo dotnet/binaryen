@@ -1,0 +1,29 @@
+From 9f5ecc58be61b8e106efbb1ccfbc44263dbf85b7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Alexander=20K=C3=B6plinger?= <alex.koeplinger@outlook.com>
+Date: Mon, 8 Jun 2026 11:40:50 +0200
+Subject: [PATCH] Disable building test/lit
+
+---
+ CMakeLists.txt | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 97863ffb5..e7ad965c8 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -500,8 +500,10 @@ if(BUILD_TOOLS)
+   add_subdirectory(src/tools)
+ endif()
+ 
+-# Configure lit tests
+-add_subdirectory(test/lit)
++if(BUILD_TESTS)
++  # Configure lit tests
++  add_subdirectory(test/lit)
++endif()
+ 
+ if(BUILD_TESTS)
+   # Configure GTest unit tests
+-- 
+2.54.0
+
